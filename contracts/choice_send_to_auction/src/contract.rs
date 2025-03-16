@@ -1,15 +1,15 @@
 use schemars::JsonSchema;
 
-use crate::state::{load_config, save_config, Config, AssetInfo};
-use crate::msg::{InstantiateMsg, ExecuteMsg, QueryMsg};
+use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::state::{load_config, save_config, AssetInfo, Config};
 use cosmwasm_std::{
     entry_point, to_json_binary, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
-    Response, StdError, StdResult, WasmMsg, Uint128
+    Response, StdError, StdResult, Uint128, WasmMsg,
 };
-use cw20::{Cw20ReceiveMsg, Cw20ExecuteMsg};
-use injective_cosmwasm::{InjectiveMsgWrapper, InjectiveRoute, InjectiveMsg};
-use injective_cosmwasm::exchange::subaccount::{checked_address_to_subaccount_id};
-use injective_cosmwasm::exchange::types::{SubaccountId};
+use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
+use injective_cosmwasm::exchange::subaccount::checked_address_to_subaccount_id;
+use injective_cosmwasm::exchange::types::SubaccountId;
+use injective_cosmwasm::{InjectiveMsg, InjectiveMsgWrapper, InjectiveRoute};
 use serde::{Deserialize, Serialize};
 
 use crate::state::Asset;
@@ -56,7 +56,7 @@ pub fn execute(
 ) -> StdResult<Response<InjectiveMsgWrapper>> {
     match msg {
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
-        ExecuteMsg::SendNative {asset} => send_native(deps, env, info, asset),
+        ExecuteMsg::SendNative { asset } => send_native(deps, env, info, asset),
         ExecuteMsg::UpdateAdmin { admin } => update_admin(deps, info, admin),
     }
 }
@@ -106,28 +106,28 @@ pub fn send_native(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    asset: Asset
+    asset: Asset,
 ) -> StdResult<Response<InjectiveMsgWrapper>> {
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
 
     if !asset.info.is_native_token() {
-        return Err(StdError::generic_err("Invalid asset: Expected a native token"));
+        return Err(StdError::generic_err(
+            "Invalid asset: Expected a native token",
+        ));
     }
 
-    send_to_burn_auction(
-        deps,
-        env,
-        info,
-        asset,
-        &mut messages,
-    )?;
+    send_to_burn_auction(deps, env, info, asset, &mut messages)?;
 
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "send_native"))
 }
 
-fn update_admin(deps: DepsMut, info: MessageInfo, admin: String) -> StdResult<Response<InjectiveMsgWrapper>> {
+fn update_admin(
+    deps: DepsMut,
+    info: MessageInfo,
+    admin: String,
+) -> StdResult<Response<InjectiveMsgWrapper>> {
     let config = load_config(deps.as_ref())?;
 
     // Only the current admin can update
@@ -135,10 +135,7 @@ fn update_admin(deps: DepsMut, info: MessageInfo, admin: String) -> StdResult<Re
         return Err(StdError::generic_err("Unauthorized"));
     }
 
-    let new_config = Config {
-        admin,
-        ..config
-    };
+    let new_config = Config { admin, ..config };
     save_config(deps, &new_config)?;
 
     Ok(Response::new().add_attribute("action", "update_admin"))
@@ -160,12 +157,14 @@ pub fn send_to_burn_auction(
     let asset_info = asset.info;
 
     if asset_info.is_native_token() {
-
         if info.funds.is_empty() {
             return Err(StdError::generic_err("No funds provided"));
         }
-    
-        let provided_funds = info.funds.iter().find(|coin| coin.denom == asset_info.to_string());
+
+        let provided_funds = info
+            .funds
+            .iter()
+            .find(|coin| coin.denom == asset_info.to_string());
         match provided_funds {
             Some(coin) => {
                 if coin.amount != burn_amount {
@@ -178,7 +177,7 @@ pub fn send_to_burn_auction(
             None => {
                 return Err(StdError::generic_err(format!(
                     "Mismatched denomination: expected {}, but no matching funds provided",
-                    asset_info.to_string()
+                    asset_info
                 )));
             }
         }
@@ -187,7 +186,7 @@ pub fn send_to_burn_auction(
         let subaccount_id = checked_address_to_subaccount_id(&env.contract.address, 1);
         let deposit_msg = CosmosMsg::Custom(InjectiveMsgWrapper {
             route: InjectiveRoute::Exchange,
-            msg_data: InjectiveMsg::Deposit { 
+            msg_data: InjectiveMsg::Deposit {
                 sender: env.contract.address.clone(),
                 subaccount_id: subaccount_id.clone(),
                 amount: Coin {
@@ -221,23 +220,19 @@ pub fn send_to_burn_auction(
         };
 
         let subaccount_id = checked_address_to_subaccount_id(&env.contract.address, 1);
-        let converted_native_denom = format!(
-            "factory/{}/{}",
-            cw20_adapter_address,
-            cw20_address
-        );
+        let converted_native_denom = format!("factory/{}/{}", cw20_adapter_address, cw20_address);
 
         let adapter_msg = CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: cw20_address.to_string(), 
+            contract_addr: cw20_address.to_string(),
             msg: to_json_binary(&Cw20ExecuteMsg::Send {
                 contract: cw20_adapter_address.to_string(),
-                amount: burn_amount,                      
-                msg: Binary::default(),                   
+                amount: burn_amount,
+                msg: Binary::default(),
             })?,
             funds: vec![],
         });
         messages.push(adapter_msg);
-        
+
         // After conversion, prepare the deposit message
         let deposit_msg = CosmosMsg::Custom(InjectiveMsgWrapper {
             route: InjectiveRoute::Exchange,

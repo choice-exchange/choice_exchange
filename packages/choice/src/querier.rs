@@ -3,11 +3,14 @@ use crate::factory::{NativeTokenDecimalsResponse, QueryMsg as FactoryQueryMsg};
 use crate::pair::{QueryMsg as PairQueryMsg, ReverseSimulationResponse, SimulationResponse};
 
 use injective_cosmwasm::querier::InjectiveQuerier;
-use injective_cosmwasm::tokenfactory::response::{TokenFactoryCreateDenomFeeResponse, TokenFactoryDenomSupplyResponse};
 use injective_cosmwasm::query::InjectiveQueryWrapper;
+use injective_cosmwasm::tokenfactory::response::{
+    TokenFactoryCreateDenomFeeResponse, TokenFactoryDenomSupplyResponse,
+};
 
 use cosmwasm_std::{
-    to_json_binary, Addr, BalanceResponse, BankQuery, Coin, CustomQuery, QuerierWrapper, QueryRequest, StdResult, Uint128, WasmQuery
+    to_json_binary, Addr, BalanceResponse, BankQuery, Coin, CustomQuery, QuerierWrapper,
+    QueryRequest, StdResult, Uint128, WasmQuery,
 };
 
 use cw20::{BalanceResponse as Cw20BalanceResponse, Cw20QueryMsg, TokenInfoResponse};
@@ -66,17 +69,20 @@ pub fn query_token_factory_denom_total_supply(
     querier: &QuerierWrapper<InjectiveQueryWrapper>,
     denom: String,
 ) -> StdResult<Uint128> {
-    let querier: InjectiveQuerier<'_> = InjectiveQuerier::new(&querier);
-    let query_msg: TokenFactoryDenomSupplyResponse = querier.query_token_factory_denom_total_supply(&denom).unwrap();
+    let querier: InjectiveQuerier<'_> = InjectiveQuerier::new(querier);
+    let query_msg: TokenFactoryDenomSupplyResponse = querier
+        .query_token_factory_denom_total_supply(&denom)
+        .unwrap();
     let total_share: Uint128 = query_msg.total_supply;
     Ok(total_share)
 }
 
 pub fn query_token_factory_denom_create_fee(
-    querier: &QuerierWrapper<InjectiveQueryWrapper>
+    querier: &QuerierWrapper<InjectiveQueryWrapper>,
 ) -> StdResult<Vec<Coin>> {
-    let querier: InjectiveQuerier<'_> = InjectiveQuerier::new(&querier);
-    let query_msg: TokenFactoryCreateDenomFeeResponse = querier.query_token_factory_creation_fee().unwrap();
+    let querier: InjectiveQuerier<'_> = InjectiveQuerier::new(querier);
+    let query_msg: TokenFactoryCreateDenomFeeResponse =
+        querier.query_token_factory_creation_fee().unwrap();
     let fee: Vec<Coin> = query_msg.fee;
     Ok(fee)
 }

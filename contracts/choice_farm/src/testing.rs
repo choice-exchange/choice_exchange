@@ -1,14 +1,15 @@
 use crate::contract::{execute, instantiate, query};
 use crate::mock_querier::mock_dependencies;
+use choice::asset::AssetInfo;
 use choice::staking::ExecuteMsg::UpdateConfig;
 use choice::staking::{
     ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg, StakerInfoResponse,
     StateResponse,
 };
-use choice::asset::AssetInfo;
-use cosmwasm_std::testing::{mock_env, message_info};
+use cosmwasm_std::testing::{message_info, mock_env};
 use cosmwasm_std::{
-    attr, from_json, to_json_binary, coins, CosmosMsg, Coin, Decimal, StdError, SubMsg, Uint128, WasmMsg, BankMsg
+    attr, coins, from_json, to_json_binary, BankMsg, Coin, CosmosMsg, Decimal, StdError, SubMsg,
+    Uint128, WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 
@@ -511,7 +512,6 @@ fn test_migrate_staking() {
     // execute migration after 50 seconds
     env.block.time = env.block.time.plus_seconds(50);
 
-
     let msg = ExecuteMsg::MigrateStaking {
         new_staking_contract: deps.api.addr_make("newstaking0000").to_string(),
     };
@@ -693,7 +693,6 @@ fn test_update_config() {
         ],
     };
 
-
     let info = message_info(&deps.api.addr_make("gov0000"), &[]);
     let res = execute(deps.as_mut(), mock_env(), info, update_config);
     match res {
@@ -753,7 +752,8 @@ fn test_update_config() {
         ],
     };
 
-    deps.querier.with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    deps.querier
+        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
 
     let info = message_info(&deps.api.addr_make("gov0000"), &[]);
     let res = execute(deps.as_mut(), mock_env(), info, update_config);
@@ -795,7 +795,8 @@ fn test_update_config() {
         ],
     };
 
-    deps.querier.with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    deps.querier
+        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
 
     let info = message_info(&deps.api.addr_make("gov0000"), &[]);
     let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
@@ -867,7 +868,8 @@ fn test_update_config() {
         ],
     };
 
-    deps.querier.with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    deps.querier
+        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
 
     let info = message_info(&deps.api.addr_make("gov0000"), &[]);
     let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
@@ -938,7 +940,8 @@ fn test_update_config() {
         ],
     };
 
-    deps.querier.with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    deps.querier
+        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
 
     let info = message_info(&deps.api.addr_make("gov0000"), &[]);
     let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
@@ -1014,7 +1017,8 @@ fn test_update_config() {
         ],
     };
 
-    deps.querier.with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    deps.querier
+        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
 
     let info = message_info(&deps.api.addr_make("gov0000"), &[]);
     let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
@@ -1071,13 +1075,19 @@ fn test_instantiate_and_query_native_reward_token() {
 
     // Instantiate the contract with a native reward token (e.g., "inj")
     let msg = InstantiateMsg {
-        reward_token: AssetInfo::NativeToken { denom: "inj".to_string() },
+        reward_token: AssetInfo::NativeToken {
+            denom: "inj".to_string(),
+        },
         staking_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("staking0000").to_string(),
         },
         distribution_schedule: vec![
             (current_time, current_time + 100, Uint128::from(1000000u128)),
-            (current_time + 100, current_time + 200, Uint128::from(10000000u128)),
+            (
+                current_time + 100,
+                current_time + 200,
+                Uint128::from(10000000u128),
+            ),
         ],
     };
 
@@ -1089,7 +1099,10 @@ fn test_instantiate_and_query_native_reward_token() {
     let res = query(deps.as_ref(), env.clone(), QueryMsg::Config {}).unwrap();
     let config: ConfigResponse = from_json(&res).unwrap();
     assert_eq!(config.reward_token, "inj".to_string());
-    assert_eq!(config.staking_token, deps.api.addr_make("staking0000").to_string());
+    assert_eq!(
+        config.staking_token,
+        deps.api.addr_make("staking0000").to_string()
+    );
 }
 
 #[test]
@@ -1100,13 +1113,19 @@ fn test_withdraw_native_reward_token() {
 
     // Instantiate with a native reward token ("inj")
     let msg = InstantiateMsg {
-        reward_token: AssetInfo::NativeToken { denom: "inj".to_string() },
+        reward_token: AssetInfo::NativeToken {
+            denom: "inj".to_string(),
+        },
         staking_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("staking0000").to_string(),
         },
         distribution_schedule: vec![
             (current_time, current_time + 100, Uint128::from(1000000u128)),
-            (current_time + 100, current_time + 200, Uint128::from(10000000u128)),
+            (
+                current_time + 100,
+                current_time + 200,
+                Uint128::from(10000000u128),
+            ),
         ],
     };
 
@@ -1143,7 +1162,7 @@ fn test_withdraw_native_reward_token() {
 }
 
 #[test]
-fn test_bond_native()  {
+fn test_bond_native() {
     let mut deps = mock_dependencies(&[]);
 
     let instantiate_msg = InstantiateMsg {
@@ -1182,7 +1201,9 @@ fn test_bond_native()  {
     );
 
     // Use the new Bond message variant (for native bonding).
-    let bond_msg = ExecuteMsg::Bond { amount: bond_amount };
+    let bond_msg = ExecuteMsg::Bond {
+        amount: bond_amount,
+    };
 
     let res = execute(deps.as_mut(), env.clone(), bond_info, bond_msg).unwrap();
     println!("Bond response: {:?}", res);
@@ -1205,8 +1226,6 @@ fn test_bond_native()  {
 
     // The total bond amount in state should equal the bond_amount.
     assert_eq!(state.total_bond_amount, bond_amount);
-
-   
 }
 
 #[test]
@@ -1235,7 +1254,9 @@ fn test_unbond_native() {
     // Simulate bonding native tokens.
     let bond_amount = Uint128::from(100u128);
     // For native bonding, assume we have an ExecuteMsg::Bond variant.
-    let bond_msg = ExecuteMsg::Bond { amount: bond_amount };
+    let bond_msg = ExecuteMsg::Bond {
+        amount: bond_amount,
+    };
     // The user sends the native tokens in funds.
     let bond_info = message_info(
         &deps.api.addr_make("addr0000"),
@@ -1274,5 +1295,4 @@ fn test_unbond_native() {
     }));
 
     assert_eq!(res_unbond.messages, vec![expected_msg]);
-
 }

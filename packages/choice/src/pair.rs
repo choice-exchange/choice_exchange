@@ -14,7 +14,7 @@ pub struct InstantiateMsg {
     pub token_code_id: u64,
     pub asset_decimals: [u8; 2],
 
-    pub burn_address: String, // New field
+    pub burn_address: String,       // New field
     pub fee_wallet_address: String, // New field
 }
 
@@ -38,7 +38,7 @@ pub enum ExecuteMsg {
         deadline: Option<u64>,
     },
 
-    // Withdraw liquidity 
+    // Withdraw liquidity
     WithdrawLiquidity {
         amount: Uint128,
         min_assets: Option<[Asset; 2]>,

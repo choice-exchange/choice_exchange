@@ -1,9 +1,12 @@
 use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, Coin, ContractResult, Empty, OwnedDeps, Querier, QuerierResult, QueryRequest, SystemError, SystemResult, Uint128, WasmQuery
+    from_json, to_json_binary, Binary, Coin, ContractResult, Empty, OwnedDeps, Querier,
+    QuerierResult, QueryRequest, SystemError, SystemResult, Uint128, WasmQuery,
 };
 use injective_cosmwasm::tokenfactory::response::TokenFactoryCreateDenomFeeResponse;
-use injective_cosmwasm::{HandlesDenomSupplyQuery, InjectiveQuery, InjectiveRoute, HandlesFeeQuery};
+use injective_cosmwasm::{
+    HandlesDenomSupplyQuery, HandlesFeeQuery, InjectiveQuery, InjectiveRoute,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -14,7 +17,7 @@ use crate::factory::{NativeTokenDecimalsResponse, QueryMsg as FactoryQueryMsg};
 use crate::pair::QueryMsg as PairQueryMsg;
 use crate::pair::{ReverseSimulationResponse, SimulationResponse};
 use cw20::{BalanceResponse as Cw20BalanceResponse, Cw20QueryMsg, TokenInfoResponse};
-use injective_cosmwasm::query::{InjectiveQueryWrapper};
+use injective_cosmwasm::query::InjectiveQueryWrapper;
 use injective_cosmwasm::WasmMockQuerier as InjWasmMockQuerier;
 
 use std::iter::FromIterator;
@@ -41,7 +44,7 @@ pub struct WasmMockQuerier {
     choice_factory_querier: ChoiceFactoryQuerier,
     token_factory_denom_total_supply_handler: Option<Box<dyn HandlesDenomSupplyQuery>>,
     token_factory_denom_creation_fee_handler: Option<Box<dyn HandlesFeeQuery>>,
-    inj: InjWasmMockQuerier
+    inj: InjWasmMockQuerier,
 }
 
 #[derive(Clone, Default)]
@@ -171,32 +174,30 @@ impl WasmMockQuerier {
                         let liquidity_token = deps.api.addr_make("liquidity0000").to_string();
                         let burn_address = deps.api.addr_make("burnaddr0000").to_string();
                         let fee_wallet_address = deps.api.addr_make("feeaddr0000").to_string();
-                        
-                        SystemResult::Ok(ContractResult::from(
-                            to_json_binary(&PairInfo {
-                                asset_infos: [
-                                    AssetInfo::NativeToken {
-                                        denom: "inj".to_string(),
-                                    },
-                                    AssetInfo::NativeToken {
-                                        denom: "inj".to_string(),
-                                    },
-                                ],
-                                asset_decimals: [6u8, 6u8],
-                                contract_addr: pair_addr,
-                                liquidity_token,
-                                burn_address,
-                                fee_wallet_address,
-                            })
-                        ))
+
+                        SystemResult::Ok(ContractResult::from(to_json_binary(&PairInfo {
+                            asset_infos: [
+                                AssetInfo::NativeToken {
+                                    denom: "inj".to_string(),
+                                },
+                                AssetInfo::NativeToken {
+                                    denom: "inj".to_string(),
+                                },
+                            ],
+                            asset_decimals: [6u8, 6u8],
+                            contract_addr: pair_addr,
+                            liquidity_token,
+                            burn_address,
+                            fee_wallet_address,
+                        })))
                     }
-                    Ok(PairQueryMsg::Simulation { offer_asset }) => {
-                        SystemResult::Ok(ContractResult::from(to_json_binary(&SimulationResponse {
+                    Ok(PairQueryMsg::Simulation { offer_asset }) => SystemResult::Ok(
+                        ContractResult::from(to_json_binary(&SimulationResponse {
                             return_amount: offer_asset.amount,
                             commission_amount: Uint128::zero(),
                             spread_amount: Uint128::zero(),
-                        })))
-                    }
+                        })),
+                    ),
                     Ok(PairQueryMsg::ReverseSimulation { ask_asset }) => SystemResult::Ok(
                         ContractResult::from(to_json_binary(&ReverseSimulationResponse {
                             offer_amount: ask_asset.amount,
@@ -275,9 +276,9 @@ impl WasmMockQuerier {
             QueryRequest::Custom(custom) => {
                 match custom {
                     // Match on our token factory total supply query variant
-                    InjectiveQueryWrapper { 
-                        route: InjectiveRoute::Tokenfactory, 
-                        query_data: InjectiveQuery::TokenFactoryDenomTotalSupply { denom }
+                    InjectiveQueryWrapper {
+                        route: InjectiveRoute::Tokenfactory,
+                        query_data: InjectiveQuery::TokenFactoryDenomTotalSupply { denom },
                     } => {
                         if let Some(handler) = &self.token_factory_denom_total_supply_handler {
                             // Call our handler to get the total supply
@@ -287,10 +288,10 @@ impl WasmMockQuerier {
                                 kind: "TokenFactoryDenomTotalSupply".to_string(),
                             })
                         }
-                    },
-                    InjectiveQueryWrapper { 
-                        route: InjectiveRoute::Tokenfactory, 
-                        query_data: InjectiveQuery::TokenFactoryDenomCreationFee { }
+                    }
+                    InjectiveQueryWrapper {
+                        route: InjectiveRoute::Tokenfactory,
+                        query_data: InjectiveQuery::TokenFactoryDenomCreationFee {},
                     } => {
                         if let Some(handler) = &self.token_factory_denom_creation_fee_handler {
                             handler.handle()
@@ -299,11 +300,11 @@ impl WasmMockQuerier {
                                 kind: "TokenFactoryDenomCreationFee".to_string(),
                             })
                         }
-                    },
+                    }
                     // Fallback: if it's a Custom query that we don't handle specially, try the base querier.
                     _ => self.inj.handle_query(request),
                 }
-            },
+            }
             _ => {
                 // Convert the custom query into the default type by round-tripping through binary.
                 let bin = match to_json_binary(request) {
@@ -365,7 +366,7 @@ impl HandlesDenomSupplyQuery for MockDenomSupplyHandler {
                     }
                 };
                 SystemResult::Ok(ContractResult::Ok(bin))
-            },
+            }
             None => SystemResult::Err(SystemError::InvalidRequest {
                 error: format!("No supply info for denom: {}", denom),
                 request: Binary::default(),
@@ -373,7 +374,6 @@ impl HandlesDenomSupplyQuery for MockDenomSupplyHandler {
         }
     }
 }
-
 
 // Create a mock fee handler that stores fees in a map (denom -> fee).
 #[derive(Clone, Default)]
@@ -383,10 +383,15 @@ pub struct MockFeeHandler {
 
 impl HandlesFeeQuery for MockFeeHandler {
     fn handle(&self) -> SystemResult<ContractResult<Binary>> {
-        let (denom, amount) = self.fees.iter().next().ok_or(SystemError::InvalidRequest {
-            error: "No fee provided".to_string(),
-            request: Binary::default(),
-        }).unwrap();
+        let (denom, amount) = self
+            .fees
+            .iter()
+            .next()
+            .ok_or(SystemError::InvalidRequest {
+                error: "No fee provided".to_string(),
+                request: Binary::default(),
+            })
+            .unwrap();
 
         let response = TokenFactoryCreateDenomFeeResponse {
             fee: vec![Coin {
@@ -395,10 +400,12 @@ impl HandlesFeeQuery for MockFeeHandler {
             }],
         };
 
-        let bin = to_json_binary(&response).map_err(|e| SystemError::InvalidRequest {
-            error: format!("Serialization error: {}", e),
-            request: Binary::default(),
-        }).unwrap();
+        let bin = to_json_binary(&response)
+            .map_err(|e| SystemError::InvalidRequest {
+                error: format!("Serialization error: {}", e),
+                request: Binary::default(),
+            })
+            .unwrap();
 
         SystemResult::Ok(ContractResult::Ok(bin))
     }
@@ -412,7 +419,7 @@ impl WasmMockQuerier {
             choice_factory_querier: ChoiceFactoryQuerier::default(),
             token_factory_denom_total_supply_handler: None,
             token_factory_denom_creation_fee_handler: None,
-            inj: InjWasmMockQuerier::default()
+            inj: InjWasmMockQuerier::default(),
         }
     }
 
@@ -432,7 +439,9 @@ impl WasmMockQuerier {
 
     pub fn with_balance(&mut self, balances: &[(&String, Vec<Coin>)]) {
         for (addr, balance) in balances {
-            self.base.bank.update_balance(addr.to_string(), balance.clone());
+            self.base
+                .bank
+                .update_balance(addr.to_string(), balance.clone());
         }
     }
 
@@ -451,9 +460,8 @@ impl WasmMockQuerier {
         for (denom, fee) in fees.iter() {
             fee_map.insert(denom.to_string(), *fee);
         }
-        self.token_factory_denom_creation_fee_handler = Some(Box::new(MockFeeHandler {
-            fees: fee_map,
-        }));
+        self.token_factory_denom_creation_fee_handler =
+            Some(Box::new(MockFeeHandler { fees: fee_map }));
     }
 }
 

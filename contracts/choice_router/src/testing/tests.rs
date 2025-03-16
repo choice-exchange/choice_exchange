@@ -1,19 +1,19 @@
-use cosmwasm_std::testing::{mock_env, message_info, MOCK_CONTRACT_ADDR};
+use cosmwasm_std::testing::{message_info, mock_env, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    coin, from_json, to_json_binary, Addr, Api, Coin, CosmosMsg, StdError, SubMsg, Uint128, WasmMsg
+    coin, from_json, to_json_binary, Addr, Api, Coin, CosmosMsg, StdError, SubMsg, Uint128, WasmMsg,
 };
 
 use crate::contract::{execute, instantiate, query};
 use crate::operations::asset_into_swap_msg;
 use choice::mock_querier::mock_dependencies;
 
-use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::pair::ExecuteMsg as PairExecuteMsg;
 use choice::router::{
     ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg,
     SimulateSwapOperationsResponse, SwapOperation,
 };
+use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 
 #[test]
 fn proper_initialization() {
@@ -31,7 +31,10 @@ fn proper_initialization() {
     // it worked, let's query the state
     let config: ConfigResponse =
         from_json(&query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
-    assert_eq!(deps.api.addr_make("choicefactory").to_string(), config.choice_factory.as_str());
+    assert_eq!(
+        deps.api.addr_make("choicefactory").to_string(),
+        config.choice_factory.as_str()
+    );
 }
 
 #[test]
@@ -368,7 +371,7 @@ fn execute_swap_operation() {
         deadline: None,
     };
 
-    let info = message_info( &deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), &[]);
+    let info = message_info(&deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), &[]);
     let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
     assert_eq!(
         res.messages,
@@ -588,7 +591,7 @@ fn query_reverse_routes_with_from_native() {
     deps.querier.with_choice_factory(
         &[
             (
-                 &format!("ukrw{}", deps.api.addr_make("asset0000")),
+                &format!("ukrw{}", deps.api.addr_make("asset0000")),
                 &PairInfo {
                     contract_addr: deps.api.addr_make("pair0000").to_string(),
                     liquidity_token: "liquidity0000".to_string(),
@@ -651,7 +654,10 @@ fn query_reverse_routes_with_from_native() {
         to: None,
         deadline: None,
     };
-    let info = message_info(&deps.api.addr_make("addr0"), &[coin(offer_amount.u128(), "ukrw")]);
+    let info = message_info(
+        &deps.api.addr_make("addr0"),
+        &[coin(offer_amount.u128(), "ukrw")],
+    );
     let res = execute(deps.as_mut(), mock_env(), info, msg.clone());
     match res {
         Err(StdError::GenericErr { msg, .. }) => assert_eq!(msg, "unauthorized"),
@@ -701,7 +707,10 @@ fn query_reverse_routes_with_to_native() {
     deps.querier.with_token_balances(&[
         (
             &deps.api.addr_make("asset0000").to_string(),
-            &[(&deps.api.addr_make("pair0000").to_string(), &Uint128::from(1000000u128))],
+            &[(
+                &deps.api.addr_make("pair0000").to_string(),
+                &Uint128::from(1000000u128),
+            )],
         ),
         (
             &deps.api.addr_make("asset0000").to_string(),
@@ -908,7 +917,10 @@ fn assert_minimum_receive_token() {
     let mut deps = mock_dependencies(&[]);
     deps.querier.with_token_balances(&[(
         &deps.api.addr_make("token0000").to_string(),
-        &[(&deps.api.addr_make("addr0000").to_string(), &Uint128::from(1000000u128))],
+        &[(
+            &deps.api.addr_make("addr0000").to_string(),
+            &Uint128::from(1000000u128),
+        )],
     )]);
 
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);

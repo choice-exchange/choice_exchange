@@ -1,12 +1,14 @@
+use cosmwasm_std::{
+    to_json_binary, Addr, Api, BankMsg, CanonicalAddr, Coin, CosmosMsg, Deps, DepsMut, MessageInfo,
+    QuerierWrapper, StdError, StdResult, SubMsg, Uint128, WasmMsg,
+};
+use cw20::Cw20ExecuteMsg;
 use schemars::JsonSchema;
-use cosmwasm_std::{Deps, DepsMut, StdError, StdResult,
-    CanonicalAddr, Uint128, Addr, CosmosMsg, WasmMsg, BankMsg, Coin, SubMsg, MessageInfo, Api, to_json_binary, QuerierWrapper};
-use cw20::{Cw20ExecuteMsg};
 
-use serde::{Deserialize, Serialize};
-use std::fmt;
 use crate::querier::{query_balance, query_token_balance};
 use cw_storage_plus::Item;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub const CONFIG: Item<Config> = Item::new("config");
 
@@ -84,7 +86,6 @@ impl AssetInfo {
             }
         }
     }
-
 }
 
 impl fmt::Display for AssetInfo {
@@ -95,7 +96,6 @@ impl fmt::Display for AssetInfo {
         }
     }
 }
-
 
 pub fn load_config(deps: Deps) -> StdResult<Config> {
     CONFIG.load(deps.storage)
@@ -207,7 +207,6 @@ pub enum AssetInfoRaw {
     Token { contract_addr: CanonicalAddr },
     NativeToken { denom: String },
 }
-
 
 impl AssetInfoRaw {
     pub fn to_normal(&self, api: &dyn Api) -> StdResult<AssetInfo> {

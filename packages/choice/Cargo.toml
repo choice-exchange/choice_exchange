@@ -5,7 +5,7 @@ authors = [""]
 edition = "2018"
 description = "Common choice types"
 license = "Apache-2.0"
-repository = "https://github.com/danvaneijck/choice_exchange"
+repository = "https://github.com/choice-exchange/choice_exchange"
 homepage = "https://choice.exchange"
 documentation = ""
 
@@ -18,12 +18,12 @@ documentation = ""
 [dependencies]
 cw2                  = { version = "2.0.0" }
 cw20                 = { version = "2.0.0" } 
-cosmwasm-schema      = { version = "1.5.0" }
-cosmwasm-std         = { version = "2.1.0", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
+cosmwasm-schema      = { version = "2.2.2" }
+cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
 
 injective-cosmwasm   = { version = "0.3.1" }
 injective-math       = { version = "0.3.0" }
 
-schemars = "0.8.10"
-serde = { version = "1.0.103", default-features = false, features = ["derive"] }
+schemars = "0.8.22"
+serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 

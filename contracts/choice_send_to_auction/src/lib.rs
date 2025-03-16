@@ -1,10 +1,10 @@
 pub mod contract;
 pub mod error;
 pub mod msg;
-pub mod state;
 pub mod querier;
+pub mod state;
 
 mod tests;
 
-pub use crate::contract::{instantiate, execute, query};
+pub use crate::contract::{execute, instantiate, query};
 pub use crate::error::ContractError;

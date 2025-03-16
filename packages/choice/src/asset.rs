@@ -4,12 +4,12 @@ use std::fmt;
 
 use crate::querier::{query_balance, query_native_decimals, query_token_balance, query_token_info};
 use cosmwasm_std::{
-    to_json_binary, Addr, Api, BankMsg, CanonicalAddr, Coin, CosmosMsg, MessageInfo, QuerierWrapper,
-    StdError, StdResult, SubMsg, Uint128, WasmMsg, CustomQuery
+    to_json_binary, Addr, Api, BankMsg, CanonicalAddr, Coin, CosmosMsg, CustomQuery, MessageInfo,
+    QuerierWrapper, StdError, StdResult, SubMsg, Uint128, WasmMsg,
 };
 use cw20::Cw20ExecuteMsg;
-use injective_cosmwasm::InjectiveMsgWrapper;
 use injective_cosmwasm::query::InjectiveQueryWrapper;
+use injective_cosmwasm::InjectiveMsgWrapper;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Asset {
@@ -165,7 +165,11 @@ impl AssetInfo {
         }
     }
 
-    pub fn query_decimals(&self, account_addr: Addr, querier: &QuerierWrapper<InjectiveQueryWrapper>) -> StdResult<u8> {
+    pub fn query_decimals(
+        &self,
+        account_addr: Addr,
+        querier: &QuerierWrapper<InjectiveQueryWrapper>,
+    ) -> StdResult<u8> {
         match self {
             AssetInfo::NativeToken { denom } => {
                 query_native_decimals(querier, account_addr, denom.to_string())
@@ -254,7 +258,7 @@ pub struct PairInfo {
     pub contract_addr: String,
     pub liquidity_token: String,
     pub asset_decimals: [u8; 2],
-    pub burn_address: String, // New field
+    pub burn_address: String,       // New field
     pub fee_wallet_address: String, // New field
 }
 
@@ -264,7 +268,7 @@ pub struct PairInfoRaw {
     pub contract_addr: CanonicalAddr,
     pub liquidity_token: String,
     pub asset_decimals: [u8; 2],
-    pub burn_address: CanonicalAddr, // New field
+    pub burn_address: CanonicalAddr,       // New field
     pub fee_wallet_address: CanonicalAddr, // New field
 }
 

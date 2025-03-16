@@ -1,9 +1,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use choice::asset::{AssetInfoRaw, AssetRaw, PairInfo, PairInfoRaw};
 use cosmwasm_std::{Addr, Api, CanonicalAddr, Order, StdResult, Storage};
 use cw_storage_plus::{Bound, Item, Map};
-use choice::asset::{AssetInfoRaw, AssetRaw, PairInfo, PairInfoRaw};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Config {
@@ -11,7 +11,7 @@ pub struct Config {
     pub pair_code_id: u64,
     pub token_code_id: u64,
 
-    pub burn_address: CanonicalAddr, // New field
+    pub burn_address: CanonicalAddr,       // New field
     pub fee_wallet_address: CanonicalAddr, // New field
 }
 
