@@ -12,7 +12,8 @@ use cw20::Cw20ExecuteMsg;
 
 use crate::response::MsgInstantiateContractResponse;
 use crate::state::{
-    add_allow_native_token, pair_key, read_pairs, Config, TmpPairInfo, ALLOW_NATIVE_TOKENS, CONFIG, PAIRS, TMP_PAIR_INFO
+    add_allow_native_token, pair_key, read_pairs, Config, TmpPairInfo, ALLOW_NATIVE_TOKENS, CONFIG,
+    PAIRS, TMP_PAIR_INFO,
 };
 
 use choice::asset::{Asset, AssetInfo, AssetInfoRaw, PairInfo, PairInfoRaw};
@@ -65,14 +66,7 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> StdResult<Response> {
     match msg {
-        ExecuteMsg::UpdateConfig {
-            params
-        } => execute_update_config(
-            deps,
-            env,
-            info,
-            params
-        ),
+        ExecuteMsg::UpdateConfig { params } => execute_update_config(deps, env, info, params),
         ExecuteMsg::CreatePair { assets } => execute_create_pair(deps, env, info, assets),
         ExecuteMsg::AddNativeTokenDecimals { denom, decimals } => {
             execute_add_native_token_decimals(deps, env, info, denom, decimals)
@@ -324,7 +318,7 @@ pub fn reply(deps: DepsMut<InjectiveQueryWrapper>, env: Env, msg: Reply) -> StdR
             StdError::parse_err("MsgInstantiateContractResponse", "failed to parse data")
         })?;
 
-    let pair_contract = res.get_address();
+    let pair_contract = &res.address;
     let pair_info = query_pair_info_from_pair(&deps.querier, Addr::unchecked(pair_contract))?;
 
     let raw_infos = [
@@ -398,7 +392,7 @@ pub fn reply(deps: DepsMut<InjectiveQueryWrapper>, env: Env, msg: Reply) -> StdR
     Ok(Response::new()
         .add_attributes(vec![
             ("pair_contract_addr", pair_contract),
-            ("liquidity_token_addr", pair_info.liquidity_token.as_str()),
+            ("liquidity_token_addr", &pair_info.liquidity_token),
         ])
         .add_messages(messages))
 }

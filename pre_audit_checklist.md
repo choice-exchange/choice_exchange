@@ -34,13 +34,13 @@
 
 In addition to the preparation tasks, ensure that the following technical requirements are met prior to the audit:
 
-**Compilation and Testing:** [ ]  
-- Ensure contracts compile and pass all tests using `cargo test`. [ ]  
-- Run `cargo fmt` to format the Rust code for consistency and improved readability. [ ]  
-- Address as many issues as possible reported by `cargo clippy`. [ ]
+**Compilation and Testing:** [x]  
+- Ensure contracts compile and pass all tests using `cargo test`. [x]  
+- Run `cargo fmt` to format the Rust code for consistency and improved readability. [x]  
+- Address as many issues as possible reported by `cargo clippy`. [x]
 
-**Test Coverage:** [ ]  
-- Achieve a minimum of 40% test coverage as reported by `cargo tarpaulin`. [ ]
+**Test Coverage:** [x]  
+- Achieve a minimum of 40% test coverage as reported by `cargo tarpaulin`. [x]
 
 **Dependency Security:** [ ]  
 - Run `cargo audit`. [ ]  

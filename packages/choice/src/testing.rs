@@ -47,34 +47,6 @@ fn balance_querier() {
     );
 }
 
-// #[test]
-// fn all_balances_querier() {
-//     let deps = mock_dependencies(&[
-//         Coin {
-//             denom: "uusd".to_string(),
-//             amount: Uint128::from(200u128),
-//         },
-//         Coin {
-//             denom: "ukrw".to_string(),
-//             amount: Uint128::from(300u128),
-//         },
-//     ]);
-
-//     assert_eq!(
-//         query_all_balances(&deps.as_ref().querier, Addr::unchecked(MOCK_CONTRACT_ADDR),).unwrap(),
-//         vec![
-//             Coin {
-//                 denom: "uusd".to_string(),
-//                 amount: Uint128::from(200u128),
-//             },
-//             Coin {
-//                 denom: "ukrw".to_string(),
-//                 amount: Uint128::from(300u128),
-//             }
-//         ]
-//     );
-// }
-
 #[test]
 fn supply_querier() {
     let mut deps = mock_dependencies(&[]);

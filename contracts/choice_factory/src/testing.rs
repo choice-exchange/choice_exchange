@@ -7,7 +7,8 @@ use crate::state::{pair_key, Config, TmpPairInfo, CONFIG, TMP_PAIR_INFO};
 use crate::response::MsgInstantiateContractResponse;
 use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::factory::{
-    ConfigResponse, ExecuteMsg, InstantiateMsg, NativeTokenDecimalsResponse, QueryMsg, UpdateConfigParams,
+    ConfigResponse, ExecuteMsg, InstantiateMsg, NativeTokenDecimalsResponse, QueryMsg,
+    UpdateConfigParams,
 };
 use choice::pair::{
     ExecuteMsg as PairExecuteMsg, InstantiateMsg as PairInstantiateMsg,
@@ -77,7 +78,9 @@ fn update_config() {
         burn_address: None,
         fee_wallet_address: None,
     };
-    let msg = ExecuteMsg::UpdateConfig { params: update_params };
+    let msg = ExecuteMsg::UpdateConfig {
+        params: update_params,
+    };
 
     let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
     assert_eq!(0, res.messages.len());
@@ -99,7 +102,9 @@ fn update_config() {
         burn_address: None,
         fee_wallet_address: None,
     };
-    let msg = ExecuteMsg::UpdateConfig { params: update_params };
+    let msg = ExecuteMsg::UpdateConfig {
+        params: update_params,
+    };
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
     assert_eq!(0, res.messages.len());
@@ -121,7 +126,9 @@ fn update_config() {
         burn_address: None,
         fee_wallet_address: None,
     };
-    let msg = ExecuteMsg::UpdateConfig { params: update_params };
+    let msg = ExecuteMsg::UpdateConfig {
+        params: update_params,
+    };
 
     let res = execute(deps.as_mut(), env, info, msg);
     match res {
@@ -552,8 +559,7 @@ fn reply_only_create_pair() {
     let expected = MsgInstantiateContractResponse {
         address: deps.api.addr_make("pair0000").to_string(),
         data: vec![],
-        unknown_fields: Default::default(),
-        cached_size: Default::default(),
+        special_fields: Default::default(),
     };
     let expected_bytes = expected.write_to_bytes().unwrap();
     println!("Expected bytes: {}", hex::encode(expected_bytes.clone()));
@@ -689,8 +695,7 @@ fn reply_create_pair_with_provide() {
     let expected = MsgInstantiateContractResponse {
         address: deps.api.addr_make("pair0000").to_string(),
         data: vec![],
-        unknown_fields: Default::default(),
-        cached_size: Default::default(),
+        special_fields: Default::default(),
     };
     let expected_bytes = expected.write_to_bytes().unwrap();
     println!("Expected bytes: {}", hex::encode(expected_bytes.clone()));

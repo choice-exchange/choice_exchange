@@ -8,7 +8,7 @@ pub struct InstantiateMsg {
     pub pair_code_id: u64,
     pub token_code_id: u64,
 
-    pub burn_address: String,       
+    pub burn_address: String,
     pub fee_wallet_address: String,
 }
 
