@@ -1,7 +1,7 @@
 [package]
 name = "choice-farm"
-version = "1.1.0"
-authors = [""]
+version = "1.1.1"
+authors = ["Dan Van Eijck"]
 edition = "2018"
 description = "A Staking contract for Choice Exchange"
 license = "Apache-2.0"
@@ -24,11 +24,19 @@ crate-type = ["cdylib", "rlib"]
 library = []
 
 [dependencies]
-cw20                 = { version = "2.0.0" } 
-cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
-cw-storage-plus      = { version = "2.0.0" }
-cosmwasm-schema      = { version = "2.2.2" }
-choice = { path = "../../packages/choice", default-features = false, version = "1.1.0"}
+cw20              = { version = "2.0.0" }
+cosmwasm-std      = { version = "2.2.2", features = [
+    "abort",
+    "cosmwasm_1_2",
+    "cosmwasm_1_3",
+    "cosmwasm_1_4",
+    "cosmwasm_2_0",
+    "iterator",
+    "stargate"
+] }
+cw-storage-plus   = { version = "2.0.0" }
+cosmwasm-schema   = { version = "2.2.2" }
+choice            = { path = "../../packages/choice", default-features = false, version = "1.1.1" }
 
-schemars = "0.8.22"
-serde = { version = "1.0.219", default-features = false, features = ["derive"] }
+schemars          = "0.8.22"
+serde             = { version = "1.0.219", default-features = false, features = ["derive"] }

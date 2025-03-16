@@ -9,7 +9,7 @@ fn main() {
         .protoc()
         .protoc_path(&protoc_bin_vendored::protoc_bin_path().unwrap())
         // The .proto file is in the src folder.
-        .includes(&["src"])
+        .includes(["src"])
         .input("src/response.proto")
         // Output the generated code directly into src.
         .out_dir("src")

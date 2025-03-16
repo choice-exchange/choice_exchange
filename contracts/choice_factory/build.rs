@@ -10,7 +10,7 @@ fn main() {
         .protoc()
         .protoc_path(&protoc_bin_vendored::protoc_bin_path().unwrap())
         // Tell protoc where to look for imports; here, the .proto is in src.
-        .includes(&["src"])
+        .includes(["src"])
         // Specify the input .proto file.
         .input("src/response.proto")
         // Output the generated Rust code into the same directory ("src").
