@@ -267,7 +267,7 @@ pub fn provide_liquidity(
         let scaling_factor = Uint256::from(1_000_000_000_000_000_000u128);
         let share: Uint128 = (computed.atomics() / scaling_factor)
             .try_into()
-            .map_err(|e| ContractError::ConversionOverflowError(e))?;
+            .map_err(ContractError::ConversionOverflowError)?;
 
         // Mint the minimum liquidity tokens to lock forever (to protect the pair)
         messages.push(create_mint_tokens_msg(

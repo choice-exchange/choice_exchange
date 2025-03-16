@@ -5,12 +5,20 @@ use crate::asset::{Asset, AssetInfo, PairInfo};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct InstantiateMsg {
-    /// Pair contract code ID, which is used to
     pub pair_code_id: u64,
     pub token_code_id: u64,
 
-    pub burn_address: String,       // New field for the burn address
-    pub fee_wallet_address: String, // New field for the fee wallet address
+    pub burn_address: String,       
+    pub fee_wallet_address: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct UpdateConfigParams {
+    pub owner: Option<String>,
+    pub token_code_id: Option<u64>,
+    pub pair_code_id: Option<u64>,
+    pub burn_address: Option<String>,
+    pub fee_wallet_address: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -18,12 +26,7 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
     /// UpdateConfig update relevant code IDs
     UpdateConfig {
-        owner: Option<String>,
-        token_code_id: Option<u64>,
-        pair_code_id: Option<u64>,
-
-        burn_address: Option<String>,       // New field
-        fee_wallet_address: Option<String>, // New field
+        params: UpdateConfigParams,
     },
     /// CreatePair instantiates pair contract
     CreatePair {

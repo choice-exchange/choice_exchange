@@ -12,14 +12,13 @@ use cw20::Cw20ExecuteMsg;
 
 use crate::response::MsgInstantiateContractResponse;
 use crate::state::{
-    add_allow_native_token, pair_key, read_pairs, Config, TmpPairInfo, ALLOW_NATIVE_TOKENS, CONFIG,
-    PAIRS, TMP_PAIR_INFO,
+    add_allow_native_token, pair_key, read_pairs, Config, TmpPairInfo, ALLOW_NATIVE_TOKENS, CONFIG, PAIRS, TMP_PAIR_INFO
 };
 
 use choice::asset::{Asset, AssetInfo, AssetInfoRaw, PairInfo, PairInfoRaw};
 use choice::factory::{
     ConfigResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, NativeTokenDecimalsResponse,
-    PairsResponse, QueryMsg,
+    PairsResponse, QueryMsg, UpdateConfigParams,
 };
 use choice::pair::{
     ExecuteMsg as PairExecuteMsg, InstantiateMsg as PairInstantiateMsg,
@@ -67,20 +66,12 @@ pub fn execute(
 ) -> StdResult<Response> {
     match msg {
         ExecuteMsg::UpdateConfig {
-            owner,
-            token_code_id,
-            pair_code_id,
-            burn_address,       // New field
-            fee_wallet_address, // New field
+            params
         } => execute_update_config(
             deps,
             env,
             info,
-            owner,
-            token_code_id,
-            pair_code_id,
-            burn_address,
-            fee_wallet_address,
+            params
         ),
         ExecuteMsg::CreatePair { assets } => execute_create_pair(deps, env, info, assets),
         ExecuteMsg::AddNativeTokenDecimals { denom, decimals } => {
@@ -97,11 +88,7 @@ pub fn execute_update_config(
     deps: DepsMut<InjectiveQueryWrapper>,
     _env: Env,
     info: MessageInfo,
-    owner: Option<String>,
-    token_code_id: Option<u64>,
-    pair_code_id: Option<u64>,
-    burn_address: Option<String>,       // New field
-    fee_wallet_address: Option<String>, // New field
+    params: UpdateConfigParams,
 ) -> StdResult<Response> {
     let mut config: Config = CONFIG.load(deps.storage)?;
 
@@ -110,26 +97,26 @@ pub fn execute_update_config(
         return Err(StdError::generic_err("unauthorized"));
     }
 
-    if let Some(owner) = owner {
+    if let Some(owner) = params.owner {
         // validate address format
         let _ = deps.api.addr_validate(&owner)?;
 
         config.owner = deps.api.addr_canonicalize(&owner)?;
     }
 
-    if let Some(token_code_id) = token_code_id {
+    if let Some(token_code_id) = params.token_code_id {
         config.token_code_id = token_code_id;
     }
 
-    if let Some(pair_code_id) = pair_code_id {
+    if let Some(pair_code_id) = params.pair_code_id {
         config.pair_code_id = pair_code_id;
     }
 
-    if let Some(burn_address) = burn_address {
+    if let Some(burn_address) = params.burn_address {
         config.burn_address = deps.api.addr_canonicalize(&burn_address)?;
     }
 
-    if let Some(fee_wallet_address) = fee_wallet_address {
+    if let Some(fee_wallet_address) = params.fee_wallet_address {
         config.fee_wallet_address = deps.api.addr_canonicalize(&fee_wallet_address)?;
     }
 

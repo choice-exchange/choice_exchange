@@ -7,7 +7,7 @@ use crate::state::{pair_key, Config, TmpPairInfo, CONFIG, TMP_PAIR_INFO};
 use crate::response::MsgInstantiateContractResponse;
 use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::factory::{
-    ConfigResponse, ExecuteMsg, InstantiateMsg, NativeTokenDecimalsResponse, QueryMsg,
+    ConfigResponse, ExecuteMsg, InstantiateMsg, NativeTokenDecimalsResponse, QueryMsg, UpdateConfigParams,
 };
 use choice::pair::{
     ExecuteMsg as PairExecuteMsg, InstantiateMsg as PairInstantiateMsg,
@@ -57,70 +57,71 @@ fn proper_initialization() {
 fn update_config() {
     let mut deps = mock_dependencies(&[]);
 
+    // Instantiate the contract with initial config
     let msg = InstantiateMsg {
         pair_code_id: 321u64,
         token_code_id: 123u64,
-        burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
-        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
+        burn_address: deps.api.addr_make("burnaddr0000").to_string(),
+        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
     };
 
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
-
-    // we can just call .unwrap() to assert this was a success
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
-    // update owner
+    // Update owner using UpdateConfigParams
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
-
-    let msg = ExecuteMsg::UpdateConfig {
+    let update_params = UpdateConfigParams {
         owner: Some(deps.api.addr_make("addr0001").to_string()),
         pair_code_id: None,
         token_code_id: None,
         burn_address: None,
         fee_wallet_address: None,
     };
+    let msg = ExecuteMsg::UpdateConfig { params: update_params };
 
     let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
     assert_eq!(0, res.messages.len());
 
-    // it worked, let's query the state
+    // Query and check updated state
     let query_res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
     let config_res: ConfigResponse = from_json(&query_res).unwrap();
     assert_eq!(123u64, config_res.token_code_id);
     assert_eq!(321u64, config_res.pair_code_id);
     assert_eq!(deps.api.addr_make("addr0001").to_string(), config_res.owner);
 
-    // update left items
+    // Update other config fields
     let env = mock_env();
     let info = message_info(&deps.api.addr_make("addr0001"), &[]);
-    let msg = ExecuteMsg::UpdateConfig {
+    let update_params = UpdateConfigParams {
         owner: None,
         pair_code_id: Some(100u64),
         token_code_id: Some(200u64),
         burn_address: None,
         fee_wallet_address: None,
     };
+    let msg = ExecuteMsg::UpdateConfig { params: update_params };
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
     assert_eq!(0, res.messages.len());
 
-    // it worked, let's query the state
+    // Query and check updated state
     let query_res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
     let config_res: ConfigResponse = from_json(&query_res).unwrap();
     assert_eq!(200u64, config_res.token_code_id);
     assert_eq!(100u64, config_res.pair_code_id);
     assert_eq!(deps.api.addr_make("addr0001").to_string(), config_res.owner);
 
-    // Unauthorized err
+    // Try an update with unauthorized user
     let env = mock_env();
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
-    let msg = ExecuteMsg::UpdateConfig {
+    let update_params = UpdateConfigParams {
         owner: None,
         pair_code_id: None,
         token_code_id: None,
         burn_address: None,
         fee_wallet_address: None,
     };
+    let msg = ExecuteMsg::UpdateConfig { params: update_params };
 
     let res = execute(deps.as_mut(), env, info, msg);
     match res {

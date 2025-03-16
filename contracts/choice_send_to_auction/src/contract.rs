@@ -177,7 +177,7 @@ pub fn send_to_burn_auction(
             None => {
                 return Err(StdError::generic_err(format!(
                     "Mismatched denomination: expected {}, but no matching funds provided",
-                    asset_info.to_string()
+                    asset_info
                 )));
             }
         }

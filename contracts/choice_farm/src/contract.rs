@@ -74,9 +74,9 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
                 }
                 bond(deps, env, info.sender.clone(), amount)
             } else {
-                return Err(StdError::generic_err(
+                Err(StdError::generic_err(
                     "Cannot call bond directly with non native tokens",
-                ));
+                ))
             }
         }
         ExecuteMsg::Unbond { amount } => unbond(deps, env, info, amount),
@@ -110,7 +110,7 @@ pub fn receive_cw20(
                     }
                 }
                 AssetInfo::NativeToken { ref denom } => {
-                    return Err(StdError::generic_err(&format!(
+                    return Err(StdError::generic_err(format!(
                         "staking token is native: {}",
                         denom
                     )));
@@ -401,8 +401,7 @@ fn compute_reward(config: &Config, state: &mut State, block_time: u64) {
     }
 
     state.last_distributed = block_time;
-    state.global_reward_index = state.global_reward_index
-        + Decimal::from_ratio(distributed_amount, state.total_bond_amount);
+    state.global_reward_index += Decimal::from_ratio(distributed_amount, state.total_bond_amount);
 }
 
 // withdraw reward to pending reward
