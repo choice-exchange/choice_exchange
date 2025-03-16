@@ -1,7 +1,7 @@
 [package]
 name = "choice-pair"
-version = "1.1.0"
-authors = [""]
+version = "1.1.1"
+authors = ["Dan Van Eijck"]
 edition = "2018"
 description = "A Choice pair contract"
 license = "MIT"
@@ -43,7 +43,7 @@ hex                  = { version = "0.4.3" }
 thiserror            = { version = "2.0.12" }
 protobuf             = { version = "3.7.2", features = ["with-bytes"] }
 
-choice = { path = "../../packages/choice", default-features = false, version = "1.1.0"}
+choice = { path = "../../packages/choice", default-features = false, version = "1.1.1"}
 
 [build-dependencies]
 protobuf-codegen = { version = "3.7.2" }

@@ -1,7 +1,7 @@
 [package]
 name = "choice-token"
-version = "1.1.0"
-authors = [""]
+version = "1.1.1"
+authors = ["Dan Van Eijck"]
 edition = "2018"
 description = "Backward compatible implementation of a CosmWasm-20 compliant token"
 license = "MIT"
@@ -25,4 +25,4 @@ cw-storage-plus      = { version = "2.0.0" }
 
 schemars = "0.8.22"
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
-choice = { path = "../../packages/choice", default-features = false, version = "1.1.0"}
+choice = { path = "../../packages/choice", default-features = false, version = "1.1.1"}
