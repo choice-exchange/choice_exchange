@@ -1,15 +1,15 @@
 use cosmwasm_std::{
-    to_json_binary, Addr, Coin, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdError,
-    StdResult, WasmMsg,
+    to_json_binary, Addr, Coin, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response,
+    StdError, StdResult, WasmMsg,
 };
 
 use crate::state::{Config, CONFIG};
 
-use cw20::Cw20ExecuteMsg;
 use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::pair::ExecuteMsg as PairExecuteMsg;
 use choice::querier::{query_balance, query_pair_info, query_token_balance};
 use choice::router::SwapOperation;
+use cw20::Cw20ExecuteMsg;
 use injective_cosmwasm::query::InjectiveQueryWrapper;
 
 /// Execute swap operation
@@ -22,7 +22,6 @@ pub fn execute_swap_operation(
     to: Option<String>,
     deadline: Option<u64>,
 ) -> StdResult<Response> {
-
     println!("env.contract.address: {:?}", env.contract.address);
     println!("info.sender: {:?}", info.sender);
 

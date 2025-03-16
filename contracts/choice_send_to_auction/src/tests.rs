@@ -3,14 +3,14 @@
 #[cfg(test)]
 mod tests {
     use cosmwasm_std::testing::{mock_dependencies, mock_env};
-    use cosmwasm_std::{Addr, MessageInfo, Binary, from_json, Coin};
-    use cw20::{Cw20ReceiveMsg};
+    use cosmwasm_std::{from_json, Addr, Binary, Coin, MessageInfo};
+    use cw20::Cw20ReceiveMsg;
 
-    use crate::msg::InstantiateMsg;
-    use crate::instantiate;
-    use crate::state::{load_config, Asset, AssetInfo, Config};
-    use crate::msg::{ExecuteMsg, QueryMsg};
     use crate::contract::{execute, query};
+    use crate::instantiate;
+    use crate::msg::InstantiateMsg;
+    use crate::msg::{ExecuteMsg, QueryMsg};
+    use crate::state::{load_config, Asset, AssetInfo, Config};
 
     #[test]
     fn test_instantiate_contract() {
@@ -25,7 +25,8 @@ mod tests {
         let msg = InstantiateMsg {
             admin: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
             adapter_contract: "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk".to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
         };
 
         // Call the instantiate function
@@ -39,8 +40,14 @@ mod tests {
 
         // Assert the stored values are correct
         assert_eq!(config.admin, "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz");
-        assert_eq!(config.adapter_contract, "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk");
-        assert_eq!(config.burn_auction_subaccount, "0x1111111111111111111111111111111111111111111111111111111111111111");
+        assert_eq!(
+            config.adapter_contract,
+            "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk"
+        );
+        assert_eq!(
+            config.burn_auction_subaccount,
+            "0x1111111111111111111111111111111111111111111111111111111111111111"
+        );
     }
 
     #[test]
@@ -60,7 +67,8 @@ mod tests {
         let msg = InstantiateMsg {
             admin: initial_admin.to_string(),
             adapter_contract: "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk".to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
         };
         instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
 
@@ -94,7 +102,7 @@ mod tests {
         let contract_address = "inj1l2gcrfr6aenjyt5jddk79j7w5v0twskw6n70y8";
         let mut env = mock_env();
         env.contract.address = Addr::unchecked(contract_address);
-    
+
         let admin_info = MessageInfo {
             sender: Addr::unchecked("inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"),
             funds: vec![Coin {
@@ -102,15 +110,16 @@ mod tests {
                 amount: 1000u128.into(),
             }],
         };
-    
+
         // Instantiate the contract
         let msg = InstantiateMsg {
             admin: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
             adapter_contract: "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk".to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
         };
         instantiate(deps.as_mut(), env.clone(), admin_info.clone(), msg).unwrap();
-    
+
         // Prepare the ExecuteMsg::SendNative message
         let asset = Asset {
             info: AssetInfo::NativeToken {
@@ -119,13 +128,13 @@ mod tests {
             amount: 1000u128.into(),
         };
         let execute_msg = ExecuteMsg::SendNative { asset };
-    
+
         // Call the execute function
         let res = execute(deps.as_mut(), env.clone(), admin_info, execute_msg).unwrap();
-    
+
         // Assert the response attributes
         assert_eq!(res.attributes, vec![("action", "send_native")]);
-    
+
         // Assert that the appropriate messages were created
         assert_eq!(res.messages.len(), 2); // Deposit and Transfer messages
 
@@ -151,7 +160,8 @@ mod tests {
         let msg = InstantiateMsg {
             admin: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
             adapter_contract: "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk".to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
         };
         instantiate(deps.as_mut(), env.clone(), admin_info.clone(), msg).unwrap();
 
@@ -240,7 +250,8 @@ mod tests {
         let msg = InstantiateMsg {
             admin: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
             adapter_contract: "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk".to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
         };
         instantiate(deps.as_mut(), env.clone(), admin_info.clone(), msg).unwrap();
 
@@ -261,6 +272,9 @@ mod tests {
         let err = execute(deps.as_mut(), env, admin_info, execute_msg).unwrap_err();
 
         // Assert the error message
-        assert_eq!(err.to_string(), "Generic error: Invalid asset: Expected a native token");
+        assert_eq!(
+            err.to_string(),
+            "Generic error: Invalid asset: Expected a native token"
+        );
     }
 }

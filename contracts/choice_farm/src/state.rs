@@ -6,7 +6,6 @@ use cw_storage_plus::{Item, Map};
 
 use choice::asset::AssetInfo;
 
-
 /// Store the configuration under the key "config"
 pub const CONFIG: Item<Config> = Item::new("config");
 

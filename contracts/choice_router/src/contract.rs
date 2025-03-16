@@ -10,8 +10,6 @@ use cw2::set_contract_version;
 use crate::operations::execute_swap_operation;
 use crate::state::{Config, CONFIG};
 
-use cw20::Cw20ReceiveMsg;
-use std::collections::HashMap;
 use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::pair::SimulationResponse;
 use choice::querier::{query_pair_info, reverse_simulate, simulate};
@@ -20,7 +18,9 @@ use choice::router::{
     SimulateSwapOperationsResponse, SwapOperation,
 };
 use choice::util::migrate_version;
+use cw20::Cw20ReceiveMsg;
 use injective_cosmwasm::query::InjectiveQueryWrapper;
+use std::collections::HashMap;
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:choice-router";
@@ -46,7 +46,12 @@ pub fn instantiate(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn execute(deps: DepsMut<InjectiveQueryWrapper>, env: Env, info: MessageInfo, msg: ExecuteMsg) -> StdResult<Response> {
+pub fn execute(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+    msg: ExecuteMsg,
+) -> StdResult<Response> {
     match msg {
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
         ExecuteMsg::ExecuteSwapOperations {
@@ -234,10 +239,7 @@ pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> Std
 pub fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> {
     let state = CONFIG.load(deps.storage)?;
     let resp = ConfigResponse {
-        choice_factory: deps
-            .api
-            .addr_humanize(&state.choice_factory)?
-            .to_string(),
+        choice_factory: deps.api.addr_humanize(&state.choice_factory)?.to_string(),
     };
 
     Ok(resp)
@@ -430,7 +432,11 @@ fn test_invalid_operations() {
 
 const TARGET_CONTRACT_VERSION: &str = "0.1.0";
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn migrate(deps: DepsMut<InjectiveQueryWrapper>, _env: Env, _msg: MigrateMsg) -> StdResult<Response> {
+pub fn migrate(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    _env: Env,
+    _msg: MigrateMsg,
+) -> StdResult<Response> {
     migrate_version(
         deps,
         TARGET_CONTRACT_VERSION,

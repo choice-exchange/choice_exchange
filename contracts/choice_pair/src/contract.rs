@@ -5,17 +5,10 @@ use crate::state::PAIR_INFO;
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    coins, from_json, to_json_binary, Addr, BankMsg, Binary, CosmosMsg, Decimal,
-    Decimal256, DepsMut, Deps, Env, MessageInfo, Response, StdResult,
-    Uint128, Uint256, WasmMsg, Coin
+    coins, from_json, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256,
+    Deps, DepsMut, Env, MessageInfo, Response, StdResult, Uint128, Uint256, WasmMsg,
 };
 
-use cw2::set_contract_version;
-use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
-use std::cmp::Ordering;
-use std::convert::TryInto;
-use std::ops::Mul;
-use std::str::FromStr;
 use choice::asset::{Asset, AssetInfo, PairInfo, PairInfoRaw};
 use choice::pair::{
     Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, PoolResponse, QueryMsg,
@@ -23,11 +16,20 @@ use choice::pair::{
 };
 use choice::querier::query_token_factory_denom_total_supply;
 use choice::util::migrate_version;
+use cw2::set_contract_version;
+use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
+use std::cmp::Ordering;
+use std::convert::TryInto;
+use std::ops::Mul;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use injective_cosmwasm::msg::{
+    create_burn_tokens_msg, create_mint_tokens_msg, create_new_denom_msg,
+    create_set_token_metadata_msg,
+};
 use injective_cosmwasm::InjectiveMsgWrapper;
-use injective_cosmwasm::msg::{create_new_denom_msg, create_set_token_metadata_msg, create_mint_tokens_msg, create_burn_tokens_msg};
 
 use injective_cosmwasm::query::InjectiveQueryWrapper;
 
@@ -46,9 +48,9 @@ pub fn instantiate(
     env: Env,
     _info: MessageInfo,
     msg: InstantiateMsg,
-) -> StdResult<Response<InjectiveMsgWrapper>>  {
+) -> StdResult<Response<InjectiveMsgWrapper>> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    
+
     let subdenom = "lp".to_string();
     let lp_denom = format!("factory/{}/{}", env.contract.address, subdenom);
 
@@ -77,8 +79,7 @@ pub fn instantiate(
 
     Ok(Response::new()
         .add_messages(vec![create_msg, metadata_msg])
-        .add_attribute("lp_denom", lp_denom)
-    )
+        .add_attribute("lp_denom", lp_denom))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -105,14 +106,14 @@ pub fn execute(
             slippage_tolerance,
         ),
 
-        ExecuteMsg::WithdrawLiquidity { 
-            amount, 
-            min_assets, 
-            deadline 
+        ExecuteMsg::WithdrawLiquidity {
+            amount,
+            min_assets,
+            deadline,
         } => {
             let sender_addr = info.sender.clone();
             withdraw_liquidity(deps, env, info, sender_addr, amount, min_assets, deadline)
-        },
+        }
 
         ExecuteMsg::Swap {
             offer_asset,
@@ -166,7 +167,7 @@ pub fn receive_cw20(
             let config: PairInfoRaw = PAIR_INFO.load(deps.storage)?;
             let pools: [Asset; 2] =
                 config.query_pools(&deps.querier, deps.api, env.contract.address.clone())?;
-            
+
             for pool in pools.iter() {
                 if let AssetInfo::Token { contract_addr, .. } = &pool.info {
                     if contract_addr == &info.sender.to_string() {
@@ -205,7 +206,6 @@ pub fn receive_cw20(
         Err(err) => Err(ContractError::Std(err)),
     }
 }
-
 
 /// CONTRACT - should approve contract to use the amount of token
 pub fn provide_liquidity(
@@ -250,17 +250,16 @@ pub fn provide_liquidity(
         }
     }
 
-    let total_share: Uint128 = query_token_factory_denom_total_supply(
-        &deps.querier,
-        pair_info.liquidity_token.clone(),
-    ).unwrap();
+    let total_share: Uint128 =
+        query_token_factory_denom_total_supply(&deps.querier, pair_info.liquidity_token.clone())
+            .unwrap();
 
     let share: Uint128 = if total_share.is_zero() {
         println!("Initial share");
         // Initial share = collateral amount
         let deposit0: Uint256 = deposits[0].into();
         let deposit1: Uint256 = deposits[1].into();
-    
+
         // Compute the square root of the product.
         let computed = Decimal256::from_ratio(deposit0.mul(deposit1), 1u8).sqrt();
         // Assume Decimal256 uses 18 decimals. Its internal representation of 1 is 1e18.
@@ -269,7 +268,7 @@ pub fn provide_liquidity(
         let share: Uint128 = (computed.atomics() / scaling_factor)
             .try_into()
             .map_err(|e| ContractError::ConversionOverflowError(e))?;
-    
+
         // Mint the minimum liquidity tokens to lock forever (to protect the pair)
         messages.push(create_mint_tokens_msg(
             env.contract.address.clone(),
@@ -279,7 +278,7 @@ pub fn provide_liquidity(
             },
             env.contract.address.to_string(),
         ));
-    
+
         // Deduct the minimum liquidity amount and return the result.
         share
             .checked_sub(MINIMUM_LIQUIDITY_AMOUNT.into())
@@ -349,7 +348,7 @@ pub fn provide_liquidity(
 
     // mint LP token to sender
     let receiver = receiver.unwrap_or_else(|| info.sender.to_string());
-        messages.push(create_mint_tokens_msg(
+    messages.push(create_mint_tokens_msg(
         env.contract.address.clone(), // use contract as the minter/sender
         Coin {
             denom: pair_info.liquidity_token.clone(), // the LP denom stored as string
@@ -386,12 +385,12 @@ pub fn withdraw_liquidity(
 
     let contract_addr = env.contract.address.clone();
 
-    let pools: [Asset; 2] = pair_info.query_pools(&deps.querier, deps.api, contract_addr.clone())?;
+    let pools: [Asset; 2] =
+        pair_info.query_pools(&deps.querier, deps.api, contract_addr.clone())?;
 
-    let total_share: Uint128 = query_token_factory_denom_total_supply(
-        &deps.querier,
-        pair_info.liquidity_token.clone(),
-    ).unwrap();
+    let total_share: Uint128 =
+        query_token_factory_denom_total_supply(&deps.querier, pair_info.liquidity_token.clone())
+            .unwrap();
 
     let share_ratio: Decimal = Decimal::from_ratio(amount, total_share);
     let refund_assets: Vec<Asset> = pools
@@ -414,7 +413,7 @@ pub fn withdraw_liquidity(
                 contract_addr.clone(), // sender: contract address as the minter/burner
                 Coin {
                     denom: pair_info.liquidity_token.clone(), // our LP denom string
-                    amount, // amount to burn
+                    amount,                                   // amount to burn
                 },
             ),
         ])
@@ -432,7 +431,7 @@ pub fn withdraw_liquidity(
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum BurnManagerMsg {
-    SendNative { asset: Asset }
+    SendNative { asset: Asset },
 }
 
 // CONTRACT - a user must do token approval
@@ -558,9 +557,9 @@ pub fn swap(
             info: ask_pool.info.clone(),
             amount: fee_wallet_amount,
         };
-        messages.push(fee_wallet_asset.into_msg(
-            deps.api.addr_humanize(&pair_info.fee_wallet_address)?,
-        )?);
+        messages.push(
+            fee_wallet_asset.into_msg(deps.api.addr_humanize(&pair_info.fee_wallet_address)?)?,
+        );
     }
 
     // 1. send collateral token from the contract to a user
@@ -582,7 +581,11 @@ pub fn swap(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> Result<Binary, ContractError> {
+pub fn query(
+    deps: Deps<InjectiveQueryWrapper>,
+    _env: Env,
+    msg: QueryMsg,
+) -> Result<Binary, ContractError> {
     match msg {
         QueryMsg::Pair {} => Ok(to_json_binary(&query_pair_info(deps)?)?),
         QueryMsg::Pool {} => Ok(to_json_binary(&query_pool(deps)?)?),
@@ -606,11 +609,10 @@ pub fn query_pool(deps: Deps<InjectiveQueryWrapper>) -> Result<PoolResponse, Con
     let pair_info: PairInfoRaw = PAIR_INFO.load(deps.storage)?;
     let contract_addr = deps.api.addr_humanize(&pair_info.contract_addr)?;
     let assets: [Asset; 2] = pair_info.query_pools(&deps.querier, deps.api, contract_addr)?;
-    
-    let total_share: Uint128 = query_token_factory_denom_total_supply(
-        &deps.querier,
-        pair_info.liquidity_token.clone(),
-    ).unwrap();
+
+    let total_share: Uint128 =
+        query_token_factory_denom_total_supply(&deps.querier, pair_info.liquidity_token.clone())
+            .unwrap();
 
     let resp = PoolResponse {
         assets,
@@ -893,7 +895,11 @@ pub fn assert_deadline(blocktime: u64, deadline: Option<u64>) -> Result<(), Cont
 
 const TARGET_CONTRACT_VERSION: &str = "0.1.1";
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn migrate(deps: DepsMut<InjectiveQueryWrapper>, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+pub fn migrate(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    _env: Env,
+    _msg: MigrateMsg,
+) -> Result<Response, ContractError> {
     migrate_version(
         deps,
         TARGET_CONTRACT_VERSION,

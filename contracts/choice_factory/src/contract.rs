@@ -1,12 +1,14 @@
+use choice::querier::{
+    query_balance, query_pair_info_from_pair, query_token_factory_denom_create_fee,
+};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
     coin, to_json_binary, Addr, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Reply,
-    ReplyOn, Response, StdError, StdResult, SubMsg, WasmMsg, SubMsgResult
+    ReplyOn, Response, StdError, StdResult, SubMsg, SubMsgResult, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::Cw20ExecuteMsg;
-use choice::querier::{query_balance, query_pair_info_from_pair, query_token_factory_denom_create_fee};
 
 use crate::response::MsgInstantiateContractResponse;
 use crate::state::{
@@ -14,7 +16,6 @@ use crate::state::{
     PAIRS, TMP_PAIR_INFO,
 };
 
-use protobuf::Message;
 use choice::asset::{Asset, AssetInfo, AssetInfoRaw, PairInfo, PairInfoRaw};
 use choice::factory::{
     ConfigResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, NativeTokenDecimalsResponse,
@@ -26,6 +27,7 @@ use choice::pair::{
 };
 use choice::util::migrate_version;
 use injective_cosmwasm::query::InjectiveQueryWrapper;
+use protobuf::Message;
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:choice-factory";
@@ -57,7 +59,12 @@ pub fn instantiate(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn execute(deps: DepsMut<InjectiveQueryWrapper>, env: Env, info: MessageInfo, msg: ExecuteMsg) -> StdResult<Response> {
+pub fn execute(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+    msg: ExecuteMsg,
+) -> StdResult<Response> {
     match msg {
         ExecuteMsg::UpdateConfig {
             owner,
@@ -65,7 +72,16 @@ pub fn execute(deps: DepsMut<InjectiveQueryWrapper>, env: Env, info: MessageInfo
             pair_code_id,
             burn_address,       // New field
             fee_wallet_address, // New field
-        } => execute_update_config(deps, env, info, owner, token_code_id, pair_code_id, burn_address, fee_wallet_address),
+        } => execute_update_config(
+            deps,
+            env,
+            info,
+            owner,
+            token_code_id,
+            pair_code_id,
+            burn_address,
+            fee_wallet_address,
+        ),
         ExecuteMsg::CreatePair { assets } => execute_create_pair(deps, env, info, assets),
         ExecuteMsg::AddNativeTokenDecimals { denom, decimals } => {
             execute_add_native_token_decimals(deps, env, info, denom, decimals)
@@ -84,7 +100,7 @@ pub fn execute_update_config(
     owner: Option<String>,
     token_code_id: Option<u64>,
     pair_code_id: Option<u64>,
-    burn_address: Option<String>, // New field
+    burn_address: Option<String>,       // New field
     fee_wallet_address: Option<String>, // New field
 ) -> StdResult<Response> {
     let mut config: Config = CONFIG.load(deps.storage)?;
@@ -208,7 +224,10 @@ pub fn execute_create_pair(
                     token_code_id: config.token_code_id,
                     asset_decimals,
                     burn_address: deps.api.addr_humanize(&config.burn_address)?.to_string(), // Pass burn address
-                    fee_wallet_address: deps.api.addr_humanize(&config.fee_wallet_address)?.to_string(), // Pass fee wallet address
+                    fee_wallet_address: deps
+                        .api
+                        .addr_humanize(&config.fee_wallet_address)?
+                        .to_string(), // Pass fee wallet address
                 })?,
             }),
             reply_on: ReplyOn::Success,
@@ -236,7 +255,9 @@ pub fn execute_add_native_token_decimals(
         let sender_canonical = deps.api.addr_canonicalize(info.sender.as_str())?;
         let owner_in_denom_canonical = deps.api.addr_canonicalize(owner_in_denom)?;
         if sender_canonical != owner_in_denom_canonical && sender_canonical != config.owner {
-            return Err(StdError::generic_err("unauthorized: sender does not match owner in denom"));
+            return Err(StdError::generic_err(
+                "unauthorized: sender does not match owner in denom",
+            ));
         }
     } else {
         // For non-factory denoms, require that the sender is the contract owner.
@@ -306,11 +327,15 @@ pub fn reply(deps: DepsMut<InjectiveQueryWrapper>, env: Env, msg: Reply) -> StdR
     let data_bytes: Binary = if !sub_msg_response.msg_responses.is_empty() {
         sub_msg_response.msg_responses[0].value.clone()
     } else {
-        return Err(StdError::generic_err("no data or msg_responses found in submessage response"));
+        return Err(StdError::generic_err(
+            "no data or msg_responses found in submessage response",
+        ));
     };
 
     let res: MsgInstantiateContractResponse = Message::parse_from_bytes(data_bytes.as_slice())
-        .map_err(|_| StdError::parse_err("MsgInstantiateContractResponse", "failed to parse data"))?;
+        .map_err(|_| {
+            StdError::parse_err("MsgInstantiateContractResponse", "failed to parse data")
+        })?;
 
     let pair_contract = res.get_address();
     let pair_info = query_pair_info_from_pair(&deps.querier, Addr::unchecked(pair_contract))?;
@@ -413,13 +438,19 @@ pub fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigRespon
         pair_code_id: state.pair_code_id,
 
         burn_address: deps.api.addr_humanize(&state.burn_address)?.to_string(), // Return burn address
-        fee_wallet_address: deps.api.addr_humanize(&state.fee_wallet_address)?.to_string(), // Return fee wallet address
+        fee_wallet_address: deps
+            .api
+            .addr_humanize(&state.fee_wallet_address)?
+            .to_string(), // Return fee wallet address
     };
 
     Ok(resp)
 }
 
-pub fn query_pair(deps: Deps<InjectiveQueryWrapper>, asset_infos: [AssetInfo; 2]) -> StdResult<PairInfo> {
+pub fn query_pair(
+    deps: Deps<InjectiveQueryWrapper>,
+    asset_infos: [AssetInfo; 2],
+) -> StdResult<PairInfo> {
     let pair_key = pair_key(&[
         asset_infos[0].to_raw(deps.api)?,
         asset_infos[1].to_raw(deps.api)?,
@@ -459,7 +490,11 @@ pub fn query_native_token_decimal(
 
 const TARGET_CONTRACT_VERSION: &str = "0.1.0";
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn migrate(deps: DepsMut<InjectiveQueryWrapper>, _env: Env, _msg: MigrateMsg) -> StdResult<Response> {
+pub fn migrate(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    _env: Env,
+    _msg: MigrateMsg,
+) -> StdResult<Response> {
     migrate_version(
         deps,
         TARGET_CONTRACT_VERSION,

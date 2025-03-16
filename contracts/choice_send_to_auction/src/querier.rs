@@ -1,7 +1,6 @@
-
 use cosmwasm_std::{
-    to_json_binary, Addr, BalanceResponse, BankQuery, QuerierWrapper,
-    QueryRequest, StdResult, Uint128, WasmQuery,
+    to_json_binary, Addr, BalanceResponse, BankQuery, QuerierWrapper, QueryRequest, StdResult,
+    Uint128, WasmQuery,
 };
 
 use cw20::{BalanceResponse as Cw20BalanceResponse, Cw20QueryMsg, TokenInfoResponse};
@@ -46,4 +45,3 @@ pub fn query_token_info(
 
     Ok(token_info)
 }
-

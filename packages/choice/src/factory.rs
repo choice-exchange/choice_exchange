@@ -9,7 +9,7 @@ pub struct InstantiateMsg {
     pub pair_code_id: u64,
     pub token_code_id: u64,
 
-    pub burn_address: String, // New field for the burn address
+    pub burn_address: String,       // New field for the burn address
     pub fee_wallet_address: String, // New field for the fee wallet address
 }
 
@@ -22,7 +22,7 @@ pub enum ExecuteMsg {
         token_code_id: Option<u64>,
         pair_code_id: Option<u64>,
 
-        burn_address: Option<String>, // New field
+        burn_address: Option<String>,       // New field
         fee_wallet_address: Option<String>, // New field
     },
     /// CreatePair instantiates pair contract
@@ -62,7 +62,7 @@ pub struct ConfigResponse {
     pub pair_code_id: u64,
     pub token_code_id: u64,
 
-    pub burn_address: String, // New field
+    pub burn_address: String,       // New field
     pub fee_wallet_address: String, // New field
 }
 
