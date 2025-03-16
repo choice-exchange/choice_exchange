@@ -228,8 +228,6 @@ pub fn provide_liquidity(
     let mut pools: [Asset; 2] =
         pair_info.query_pools(&deps.querier, deps.api, env.contract.address.clone())?;
 
-    // println!("pools: {:?}", pools);
-
     let deposits: [Uint128; 2] = [
         assets
             .iter()
@@ -242,8 +240,6 @@ pub fn provide_liquidity(
             .map(|a| a.amount)
             .expect("Wrong asset info is given"),
     ];
-
-    // println!("deposits: {:?}", deposits);
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
     for (i, pool) in pools.iter_mut().enumerate() {
@@ -260,6 +256,7 @@ pub fn provide_liquidity(
     ).unwrap();
 
     let share: Uint128 = if total_share.is_zero() {
+        println!("Initial share");
         // Initial share = collateral amount
         let deposit0: Uint256 = deposits[0].into();
         let deposit1: Uint256 = deposits[1].into();
@@ -291,6 +288,7 @@ pub fn provide_liquidity(
                 given_lp: share.to_string(),
             })?
     } else {
+        println!("not Initial share");
         std::cmp::min(
             deposits[0].multiply_ratio(total_share, pools[0].amount),
             deposits[1].multiply_ratio(total_share, pools[1].amount),

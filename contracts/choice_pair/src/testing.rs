@@ -1764,3 +1764,128 @@ fn test_initial_liquidity_provide() {
     ));
     assert_eq!(mint_msg, expected_mint_msg);
 }
+
+#[test]
+fn test_create_pair_simulated() {
+    use cosmwasm_std::{Coin, SubMsg, Uint128, Uint256};
+    // Setup our mock dependencies.
+    let mut deps = mock_dependencies(&[]);
+
+    // Set the token factory supply to zero for the LP token.
+    deps.querier.with_token_factory_denom_supply(&[(
+        &format!("factory/{}/lp", MOCK_CONTRACT_ADDR),
+        Uint128::zero(),
+    )]);
+
+    // Set up the native balance for the contract for the SAI asset.
+    deps.querier.with_balance(&[(
+        &MOCK_CONTRACT_ADDR.to_string(),
+        vec![Coin {
+            denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+            amount: Uint128::from(200000000000u128),
+        }],
+    )]);
+
+    // The CW20 token asset – use the provided contract address.
+    let cw20_addr = deps.api.addr_make("contr0000").to_string();
+    deps.querier.with_token_balances(&[(
+        &cw20_addr.to_string(),
+        &[(&MOCK_CONTRACT_ADDR.to_string(), &Uint128::from(10000000000000000000000000u128))],
+    )]);
+
+    // Instantiate the contract with two assets:
+    // - Asset 0: Native token SAI.
+    // - Asset 1: CW20 token.
+    let instantiate_msg = InstantiateMsg {
+        asset_infos: [
+            AssetInfo::NativeToken {
+                denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+            },
+            AssetInfo::Token {
+                contract_addr: cw20_addr.to_string(),
+            },
+        ],
+        token_code_id: 10u64,
+        // Provide appropriate decimals. (Here we assume asset0 has 6 decimals and asset1 has 8.)
+        asset_decimals: [6u8, 8u8],
+        burn_address: deps.api.addr_make("burnaddr0000").to_string(),
+        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
+    };
+    let env = mock_env();
+    let creator = deps.api.addr_make("creator");
+    let info = message_info(&creator, &[]);
+    let _ = instantiate(deps.as_mut(), env.clone(), info, instantiate_msg).unwrap();
+
+    // Create the pair by executing a CreatePair message.
+    // Assets:
+    // - Native: 200000000000 (SAI)
+    // - CW20: 10000000000000000000000000
+    let create_pair_msg = ExecuteMsg::ProvideLiquidity {
+        assets: [
+            Asset {
+                info: AssetInfo::NativeToken {
+                    denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+                },
+                amount: Uint128::from(200000000000u128),
+            },
+            Asset {
+                info: AssetInfo::Token {
+                    contract_addr: cw20_addr.to_string(),
+                },
+                amount: Uint128::from(10000000000000000000000000u128),
+            },
+        ],
+        receiver: None,
+        deadline: None,
+        slippage_tolerance: None,
+    };
+
+    // For the native asset deposit, the funds are passed along.
+    let exec_env = mock_env();
+    let exec_info = message_info(
+        &creator,
+        &[Coin {
+            denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+            amount: Uint128::from(200000000000u128),
+        }],
+    );
+    let res = execute(deps.as_mut(), exec_env, exec_info, create_pair_msg).unwrap();
+
+    // --- Compute the expected LP token amount ---
+    // The contract computes share as:
+    //     share = sqrt( deposit_cw20 * deposit_native )
+    // Where:
+    //     deposit_cw20 = 10000000000000000000000000
+    //     deposit_native = 200000000000
+    let deposit0 = Uint256::from(10000000000000000000000000u128);
+    let deposit1 = Uint256::from(200000000000u128);
+    let product = deposit0 * deposit1;
+    let sqrt_decimal = Decimal256::from_ratio(product, Uint256::one()).sqrt();
+    let scaled_share = sqrt_decimal.atomics();
+    // Remove the fixed-point scaling (assume 18 decimals, so divide by 1e18)
+    let scaling_factor = Uint256::from(1_000_000_000_000_000_000u128);
+    let plain_share: Uint128 = (scaled_share / scaling_factor)
+        .try_into()
+        .unwrap();
+    // The contract subtracts a minimum liquidity amount (assumed here to be 1000).
+    let expected_provider_lp = plain_share.checked_sub(Uint128::from(1000u128)).unwrap();
+
+    // --- Verify the response messages ---
+    // We expect three messages:
+    // 1. A mint message for MINIMUM_LIQUIDITY_AMOUNT LP tokens to the contract.
+    // 2. A transfer message moving CW20 tokens from the creator to the contract.
+    // 3. A mint message that mints (computed share - MINIMUM_LIQUIDITY_AMOUNT) LP tokens to the creator.
+    assert_eq!(res.messages.len(), 3);
+
+    // Check that the third message is the mint message with the expected LP token amount.
+    let mint_msg = res.messages.get(2).expect("no mint msg").clone();
+    let expected_mint_msg = SubMsg::new(create_mint_tokens_msg(
+        deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // contract address
+        Coin {
+            denom: format!("factory/{}/lp", MOCK_CONTRACT_ADDR.to_string()),
+            amount: expected_provider_lp,
+        },
+        creator.to_string(), // mint to creator
+    ));
+    assert_eq!(mint_msg, expected_mint_msg);
+}
