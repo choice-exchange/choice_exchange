@@ -430,7 +430,7 @@ fn test_invalid_operations() {
     .is_ok());
 }
 
-const TARGET_CONTRACT_VERSION: &str = "0.1.0";
+const TARGET_CONTRACT_VERSION: &str = "1.1.1";
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(
     deps: DepsMut<InjectiveQueryWrapper>,

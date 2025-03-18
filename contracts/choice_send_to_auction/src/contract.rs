@@ -1,7 +1,8 @@
 use schemars::JsonSchema;
 
-use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{load_config, save_config, AssetInfo, Config};
+use crate::state::{load_config, save_config, Config};
+use choice::asset::{Asset, AssetInfo};
+use choice::send_to_auction::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use cosmwasm_std::{
     entry_point, to_json_binary, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
     Response, StdError, StdResult, Uint128, WasmMsg,
@@ -11,8 +12,6 @@ use injective_cosmwasm::exchange::subaccount::checked_address_to_subaccount_id;
 use injective_cosmwasm::exchange::types::SubaccountId;
 use injective_cosmwasm::{InjectiveMsg, InjectiveMsgWrapper, InjectiveRoute};
 use serde::{Deserialize, Serialize};
-
-use crate::state::Asset;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub enum AdapterExecuteMsg {

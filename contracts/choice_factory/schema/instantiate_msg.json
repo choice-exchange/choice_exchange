@@ -16,7 +16,6 @@
       "type": "string"
     },
     "pair_code_id": {
-      "description": "Pair contract code ID, which is used to",
       "type": "integer",
       "format": "uint64",
       "minimum": 0.0
@@ -26,5 +25,6 @@
       "format": "uint64",
       "minimum": 0.0
     }
-  }
+  },
+  "additionalProperties": false
 }

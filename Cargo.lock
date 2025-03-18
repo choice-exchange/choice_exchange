@@ -316,6 +316,7 @@ dependencies = [
 name = "choice-send-to-auction"
 version = "1.1.1"
 dependencies = [
+ "choice",
  "cosmwasm-schema",
  "cosmwasm-std",
  "cw-storage-plus",
@@ -329,21 +330,6 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "thiserror 2.0.12",
-]
-
-[[package]]
-name = "choice-token"
-version = "1.1.1"
-dependencies = [
- "choice",
- "cosmwasm-schema",
- "cosmwasm-std",
- "cw-storage-plus",
- "cw2",
- "cw20",
- "cw20-base",
- "schemars",
- "serde",
 ]
 
 [[package]]
@@ -589,23 +575,6 @@ dependencies = [
  "cw-utils",
  "schemars",
  "serde",
-]
-
-[[package]]
-name = "cw20-base"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6de8c32e100f1fca306972d86b617234a5e6b00594ea2b48716fd6804d4d95d"
-dependencies = [
- "cosmwasm-schema",
- "cosmwasm-std",
- "cw-storage-plus",
- "cw2",
- "cw20",
- "schemars",
- "semver",
- "serde",
- "thiserror 1.0.69",
 ]
 
 [[package]]

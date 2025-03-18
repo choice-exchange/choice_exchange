@@ -1,0 +1,3 @@
+[alias]
+unit-test = "test --lib"
+schema = "run --example send_to_auction_schema"

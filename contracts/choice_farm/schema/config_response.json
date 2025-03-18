@@ -1,22 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SimulationResponse",
-  "description": "SimulationResponse returns swap simulation response",
+  "title": "ConfigResponse",
   "type": "object",
   "required": [
-    "commission_amount",
-    "return_amount",
-    "spread_amount"
+    "distribution_schedule",
+    "reward_token",
+    "staking_token"
   ],
   "properties": {
-    "commission_amount": {
-      "$ref": "#/definitions/Uint128"
+    "distribution_schedule": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": [
+          {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          {
+            "$ref": "#/definitions/Uint128"
+          }
+        ],
+        "maxItems": 3,
+        "minItems": 3
+      }
     },
-    "return_amount": {
-      "$ref": "#/definitions/Uint128"
+    "reward_token": {
+      "type": "string"
     },
-    "spread_amount": {
-      "$ref": "#/definitions/Uint128"
+    "staking_token": {
+      "type": "string"
     }
   },
   "additionalProperties": false,

@@ -8,14 +8,14 @@ The contract will check whether the resulting token is swapped into one token.
 
 ### Example
 
-Swap Luna => DELIGHT => TNT
+Swap INJ  =>  CW20_TOKEN  =>  CW20_TOKEN_2
 
 ```json
 {
    "execute_swap_operations":{
       "operations":[
          {
-            "terra_swap":{
+            "choice":{
                "offer_asset_info":{
                   "native_token":{
                      "denom":"inj"
@@ -23,21 +23,21 @@ Swap Luna => DELIGHT => TNT
                },
                "ask_asset_info":{
                   "token":{
-                     "contract_addr":"terra1cl0kw9axzpzkw58snj6cy0hfp0xp8xh9tudpw2exvzuupn3fafwqqhjc24"
+                     "contract_addr":"injcw20contract..."
                   }
                }
             }
          },
          {
-            "terra_swap":{
+            "choice":{
                "offer_asset_info":{
                   "token":{
-                     "contract_addr":"terra1cl0kw9axzpzkw58snj6cy0hfp0xp8xh9tudpw2exvzuupn3fafwqqhjc24"
+                     "contract_addr":"injcw20contract..."
                   }
                },
                "ask_asset_info":{
                   "token":{
-                     "contract_addr":"terra1qnypzwqa03h8vqs0sxjp8hxw0xy5zfwyax26jgnl5k4lw92tjw0scdkrzm"
+                     "contract_addr":"injcw20contract2..."
                   }
                }
             }
