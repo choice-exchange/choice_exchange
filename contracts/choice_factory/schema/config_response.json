@@ -6,8 +6,7 @@
     "burn_address",
     "fee_wallet_address",
     "owner",
-    "pair_code_id",
-    "token_code_id"
+    "pair_code_id"
   ],
   "properties": {
     "burn_address": {
@@ -20,11 +19,6 @@
       "type": "string"
     },
     "pair_code_id": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "token_code_id": {
       "type": "integer",
       "format": "uint64",
       "minimum": 0.0

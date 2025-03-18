@@ -46,7 +46,6 @@ pub fn instantiate(
 
     let config = Config {
         owner: deps.api.addr_canonicalize(info.sender.as_str())?,
-        token_code_id: msg.token_code_id,
         pair_code_id: msg.pair_code_id,
 
         burn_address: deps.api.addr_canonicalize(&msg.burn_address)?, // Store burn address
@@ -96,10 +95,6 @@ pub fn execute_update_config(
         let _ = deps.api.addr_validate(&owner)?;
 
         config.owner = deps.api.addr_canonicalize(&owner)?;
-    }
-
-    if let Some(token_code_id) = params.token_code_id {
-        config.token_code_id = token_code_id;
     }
 
     if let Some(pair_code_id) = params.pair_code_id {
@@ -202,7 +197,6 @@ pub fn execute_create_pair(
                 label: "pair".to_string(),
                 msg: to_json_binary(&PairInstantiateMsg {
                     asset_infos,
-                    token_code_id: config.token_code_id,
                     asset_decimals,
                     burn_address: deps.api.addr_humanize(&config.burn_address)?.to_string(), // Pass burn address
                     fee_wallet_address: deps
@@ -415,7 +409,6 @@ pub fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigRespon
     let state: Config = CONFIG.load(deps.storage)?;
     let resp = ConfigResponse {
         owner: deps.api.addr_humanize(&state.owner)?.to_string(),
-        token_code_id: state.token_code_id,
         pair_code_id: state.pair_code_id,
 
         burn_address: deps.api.addr_humanize(&state.burn_address)?.to_string(), // Return burn address

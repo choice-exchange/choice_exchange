@@ -6,8 +6,7 @@
     "asset_decimals",
     "asset_infos",
     "burn_address",
-    "fee_wallet_address",
-    "token_code_id"
+    "fee_wallet_address"
   ],
   "properties": {
     "asset_decimals": {
@@ -34,12 +33,6 @@
     },
     "fee_wallet_address": {
       "type": "string"
-    },
-    "token_code_id": {
-      "description": "Token contract code id for initialization",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
     }
   },
   "additionalProperties": false,

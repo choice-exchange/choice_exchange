@@ -29,7 +29,6 @@ fn proper_initialization() {
 
     let msg = InstantiateMsg {
         pair_code_id: 321u64,
-        token_code_id: 123u64,
         burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
     };
@@ -41,7 +40,6 @@ fn proper_initialization() {
 
     let query_res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
     let config_res: ConfigResponse = from_json(&query_res).unwrap();
-    assert_eq!(123u64, config_res.token_code_id);
     assert_eq!(321u64, config_res.pair_code_id);
     assert_eq!(deps.api.addr_make("addr0000").to_string(), config_res.owner);
     assert_eq!(
@@ -61,7 +59,6 @@ fn update_config() {
     // Instantiate the contract with initial config
     let msg = InstantiateMsg {
         pair_code_id: 321u64,
-        token_code_id: 123u64,
         burn_address: deps.api.addr_make("burnaddr0000").to_string(),
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
     };
@@ -74,7 +71,6 @@ fn update_config() {
     let update_params = UpdateConfigParams {
         owner: Some(deps.api.addr_make("addr0001").to_string()),
         pair_code_id: None,
-        token_code_id: None,
         burn_address: None,
         fee_wallet_address: None,
     };
@@ -88,7 +84,6 @@ fn update_config() {
     // Query and check updated state
     let query_res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
     let config_res: ConfigResponse = from_json(&query_res).unwrap();
-    assert_eq!(123u64, config_res.token_code_id);
     assert_eq!(321u64, config_res.pair_code_id);
     assert_eq!(deps.api.addr_make("addr0001").to_string(), config_res.owner);
 
@@ -98,7 +93,6 @@ fn update_config() {
     let update_params = UpdateConfigParams {
         owner: None,
         pair_code_id: Some(100u64),
-        token_code_id: Some(200u64),
         burn_address: None,
         fee_wallet_address: None,
     };
@@ -112,7 +106,6 @@ fn update_config() {
     // Query and check updated state
     let query_res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
     let config_res: ConfigResponse = from_json(&query_res).unwrap();
-    assert_eq!(200u64, config_res.token_code_id);
     assert_eq!(100u64, config_res.pair_code_id);
     assert_eq!(deps.api.addr_make("addr0001").to_string(), config_res.owner);
 
@@ -122,7 +115,6 @@ fn update_config() {
     let update_params = UpdateConfigParams {
         owner: None,
         pair_code_id: None,
-        token_code_id: None,
         burn_address: None,
         fee_wallet_address: None,
     };
@@ -144,7 +136,6 @@ fn init(
 
     let msg = InstantiateMsg {
         pair_code_id: 321u64,
-        token_code_id: 123u64,
         burn_address: mock_api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: mock_api.addr_make("feeaddr0000").to_string(), // New field
     };
@@ -232,7 +223,6 @@ fn create_pair() {
                             contract_addr: deps.api.addr_make("asset0001").to_string(),
                         }
                     ],
-                    token_code_id: 123u64,
                     asset_decimals: [6u8, 8u8],
                     burn_address: deps.api.addr_make("burnaddr0000").to_string(), // Add burn address
                     fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // Add fee wallet address
@@ -340,7 +330,6 @@ fn create_pair_native_token_and_ibc_token() {
                             denom: "ibc/HASH".to_string(),
                         }
                     ],
-                    token_code_id: 123u64,
                     asset_decimals: [6u8, 6u8],
                     burn_address: mock_api.addr_make("burnaddr0000").to_string(), // Add burn address
                     fee_wallet_address: mock_api.addr_make("feeaddr0000").to_string(), // Add fee wallet address
@@ -490,7 +479,6 @@ fn reply_only_create_pair() {
                     .api
                     .addr_canonicalize(&deps.api.addr_make("owner0000").to_string())
                     .unwrap(),
-                token_code_id: 123u64,
                 pair_code_id: 321u64,
                 burn_address: deps
                     .api
@@ -629,7 +617,6 @@ fn reply_create_pair_with_provide() {
                     .api
                     .addr_canonicalize(&deps.api.addr_make("owner0000").to_string())
                     .unwrap(),
-                token_code_id: 123u64,
                 pair_code_id: 321u64,
                 burn_address: deps
                     .api
@@ -1032,7 +1019,6 @@ fn test_execute_add_native_token_decimals_factory() {
                     .api
                     .addr_canonicalize(&deps.api.addr_make("owner0000").to_string())
                     .unwrap(),
-                token_code_id: 123u64,
                 pair_code_id: 321u64,
                 burn_address: deps
                     .api

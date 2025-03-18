@@ -39,3 +39,9 @@ docker run --rm -v "$(pwd)":/code \
 ```
 
 The optimized contracts are generated in the artifacts/ directory.
+
+## Deploy to testnet example
+
+Set your injective cli configuration variables in the deploy script file:
+
+[deploy_testnet.sh](deploy_testnet.sh)

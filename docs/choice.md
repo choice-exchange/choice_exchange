@@ -9,7 +9,6 @@
   Creates new pair contracts (liquidity pools) and acts as a directory for all pairs.
 - **Key Parameters:**  
   - `pair_code_id`: Code ID for the pair contract.
-  - `token_code_id`: Code ID for the token contract used in pair creation.
   - `burn_address`: The deployed **send_to_auction** contract address.
   - `fee_wallet_address`: Address where 0.05% of swap fees are sent (Choice fee wallet).
 - **Token Registration:**  

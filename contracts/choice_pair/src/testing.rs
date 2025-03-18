@@ -35,7 +35,6 @@ fn proper_initialization() {
                 contract_addr: deps.api.addr_make("asset0000").to_string(),
             },
         ],
-        token_code_id: 10u64,
         asset_decimals: [6u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
@@ -131,7 +130,6 @@ fn provide_liquidity() {
                 contract_addr: deps.api.addr_make("asset0000").to_string(),
             },
         ],
-        token_code_id: 10u64,
         asset_decimals: [6u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
@@ -566,7 +564,6 @@ fn withdraw_liquidity() {
                 contract_addr: deps.api.addr_make("asset0000").to_string(),
             },
         ],
-        token_code_id: 10u64,
         asset_decimals: [6u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
@@ -732,7 +729,6 @@ fn try_native_to_token() {
                 contract_addr: deps.api.addr_make("asset0000").to_string(),
             },
         ],
-        token_code_id: 10u64,
         asset_decimals: [6u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
@@ -913,7 +909,6 @@ fn try_token_to_native() {
                 contract_addr: deps.api.addr_make("asset0000").to_string(),
             },
         ],
-        token_code_id: 10u64,
         asset_decimals: [8u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
@@ -1313,7 +1308,6 @@ fn test_query_pool() {
                 contract_addr: deps.api.addr_make("asset0000").to_string(),
             },
         ],
-        token_code_id: 10u64,
         asset_decimals: [6u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(), // New field
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(), // New field
@@ -1688,7 +1682,6 @@ fn test_initial_liquidity_provide() {
                 contract_addr: deps.api.addr_make("asset0000").to_string(),
             },
         ],
-        token_code_id: 10u64,
         asset_decimals: [6u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(),
         fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
@@ -1813,7 +1806,6 @@ fn test_create_pair_simulated() {
                 contract_addr: cw20_addr.to_string(),
             },
         ],
-        token_code_id: 10u64,
         // Provide appropriate decimals. (Here we assume asset0 has 6 decimals and asset1 has 8.)
         asset_decimals: [6u8, 8u8],
         burn_address: deps.api.addr_make("burnaddr0000").to_string(),
