@@ -1,16 +1,16 @@
 ## Audit Preparation Checklist
 
-**Identify the Audit Scope:** [ ]  
-- Determine the specific areas of the codebase that will be audited. [ ]  
-- Identify any dependencies that should be included in the audit. [ ]
+**Identify the Audit Scope:** [x]  
+- Determine the specific areas of the codebase that will be audited. [x]  
+- Identify any dependencies that should be included in the audit. [x]
 
 **Gather Documentation:** [ ]  
 - Collect all relevant documents (e.g., whitepapers, technical specifications, architectural diagrams). [ ]  
 - Ensure documentation is comprehensive, up-to-date, and accessible to the auditors. [ ]
 
 **Provide Access to the Codebase:** [ ]  
-- Grant access to the complete smart contract codebase, including all relevant files and dependencies. [ ]  
-- Host the code in a secure repository to allow safe auditor access. [ ]
+- Grant access to the complete smart contract codebase, including all relevant files and dependencies. [x]  
+- Host the code in a secure repository to allow safe auditor access. [x]
 
 **Share Deployment Information:** [ ]  
 - Provide details of any deployed contracts, including:  
@@ -42,17 +42,17 @@ In addition to the preparation tasks, ensure that the following technical requir
 **Test Coverage:** [x]  
 - Achieve a minimum of 40% test coverage as reported by `cargo tarpaulin`. [x]
 
-**Dependency Security:** [ ]  
-- Run `cargo audit`. [ ]  
-- Ensure that no problematic dependencies are flagged to avoid potential supply chain attacks. [ ]
+**Dependency Security:** [x]  
+- Run `cargo audit`. [x]  
+- Ensure that no problematic dependencies are flagged to avoid potential supply chain attacks. [x]
 
 **Code Freeze:** [ ]  
 - Ensure the code freeze hash remains unchanged during the audit. [ ]  
 - Avoid any new commits or alterations while the audit is in progress. [ ]
 
 **Code Hygiene:** [ ]  
-- Remove all unreachable code. [ ]  
-- Address or remove any leftover `//TODO` comments. [ ]  
-- Eliminate non-relevant file templates or leftover boilerplate files. [ ]
+- Remove all unreachable code. [x]  
+- Address or remove any leftover `//TODO` comments. [x]  
+- Eliminate non-relevant file templates or leftover boilerplate files. [x]
 
 ---

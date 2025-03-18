@@ -461,7 +461,7 @@ fn fail_to_create_pair_with_unknown_token() {
         },
         Asset {
             info: AssetInfo::Token {
-                contract_addr: "terra123".to_string(),
+                contract_addr: "inj123".to_string(),
             },
             amount: Uint128::zero(),
         },

@@ -1,6 +1,10 @@
 # Choice Exchange Smart Contracts
 
-Choice Exchange is an AMM protocol forked from TerraSwap
+Choice Exchange is an AMM protocol forked from TerraSwap, modernized to work on the Injective blockchain.
+
+0.05% of all swap fees sent straight to the Injective burn auction basket 🔥
+
+[Contracts Documentation](docs/choice.md)
 
 ## Main changes
 
@@ -12,11 +16,16 @@ The Choice exchange protocol has extended the contracts of TerraSwap in several 
 
 ### Burn wallet address
 
-The burn wallet address refers to a custom contract `choice_send_to_auction` which accepts both cw20 and native denoms. This contract sends the funds to the Injective burn action basket. 
+The burn wallet address refers to a custom contract `choice_send_to_auction` which accepts both cw20 and native denoms. This contract sends the funds to the Injective burn action basket.
 
 ### Fee wallet address
 
 The fee wallet address is a wallet where a part of the swap fee is sent.
+
+## Development
+
+`cargo build`
+`cargo test`
 
 ## Build
 

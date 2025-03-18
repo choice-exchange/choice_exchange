@@ -1,18 +1,22 @@
+
 # Choice Factory
 
-The factory contract can perform creation of choice pair contract and also be used as directory contract for all pairs.
+The factory contract can create choice pair contracts and also act as a directory for all pairs. The sender of the instantiation message becomes the owner of the factory contract.
 
 ## InstantiateMsg
-Register verified pair contract and token contract for pair contract creation. The sender will be the owner of the factory contract.
+
+This message registers the verified pair contract and token contract for subsequent pair creation. In addition to specifying the code IDs for the pair and token contracts, you also provide:
+- **burn_address:** The address of the send_to_auction contract.
+- **fee_wallet_address:** The address where fees will be collected.
+
+Example:
 
 ```json
 {
   "pair_code_id": 123,
   "token_code_id": 123,
-  "init_hook": {
-    "msg": "123",
-    "contract_addr": "terra..."
-  }
+  "burn_address": "inj1abc...xyz",
+  "fee_wallet_address": "inj1def...uvw"
 }
 ```
 
@@ -24,15 +28,21 @@ Change the factory contract's owner and relevant code IDs for future pair contra
 ```json
 {
   "update_config": {
-    "owner": "terra...",
+    "owner": "inj...",
     "token_id": 123,
-    "pair_code_id": 123
+    "pair_code_id": 123,
+    "burn_address": "inj1abc...xyz",
+    "fee_wallet_address": "inj1def...uvw"
   }
 }
 ```
 
 ### `create_pair`
-When a user executes `CreatePair` operation, it creates `Pair` contract and `LP(liquidity provider)` token contract.
+When a user executes `CreatePair` operation, it creates `Pair` contract and `LP(liquidity provider)` token denom using the Injective token factory module.
+
+Injective has a fee which is set on chain. Currently 1 INJ testnet and 0.1 INJ mainnet.
+
+The pair contract is the lp denom owner. Therefore if the pair contract is `inj123` then the lp denom is `factory/inj123/lp`
 
 In order to create pairs with native tokens, including IBC tokens, they must first be registered with their decimals by the factory contract owner. See [add_native_token_decimals](#add_native_token_decimals) for more details.
 
@@ -43,7 +53,7 @@ In order to create pairs with native tokens, including IBC tokens, they must fir
       {
         "info": {
           "token": {
-            "contract_addr": "terra..."
+            "contract_addr": "inj..."
           }
         },
         "amount": "0"
@@ -62,9 +72,14 @@ In order to create pairs with native tokens, including IBC tokens, they must fir
 ```
 
 ### `add_native_token_decimals`
-This operation which is only allowed for the factory contract owner, registers native tokens (including IBC tokens) along with their decimals.
 
-The contract will create a new pair using the provided token information if the pair contains a token registered by this operation,
+This operation is allowed only for the factory contract owner and registers native tokens (including IBC tokens) along with their decimals.
+
+When a new pair is created and includes a token that was registered via this operation, the contract will automatically use the provided token information to create the pair.
+
+**Note:** The contract must hold at least 1 unit of the token in its balance to verify the token’s decimals.
+
+Additionally, token factory creators can use this function to register the decimals for tokens they have created.
 
 ```json
 {
@@ -80,7 +95,7 @@ The contract will create a new pair using the provided token information if the 
 ```json
 {
   "migrate_pair": {
-    "contract": "terra...",
+    "contract": "inj...",
     "code_id": 123
   }
 }
@@ -104,7 +119,7 @@ The contract will create a new pair using the provided token information if the 
     "asset_infos": [
       {
         "token": {
-          "contract_addr": "terra..."
+          "contract_addr": "inj..."
         }
       },
       {
@@ -125,7 +140,7 @@ The contract will create a new pair using the provided token information if the 
     "start_after": [
       {
         "token": {
-          "contract_addr": "terra..."
+          "contract_addr": "inj..."
         }
       },
       {
