@@ -11,6 +11,8 @@ PASSWORD="12345678"
 
 # Admin address variable. Address of FROM
 ADMIN_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"
+# An address to send the dex fees to
+FEE_WALLET_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"
 
 # Helper function to store a contract.
 # Expects one argument: the wasm file path.
@@ -105,7 +107,7 @@ BURN_MANAGER_ADDRESS=$(instantiate_contract "$BURN_MANAGER_CODE_ID" "$INIT_BURN"
 INIT_FACTORY=$(cat <<EOF
 {
   "burn_address": "$BURN_MANAGER_ADDRESS",
-  "fee_wallet_address": "$ADMIN_ADDRESS",
+  "fee_wallet_address": "$FEE_WALLET_ADDRESS",
   "pair_code_id": $PAIR_CODE_ID
 }
 EOF
@@ -144,5 +146,6 @@ printf "  %-20s %s\n" "Burn Manager:" "$BURN_MANAGER_ADDRESS"
 printf "  %-20s %s\n" "Factory:" "$FACTORY_ADDRESS"
 printf "  %-20s %s\n" "Router:" "$ROUTER_ADDRESS"
 echo ""
+printf "Fee Wallet Address:        %s\n" "$FEE_WALLET_ADDRESS"
 printf "Admin Address:        %s\n" "$ADMIN_ADDRESS"
 echo "-------------------------------"

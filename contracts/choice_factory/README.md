@@ -5,7 +5,7 @@ The factory contract can create choice pair contracts and also act as a director
 
 ## InstantiateMsg
 
-This message registers the verified pair contract and token contract for subsequent pair creation. In addition to specifying the code ID for the pair contract, you also provide:
+This message registers the verified pair contract for subsequent pair creation. In addition to specifying the code ID for the pair contract, you also provide:
 - **burn_address:** The address of the send_to_auction contract.
 - **fee_wallet_address:** The address where fees will be collected.
 
