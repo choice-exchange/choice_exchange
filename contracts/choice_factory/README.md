@@ -5,7 +5,7 @@ The factory contract can create choice pair contracts and also act as a director
 
 ## InstantiateMsg
 
-This message registers the verified pair contract and token contract for subsequent pair creation. In addition to specifying the code IDs for the pair and token contracts, you also provide:
+This message registers the verified pair contract and token contract for subsequent pair creation. In addition to specifying the code ID for the pair contract, you also provide:
 - **burn_address:** The address of the send_to_auction contract.
 - **fee_wallet_address:** The address where fees will be collected.
 
@@ -14,7 +14,6 @@ Example:
 ```json
 {
   "pair_code_id": 123,
-  "token_code_id": 123,
   "burn_address": "inj1abc...xyz",
   "fee_wallet_address": "inj1def...uvw"
 }
@@ -29,7 +28,6 @@ Change the factory contract's owner and relevant code IDs for future pair contra
 {
   "update_config": {
     "owner": "inj...",
-    "token_id": 123,
     "pair_code_id": 123,
     "burn_address": "inj1abc...xyz",
     "fee_wallet_address": "inj1def...uvw"

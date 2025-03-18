@@ -63,8 +63,6 @@ The **instantiate** function is primarily called from the Choice Factory contrac
 pub struct InstantiateMsg {
     /// Asset infos for the pair.
     pub asset_infos: [AssetInfo; 2],
-    /// Token contract code id for initialization.
-    pub token_code_id: u64,
     /// Decimals for each asset.
     pub asset_decimals: [u8; 2],
     /// Address used for send_to_auction contract (fee burning).

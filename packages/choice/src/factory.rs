@@ -6,8 +6,6 @@ use crate::asset::{Asset, AssetInfo, PairInfo};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct InstantiateMsg {
     pub pair_code_id: u64,
-    pub token_code_id: u64,
-
     pub burn_address: String,
     pub fee_wallet_address: String,
 }
@@ -15,7 +13,6 @@ pub struct InstantiateMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct UpdateConfigParams {
     pub owner: Option<String>,
-    pub token_code_id: Option<u64>,
     pub pair_code_id: Option<u64>,
     pub burn_address: Option<String>,
     pub fee_wallet_address: Option<String>,
@@ -63,7 +60,6 @@ pub enum QueryMsg {
 pub struct ConfigResponse {
     pub owner: String,
     pub pair_code_id: u64,
-    pub token_code_id: u64,
 
     pub burn_address: String,       // New field
     pub fee_wallet_address: String, // New field
