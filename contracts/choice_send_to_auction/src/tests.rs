@@ -2,15 +2,15 @@
 
 #[cfg(test)]
 mod tests {
+    use choice::asset::{Asset, AssetInfo};
+    use choice::send_to_auction::{ExecuteMsg, InstantiateMsg, QueryMsg};
     use cosmwasm_std::testing::{mock_dependencies, mock_env};
     use cosmwasm_std::{from_json, Addr, Binary, Coin, MessageInfo};
     use cw20::Cw20ReceiveMsg;
 
     use crate::contract::{execute, query};
     use crate::instantiate;
-    use crate::msg::InstantiateMsg;
-    use crate::msg::{ExecuteMsg, QueryMsg};
-    use crate::state::{load_config, Asset, AssetInfo, Config};
+    use crate::state::{load_config, Config};
 
     #[test]
     fn test_instantiate_contract() {

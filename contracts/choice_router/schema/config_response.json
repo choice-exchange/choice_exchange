@@ -9,5 +9,6 @@
     "choice_factory": {
       "type": "string"
     }
-  }
+  },
+  "additionalProperties": false
 }

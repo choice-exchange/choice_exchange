@@ -1,7 +1,7 @@
 use std::env::current_dir;
 use std::fs::create_dir_all;
 
-use choice::asset::{Asset, AssetInfo, PairInfo};
+use choice::send_to_auction::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 
 fn main() {
@@ -10,7 +10,7 @@ fn main() {
     create_dir_all(&out_dir).unwrap();
     remove_schemas(&out_dir).unwrap();
 
-    export_schema(&schema_for!(PairInfo), &out_dir);
-    export_schema(&schema_for!(Asset), &out_dir);
-    export_schema(&schema_for!(AssetInfo), &out_dir);
+    export_schema(&schema_for!(InstantiateMsg), &out_dir);
+    export_schema(&schema_for!(ExecuteMsg), &out_dir);
+    export_schema(&schema_for!(QueryMsg), &out_dir);
 }

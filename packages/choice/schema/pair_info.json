@@ -5,7 +5,9 @@
   "required": [
     "asset_decimals",
     "asset_infos",
+    "burn_address",
     "contract_addr",
+    "fee_wallet_address",
     "liquidity_token"
   ],
   "properties": {
@@ -27,13 +29,20 @@
       "maxItems": 2,
       "minItems": 2
     },
+    "burn_address": {
+      "type": "string"
+    },
     "contract_addr": {
+      "type": "string"
+    },
+    "fee_wallet_address": {
       "type": "string"
     },
     "liquidity_token": {
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "definitions": {
     "AssetInfo": {
       "description": "AssetInfo contract_addr is usually passed from the cw20 hook so we can trust the contract_addr is properly validated.",
@@ -53,7 +62,8 @@
                 "contract_addr": {
                   "type": "string"
                 }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -73,7 +83,8 @@
                 "denom": {
                   "type": "string"
                 }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false

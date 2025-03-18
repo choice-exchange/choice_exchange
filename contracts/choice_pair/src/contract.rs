@@ -893,7 +893,7 @@ pub fn assert_deadline(blocktime: u64, deadline: Option<u64>) -> Result<(), Cont
     Ok(())
 }
 
-const TARGET_CONTRACT_VERSION: &str = "0.1.1";
+const TARGET_CONTRACT_VERSION: &str = "1.1.1";
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(
     deps: DepsMut<InjectiveQueryWrapper>,

@@ -3,10 +3,18 @@
   "title": "InstantiateMsg",
   "type": "object",
   "required": [
-    "choice_factory"
+    "adapter_contract",
+    "admin",
+    "burn_auction_subaccount"
   ],
   "properties": {
-    "choice_factory": {
+    "adapter_contract": {
+      "type": "string"
+    },
+    "admin": {
+      "type": "string"
+    },
+    "burn_auction_subaccount": {
       "type": "string"
     }
   },

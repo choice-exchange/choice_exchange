@@ -1,27 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "TokenInfoResponse",
+  "title": "ConfigResponse",
   "type": "object",
   "required": [
-    "decimals",
-    "name",
-    "symbol",
-    "total_supply"
+    "distribution_schedule",
+    "reward_token",
+    "staking_token"
   ],
   "properties": {
-    "decimals": {
-      "type": "integer",
-      "format": "uint8",
-      "minimum": 0.0
+    "distribution_schedule": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": [
+          {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          {
+            "$ref": "#/definitions/Uint128"
+          }
+        ],
+        "maxItems": 3,
+        "minItems": 3
+      }
     },
-    "name": {
+    "reward_token": {
       "type": "string"
     },
-    "symbol": {
+    "staking_token": {
       "type": "string"
-    },
-    "total_supply": {
-      "$ref": "#/definitions/Uint128"
     }
   },
   "additionalProperties": false,

@@ -3,6 +3,7 @@ pub mod factory;
 pub mod pair;
 pub mod querier;
 pub mod router;
+pub mod send_to_auction;
 pub mod staking;
 pub mod token;
 pub mod util;

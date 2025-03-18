@@ -19,6 +19,7 @@
       "$ref": "#/definitions/Uint128"
     }
   },
+  "additionalProperties": false,
   "definitions": {
     "Asset": {
       "type": "object",
@@ -33,7 +34,8 @@
         "info": {
           "$ref": "#/definitions/AssetInfo"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "AssetInfo": {
       "description": "AssetInfo contract_addr is usually passed from the cw20 hook so we can trust the contract_addr is properly validated.",
@@ -53,7 +55,8 @@
                 "contract_addr": {
                   "type": "string"
                 }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -73,7 +76,8 @@
                 "denom": {
                   "type": "string"
                 }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
