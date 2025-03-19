@@ -77,16 +77,16 @@ instantiate_contract() {
 #############################
 
 # 1. Store pair contract 
-PAIR_CODE_ID=$(store_contract "artifacts/choice_pair.wasm")
+PAIR_CODE_ID=$(store_contract "../artifacts/choice_pair.wasm")
 
 # 2. Store factory contract 
-FACTORY_CODE_ID=$(store_contract "artifacts/choice_factory.wasm")
+FACTORY_CODE_ID=$(store_contract "../artifacts/choice_factory.wasm")
 
 # 3. Store burn manager (send_to_auction) contract 
-BURN_MANAGER_CODE_ID=$(store_contract "artifacts/choice_send_to_auction.wasm")
+BURN_MANAGER_CODE_ID=$(store_contract "../artifacts/choice_send_to_auction.wasm")
 
 # 4. Store cw20 adapter contract 
-CW20_ADAPTER_CODE_ID=$(store_contract "cw20_adapter/cw20_adapter.wasm")
+CW20_ADAPTER_CODE_ID=$(store_contract "../cw20_adapter/cw20_adapter.wasm")
 
 # 5. Instantiate cw20 adapter
 INIT_CW20='{}'
@@ -115,7 +115,7 @@ EOF
 FACTORY_ADDRESS=$(instantiate_contract "$FACTORY_CODE_ID" "$INIT_FACTORY" "FactoryContractInstance" "$ADMIN_ADDRESS")
 
 # 8. Store router contract 
-ROUTER_CODE_ID=$(store_contract "artifacts/choice_router.wasm")
+ROUTER_CODE_ID=$(store_contract "../artifacts/choice_router.wasm")
 
 # 9. Instantiate router contract 
 INIT_ROUTER=$(cat <<EOF
