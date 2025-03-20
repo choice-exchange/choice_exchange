@@ -23,3 +23,7 @@
 
 - **Fee Wallet Address:** `inj1nwk46lyvhmdj5hr8ynwdvz0jaa4men9ce2gt58`
 - **Admin Address:** `inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz`
+
+## Testnet dApp
+
+You can interact with the contracts at https://testnet.choice.exchange (code `letmein`)
