@@ -22,9 +22,6 @@ pub fn execute_swap_operation(
     to: Option<String>,
     deadline: Option<u64>,
 ) -> StdResult<Response> {
-    println!("env.contract.address: {:?}", env.contract.address);
-    println!("info.sender: {:?}", info.sender);
-
     if env.contract.address != info.sender {
         return Err(StdError::generic_err("unauthorized"));
     }

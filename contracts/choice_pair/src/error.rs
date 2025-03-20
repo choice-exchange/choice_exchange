@@ -33,6 +33,9 @@ pub enum ContractError {
     #[error("Max slippage assertion")]
     MaxSlippageAssertion {},
 
+    #[error("Invalid LP token funds provided; expected a matching LP token with the exact withdrawal amount")]
+    InvalidLiquidityFunds {},
+
     #[error("More initial liquidity needed ({min_lp_token} > {given_lp})")]
     MinimumLiquidityAmountError {
         min_lp_token: String,

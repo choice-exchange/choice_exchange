@@ -12,7 +12,7 @@ PASSWORD="12345678"
 # Admin address variable. Address of FROM
 ADMIN_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"
 # An address to send the dex fees to
-FEE_WALLET_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"
+FEE_WALLET_ADDRESS="inj1nwk46lyvhmdj5hr8ynwdvz0jaa4men9ce2gt58"
 
 # Helper function to store a contract.
 # Expects one argument: the wasm file path.

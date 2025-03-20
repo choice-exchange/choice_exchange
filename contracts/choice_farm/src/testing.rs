@@ -1205,8 +1205,7 @@ fn test_bond_native() {
         amount: bond_amount,
     };
 
-    let res = execute(deps.as_mut(), env.clone(), bond_info, bond_msg).unwrap();
-    println!("Bond response: {:?}", res);
+    execute(deps.as_mut(), env.clone(), bond_info, bond_msg).unwrap();
 
     // Query staker info.
     let staker_query = QueryMsg::StakerInfo {

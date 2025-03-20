@@ -11,7 +11,7 @@ FROM="testnet"
 PASSWORD="12345678"
 
 # Factory contract address (update this to your deployed factory contract address)
-FACTORY_CONTRACT="inj1hyzac6zqgh938rx44yws5qa9g75au6c2mfrdj9"
+FACTORY_CONTRACT="inj185n47hcx7lm4art0j8sm2yu4a7pdnpgdpjrcsy"
 
 # Admin address that sends the bank funds (update to admin of the factory contract)
 ADMIN_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"

@@ -550,7 +550,6 @@ fn reply_only_create_pair() {
         special_fields: Default::default(),
     };
     let expected_bytes = expected.write_to_bytes().unwrap();
-    println!("Expected bytes: {}", hex::encode(expected_bytes.clone()));
 
     #[allow(deprecated)]
     let reply_msg = Reply {
@@ -685,7 +684,6 @@ fn reply_create_pair_with_provide() {
         special_fields: Default::default(),
     };
     let expected_bytes = expected.write_to_bytes().unwrap();
-    println!("Expected bytes: {}", hex::encode(expected_bytes.clone()));
 
     #[allow(deprecated)]
     let reply_msg = Reply {
@@ -1050,7 +1048,6 @@ fn test_execute_add_native_token_decimals_factory() {
         decimals,
     )
     .unwrap();
-    println!("Response attributes: {:?}", res.attributes);
     // Check that the response has the expected attributes.
     assert!(res
         .attributes

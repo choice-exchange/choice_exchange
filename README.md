@@ -6,6 +6,8 @@ Choice Exchange is an AMM protocol forked from TerraSwap, modernized to work on 
 
 [Contracts Documentation](docs/choice.md)
 
+[Testnet Contracts](deployed_contracts.md)
+
 ## Main changes
 
 The Choice exchange protocol has extended the contracts of TerraSwap in several ways.

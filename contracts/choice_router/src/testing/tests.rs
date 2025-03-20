@@ -332,7 +332,6 @@ fn execute_swap_operation() {
 
     let sender = deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap();
     let info = message_info(&sender, &[]);
-    println!("msg info: {:?}", info);
 
     let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
 
