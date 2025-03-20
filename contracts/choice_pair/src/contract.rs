@@ -255,7 +255,6 @@ pub fn provide_liquidity(
             .unwrap();
 
     let share: Uint128 = if total_share.is_zero() {
-        println!("Initial share");
         // Initial share = collateral amount
         let deposit0: Uint256 = deposits[0].into();
         let deposit1: Uint256 = deposits[1].into();
@@ -287,7 +286,6 @@ pub fn provide_liquidity(
                 given_lp: share.to_string(),
             })?
     } else {
-        println!("not Initial share");
         std::cmp::min(
             deposits[0].multiply_ratio(total_share, pools[0].amount),
             deposits[1].multiply_ratio(total_share, pools[1].amount),
@@ -382,6 +380,16 @@ pub fn withdraw_liquidity(
     assert_deadline(env.block.time.seconds(), deadline)?;
 
     let pair_info: PairInfoRaw = PAIR_INFO.load(deps.storage)?;
+
+    // Ensure that the transaction includes at least one coin matching the LP token denomination
+    // and with an amount exactly equal to the withdrawal amount.
+    let valid = _info
+        .funds
+        .iter()
+        .any(|coin| coin.denom == pair_info.liquidity_token && coin.amount == amount);
+    if !valid {
+        return Err(ContractError::InvalidLiquidityFunds {});
+    }
 
     let contract_addr = env.contract.address.clone();
 

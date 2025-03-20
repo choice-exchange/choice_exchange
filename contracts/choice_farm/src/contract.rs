@@ -64,11 +64,11 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
                     amount,
                 };
 
-                // Check that info.funds contains a coin with the expected denom and at least the expected amount.
+                // Check that info.funds contains a coin with the expected denom and matches the expected amount.
                 let found = info
                     .funds
                     .iter()
-                    .find(|&c| c.denom == expected_coin.denom && c.amount >= expected_coin.amount);
+                    .find(|&c| c.denom == expected_coin.denom && c.amount == expected_coin.amount);
                 if found.is_none() {
                     return Err(StdError::generic_err("Insufficient funds for bonding"));
                 }

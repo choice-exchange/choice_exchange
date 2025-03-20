@@ -574,7 +574,7 @@ fn withdraw_liquidity() {
     // we can just call .unwrap() to assert this was a success
     let _res = instantiate(deps.as_mut(), env, info, msg).unwrap();
 
-    // withdraw liquidity
+    // failed to withdraw liquidity, did not pass funds
     let msg = ExecuteMsg::WithdrawLiquidity {
         min_assets: None,
         deadline: None,
@@ -582,7 +582,30 @@ fn withdraw_liquidity() {
     };
 
     let env = mock_env();
-    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[], // empty funds
+    );
+    let res = execute(deps.as_mut(), env, info, msg).unwrap_err();
+
+    assert_eq!(res, ContractError::InvalidLiquidityFunds {});
+
+    // withdraw liquidity, passing lp funds
+    let msg = ExecuteMsg::WithdrawLiquidity {
+        min_assets: None,
+        deadline: None,
+        amount: Uint128::from(100u128),
+    };
+
+    let env = mock_env();
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[Coin {
+            // pass lp denom with exact amount to burn
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            amount: Uint128::from(100u128),
+        }],
+    );
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
@@ -662,7 +685,13 @@ fn withdraw_liquidity() {
     };
 
     let env = mock_env();
-    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[Coin {
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            amount: Uint128::from(100u128),
+        }],
+    );
     let res = execute(deps.as_mut(), env, info, msg).unwrap_err();
 
     assert_eq!(
