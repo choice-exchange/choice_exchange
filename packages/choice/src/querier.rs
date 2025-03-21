@@ -28,15 +28,6 @@ pub fn query_balance<Q: CustomQuery>(
     Ok(balance.amount.amount)
 }
 
-// pub fn query_all_balances<Q: CustomQuery>(querier: &QuerierWrapper<Q>, account_addr: Addr) -> StdResult<Vec<Coin>> {
-//     // load price form the oracle
-//     let all_balances: AllBalanceResponse =
-//         querier.query(&QueryRequest::Bank(BankQuery::AllBalances {
-//             address: account_addr.to_string(),
-//         }))?;
-//     Ok(all_balances.amount)
-// }
-
 pub fn query_token_balance<Q: CustomQuery>(
     querier: &QuerierWrapper<Q>,
     contract_addr: Addr,

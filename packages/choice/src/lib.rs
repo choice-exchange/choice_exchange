@@ -5,7 +5,6 @@ pub mod querier;
 pub mod router;
 pub mod send_to_auction;
 pub mod staking;
-pub mod token;
 pub mod util;
 
 #[cfg(not(target_arch = "wasm32"))]

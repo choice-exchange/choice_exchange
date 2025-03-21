@@ -46,4 +46,4 @@ The optimized contracts are generated in the artifacts/ directory.
 
 Set your injective cli configuration variables in the deploy script file:
 
-[deploy_testnet.sh](deploy_testnet.sh)
+[deploy_testnet.sh](testnet_deploy/deploy_testnet.sh)
