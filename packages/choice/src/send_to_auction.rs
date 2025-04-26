@@ -15,12 +15,16 @@ pub struct InstantiateMsg {
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
     Receive(Cw20ReceiveMsg),
-    SendNative { asset: Asset },
+    SendNative {
+        asset: Asset,
+    },
     UpdateConfig {
         adapter_contract: Option<String>,
         burn_auction_subaccount: Option<String>,
     },
-    ProposeNewOwner { new_owner: String },
+    ProposeNewOwner {
+        new_owner: String,
+    },
     AcceptOwnership,
     CancelOwnershipProposal,
 }
