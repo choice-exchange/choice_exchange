@@ -3,6 +3,13 @@
   "title": "ExecuteMsg",
   "oneOf": [
     {
+      "type": "string",
+      "enum": [
+        "accept_ownership",
+        "cancel_ownership_proposal"
+      ]
+    },
+    {
       "description": "UpdateConfig update relevant code IDs",
       "type": "object",
       "required": [
@@ -106,6 +113,52 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "withdraw_native"
+      ],
+      "properties": {
+        "withdraw_native": {
+          "type": "object",
+          "required": [
+            "amount",
+            "denom"
+          ],
+          "properties": {
+            "amount": {
+              "$ref": "#/definitions/Uint128"
+            },
+            "denom": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "propose_new_owner"
+      ],
+      "properties": {
+        "propose_new_owner": {
+          "type": "object",
+          "required": [
+            "new_owner"
+          ],
+          "properties": {
+            "new_owner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   ],
   "definitions": {
@@ -186,12 +239,6 @@
           ]
         },
         "fee_wallet_address": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "owner": {
           "type": [
             "string",
             "null"

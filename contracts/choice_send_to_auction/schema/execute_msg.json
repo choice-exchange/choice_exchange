@@ -3,6 +3,13 @@
   "title": "ExecuteMsg",
   "oneOf": [
     {
+      "type": "string",
+      "enum": [
+        "accept_ownership",
+        "cancel_ownership_proposal"
+      ]
+    },
+    {
       "type": "object",
       "required": [
         "receive"
@@ -38,16 +45,16 @@
     {
       "type": "object",
       "required": [
-        "update_admin"
+        "propose_new_owner"
       ],
       "properties": {
-        "update_admin": {
+        "propose_new_owner": {
           "type": "object",
           "required": [
-            "admin"
+            "new_owner"
           ],
           "properties": {
-            "admin": {
+            "new_owner": {
               "type": "string"
             }
           },

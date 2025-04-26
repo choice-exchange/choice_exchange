@@ -27,7 +27,7 @@ pub fn get_burn_auction_subaccount(deps: Deps) -> StdResult<SubaccountId> {
     let burn_auction_subaccount = config.burn_auction_subaccount;
 
     SubaccountId::new(burn_auction_subaccount)
-        .map_err(|_| StdError::generic_err("Invalid burn auction sub_account ID"))
+        .map_err(|_| StdError::generic_err("Invalid burn auction subaccount ID"))
 }
 
 #[entry_point]
