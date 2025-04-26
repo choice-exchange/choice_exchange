@@ -66,6 +66,10 @@ pub fn execute(
         }
         ExecuteMsg::AcceptOwnership => execute_accept_ownership(deps, info),
         ExecuteMsg::CancelOwnershipProposal => execute_cancel_ownership_proposal(deps, info),
+        ExecuteMsg::UpdateConfig {
+            adapter_contract,
+            burn_auction_subaccount,
+        } => execute_update_config(deps, info, adapter_contract, burn_auction_subaccount),
     }
 }
 
@@ -191,6 +195,42 @@ pub fn execute_cancel_ownership_proposal(
     Ok(Response::new()
         .add_attribute("action", "cancel_ownership_proposal")
         .add_attribute("owner", info.sender))
+}
+
+pub fn execute_update_config(
+    deps: DepsMut,
+    info: MessageInfo,
+    adapter_contract: Option<String>,
+    burn_auction_subaccount: Option<String>,
+) -> StdResult<Response<InjectiveMsgWrapper>> {
+    // load and validate owner
+    let mut cfg = load_config(deps.as_ref())?;
+    let caller = deps.api.addr_canonicalize(info.sender.as_ref())?;
+    if caller != cfg.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+
+    // apply updates
+    if let Some(addr) = adapter_contract {
+        // validate new CW20 adapter address
+        deps.api.addr_validate(&addr)?;
+        cfg.adapter_contract = addr;
+    }
+    if let Some(sa) = burn_auction_subaccount {
+        // validate new subaccount ID (66-char 0x-prefixed)
+        SubaccountId::new(sa.clone()).map_err(|_| StdError::generic_err("Invalid subaccount"))?;
+        cfg.burn_auction_subaccount = sa;
+    }
+
+    // persist
+    save_config(deps, &cfg)?;
+    Ok(Response::new()
+        .add_attribute("action", "update_config")
+        .add_attribute("adapter_contract", cfg.adapter_contract.clone())
+        .add_attribute(
+            "burn_auction_subaccount",
+            cfg.burn_auction_subaccount.clone(),
+        ))
 }
 
 pub fn send_to_burn_auction(

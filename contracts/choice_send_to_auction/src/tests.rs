@@ -436,4 +436,62 @@ mod tests {
         let config = load_config(deps.as_ref()).unwrap();
         assert_eq!(config.proposed_owner, None);
     }
+
+    #[test]
+    fn test_update_config_fields() {
+        let mut deps = mock_dependencies();
+
+        // Prepare initial addresses
+        let owner = deps.api.addr_make("owner0000");
+        let initial_adapter = deps.api.addr_make("adapter-old");
+        let initial_subaccount =
+            "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+        // Instantiate the contract
+        let env = mock_env();
+        let info = message_info(&owner, &[]);
+        let instantiate_msg = InstantiateMsg {
+            owner: owner.to_string(),
+            adapter_contract: initial_adapter.to_string(),
+            burn_auction_subaccount: initial_subaccount.to_string(),
+        };
+        instantiate(deps.as_mut(), env.clone(), info.clone(), instantiate_msg).unwrap();
+
+        // Prepare new values
+        let new_adapter = deps.api.addr_make("adapter-new");
+        let new_subaccount = "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+        // Owner calls UpdateConfig
+        let update_msg = ExecuteMsg::UpdateConfig {
+            adapter_contract: Some(new_adapter.to_string()),
+            burn_auction_subaccount: Some(new_subaccount.to_string()),
+        };
+        let res = execute(deps.as_mut(), env.clone(), info.clone(), update_msg).unwrap();
+        // Check that attributes reflect the update
+        assert_eq!(
+            res.attributes,
+            vec![
+                ("action", "update_config"),
+                ("adapter_contract", new_adapter.as_str()),
+                ("burn_auction_subaccount", new_subaccount),
+            ]
+        );
+
+        // Verify state was updated
+        let cfg = load_config(deps.as_ref()).unwrap();
+        assert_eq!(cfg.adapter_contract, new_adapter.to_string());
+        assert_eq!(cfg.burn_auction_subaccount, new_subaccount.to_string());
+
+        // Unauthorized caller should fail
+        let bad_actor = deps.api.addr_make("badactor0000");
+        let bad_info = message_info(&bad_actor, &[]);
+        let fail_msg = ExecuteMsg::UpdateConfig {
+            adapter_contract: Some(deps.api.addr_make("wont-take").to_string()),
+            burn_auction_subaccount: None,
+        };
+        match execute(deps.as_mut(), env, bad_info, fail_msg) {
+            Err(StdError::GenericErr { msg, .. }) => assert_eq!(msg, "Unauthorized"),
+            _ => panic!("Expected unauthorized error"),
+        }
+    }
 }

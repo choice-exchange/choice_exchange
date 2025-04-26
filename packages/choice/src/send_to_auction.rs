@@ -16,6 +16,10 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
     Receive(Cw20ReceiveMsg),
     SendNative { asset: Asset },
+    UpdateConfig {
+        adapter_contract: Option<String>,
+        burn_auction_subaccount: Option<String>,
+    },
     ProposeNewOwner { new_owner: String },
     AcceptOwnership,
     CancelOwnershipProposal,

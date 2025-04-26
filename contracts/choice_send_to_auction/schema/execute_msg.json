@@ -45,6 +45,33 @@
     {
       "type": "object",
       "required": [
+        "update_config"
+      ],
+      "properties": {
+        "update_config": {
+          "type": "object",
+          "properties": {
+            "adapter_contract": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "burn_auction_subaccount": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
         "propose_new_owner"
       ],
       "properties": {
