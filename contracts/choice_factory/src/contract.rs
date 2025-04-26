@@ -50,6 +50,7 @@ pub fn instantiate(
 
         burn_address: deps.api.addr_canonicalize(&msg.burn_address)?, // Store burn address
         fee_wallet_address: deps.api.addr_canonicalize(&msg.fee_wallet_address)?, // Store fee wallet address
+        proposed_owner: None,
     };
 
     CONFIG.save(deps.storage, &config)?;
@@ -76,6 +77,12 @@ pub fn execute(
         ExecuteMsg::WithdrawNative { denom, amount } => {
             execute_withdraw_native(deps, env, info, denom, amount)
         }
+        ExecuteMsg::ProposeNewOwner { new_owner } => {
+            execute_propose_new_owner(deps, info, new_owner)
+        }
+        ExecuteMsg::AcceptOwnership => {
+            execute_accept_ownership(deps, info)
+        }
     }
 }
 
@@ -91,13 +98,6 @@ pub fn execute_update_config(
     // permission check
     if deps.api.addr_canonicalize(info.sender.as_str())? != config.owner {
         return Err(StdError::generic_err("unauthorized"));
-    }
-
-    if let Some(owner) = params.owner {
-        // validate address format
-        let _ = deps.api.addr_validate(&owner)?;
-
-        config.owner = deps.api.addr_canonicalize(&owner)?;
     }
 
     if let Some(pair_code_id) = params.pair_code_id {
@@ -287,6 +287,47 @@ pub fn execute_withdraw_native(
         .add_attribute("action", "withdraw_native")
         .add_attribute("owner", info.sender)
     )
+}
+
+pub fn execute_propose_new_owner(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    new_owner: String,
+) -> StdResult<Response> {
+    let mut config = CONFIG.load(deps.storage)?;
+
+    // Only current owner can propose
+    if deps.api.addr_canonicalize(info.sender.as_str())? != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+
+    let validated = deps.api.addr_validate(&new_owner)?;
+    config.proposed_owner = Some(validated);
+    CONFIG.save(deps.storage, &config)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "propose_new_owner")
+        .add_attribute("proposed_owner", new_owner))
+}
+
+pub fn execute_accept_ownership(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+) -> StdResult<Response> {
+    let mut config = CONFIG.load(deps.storage)?;
+
+    match config.proposed_owner {
+        Some(ref proposed) if proposed == &info.sender => {
+            config.owner = deps.api.addr_canonicalize(info.sender.as_str())?;
+            config.proposed_owner = None; // clear proposed owner
+            CONFIG.save(deps.storage, &config)?;
+
+            Ok(Response::new()
+                .add_attribute("action", "accept_ownership")
+                .add_attribute("new_owner", info.sender.to_string()))
+        }
+        _ => Err(StdError::generic_err("No ownership proposal for you")),
+    }
 }
 
 pub fn execute_migrate_pair(

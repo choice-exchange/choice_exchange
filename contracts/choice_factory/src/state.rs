@@ -10,8 +10,10 @@ pub struct Config {
     pub owner: CanonicalAddr,
     pub pair_code_id: u64,
 
-    pub burn_address: CanonicalAddr,       // New field
-    pub fee_wallet_address: CanonicalAddr, // New field
+    pub burn_address: CanonicalAddr,       
+    pub fee_wallet_address: CanonicalAddr,
+
+    pub proposed_owner: Option<Addr>
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
