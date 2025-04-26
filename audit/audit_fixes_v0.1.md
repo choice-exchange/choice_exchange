@@ -15,8 +15,6 @@ We introduced a secure withdrawal mechanism that allows only the contract owner 
 - **Limited scope:** Withdrawals are limited to native tokens sent directly to the factory contract; liquidity and user funds in pairs are unaffected.
 - **Impact:** No changes to liquidity pool behavior. This fix ensures that tokens mistakenly sent to the factory are safely recoverable and the contract cannot accumulate unclaimed funds.
 
----
-
 ## 2. Incorrect refund asset event emitted for CW20 tokens
 
 **Summary:**  
@@ -25,8 +23,6 @@ We updated the logic to set `remain_amount = 0` for CW20 assets, ensuring that r
 
 **Fix:**  
 Added a check to override `remain_amount` to zero for CW20 tokens before pushing to `refund_assets`.
-
----
 
 ## 3. Addresses and subaccounts are not validated
 
@@ -51,29 +47,30 @@ We updated the `lp_amount` calculation to use the formula:
 `lp_amount = total_fee - fee_wallet_amount - burn_amount`.  
 This ensures that `lp_amount` always accurately reflects the remaining amount after subtracting the exact `fee_wallet_amount` and `burn_amount`, avoiding rounding errors and making the emitted `pool_amount` event correct.
 
----
-
-## 5. Two-Step Ownership Transfer Implementation
+## 5. Two-Step Ownership Transfer & Separate Config Updates
 
 **Issue Summary:**  
-Both the `choice_factory` and `choice_send_to_auction` contracts originally allowed ownership to be transferred immediately without confirmation from the new owner. This carried a risk: if the owner mistakenly transferred ownership to an invalid address or an address they did not control, ownership would be permanently lost.
+Both the `choice_factory` and `choice_send_to_auction` contracts originally allowed ownership to be transferred immediately without confirmation from the new owner. This carried a risk: if the owner mistakenly transferred ownership to an invalid address or an address they did not control, ownership would be permanently lost. Additionally, there was no way to update the CW20 adapter address or the burn auction subaccount in `choice_send_to_auction` without redeploying.
 
 **Fix:**  
-We implemented a complete **two-step ownership transfer** mechanism in both contracts:
-- The current owner must first call a `ProposeNewOwner` function, specifying the intended new owner.
-- The proposed new owner must then call `AcceptOwnership` to finalize and accept the transfer.
-- Additionally, the current owner can now call `CancelOwnershipProposal` at any time before acceptance to cancel a pending ownership transfer if it was made in error.
 
-This approach ensures that ownership can only be transferred intentionally and safely, and provides a recovery path if the proposal was incorrect.  
-The `UpdateConfig` function was also updated to remove the ability to directly change the owner, fully enforcing the two-step process.
+1. **Two-Step Ownership Transfer** (both contracts):  
+   - **ProposeNewOwner**: current owner stages a transfer by specifying the new owner.  
+   - **AcceptOwnership**: proposed owner must accept to finalize.  
+   - **CancelOwnershipProposal**: owner can cancel any pending proposal before acceptance.  
+   - Removed any “instant” owner‐set paths (e.g. direct owner updates in `UpdateConfig`) to fully enforce the two-step flow.
 
----
+2. **Config Update Function** (send_to_auction only):  
+   - Added an **`UpdateConfig`** execution message that lets the owner atomically change  
+     - the CW20 adapter contract address  
+     - and/or the Injective burn auction subaccount ID  
+   - Each field is optional—passing `null` leaves it unchanged—and all updates are gated by the two-step ownership logic where applicable.
+
+This ensures both a safe, recoverable ownership transfer process and on-chain configurability without redeployment.
 
 ## 6. Misleading error message
 
-**Fix:**  
-
-We updated the error message to `unauthorized: sender does not match owner in denom and is not contract owner`
+**Fix:** We updated the error message to `unauthorized: sender does not match owner in denom and is not contract owner`
 
 ## 7. ​Duplicate message interface
 
@@ -83,11 +80,7 @@ The `SendNative` message was duplicated in the `choice_pair` contract through a 
 **Fix:**  
 We removed the duplicate `BurnManagerMsg` definition from the `choice_pair` contract and now directly import and use the standardized `ExecuteMsg` from `choice::send_to_auction`.  
 
-
----
-
 ## 8. Miscellaneous Code Quality Improvements
 
-**Fix Summary:**  
+**Fix:**  
 We implemented all recommended miscellaneous code quality improvements across the contracts, including removing duplicate code, correcting minor typos, optimizing for-loop behavior, reducing unnecessary validation, and simplifying message dispatch logic. These changes improve maintainability, readability, and minor gas efficiency without affecting contract functionality.
-
