@@ -801,9 +801,13 @@ fn try_native_to_token() {
     let expected_commission_amount =
         expected_ret_amount.multiply_ratio(3u128, 1000u128) + Uint128::from(1u8); // 0.3%, round up
 
-    let expected_lp_amount = expected_commission_amount.multiply_ratio(2u128, 3u128); // 0.2% (2/3 of the total fee)
     let expected_fee_wallet_amount = expected_commission_amount.multiply_ratio(1u128, 6u128); // 0.05% (1/6 of the total fee)
     let expected_burn_amount = expected_commission_amount.multiply_ratio(1u128, 6u128); // 0.05% (1/6 of the total fee)
+    let expected_lp_amount = expected_commission_amount
+        .checked_sub(expected_fee_wallet_amount)
+        .unwrap()
+        .checked_sub(expected_burn_amount)
+        .unwrap();
 
     let expected_return_amount = expected_ret_amount
         .checked_sub(expected_commission_amount)
@@ -1000,9 +1004,13 @@ fn try_token_to_native() {
         .checked_sub(expected_commission_amount)
         .unwrap();
 
-    let expected_lp_amount = expected_commission_amount.multiply_ratio(2u128, 3u128); // 0.2% (2/3 of the total fee)
     let expected_fee_wallet_amount = expected_commission_amount.multiply_ratio(1u128, 6u128); // 0.05% (1/6 of the total fee)
     let expected_burn_amount = expected_commission_amount.multiply_ratio(1u128, 6u128); // 0.05% (1/6 of the total fee)
+    let expected_lp_amount = expected_commission_amount
+        .checked_sub(expected_fee_wallet_amount)
+        .unwrap()
+        .checked_sub(expected_burn_amount)
+        .unwrap();
 
     // check simulation res
     // return asset token balance as normal

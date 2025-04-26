@@ -1,3 +1,4 @@
+use cosmwasm_std::Uint128;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,10 @@ pub enum ExecuteMsg {
     MigratePair {
         contract: String,
         code_id: Option<u64>,
+    },
+    WithdrawNative {
+        denom: String,
+        amount: Uint128,
     },
 }
 

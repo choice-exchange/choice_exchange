@@ -4,8 +4,8 @@ use choice::querier::{
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    coin, to_json_binary, Addr, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Reply,
-    ReplyOn, Response, StdError, StdResult, SubMsg, SubMsgResult, WasmMsg,
+    coin, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Reply,
+    ReplyOn, Response, StdError, StdResult, SubMsg, SubMsgResult, WasmMsg, Uint128
 };
 use cw2::set_contract_version;
 use cw20::Cw20ExecuteMsg;
@@ -72,6 +72,9 @@ pub fn execute(
         }
         ExecuteMsg::MigratePair { contract, code_id } => {
             execute_migrate_pair(deps, env, info, contract, code_id)
+        }
+        ExecuteMsg::WithdrawNative { denom, amount } => {
+            execute_withdraw_native(deps, env, info, denom, amount)
         }
     }
 }
@@ -255,6 +258,35 @@ pub fn execute_add_native_token_decimals(
         ("denom", &denom),
         ("decimals", &decimals.to_string()),
     ]))
+}
+
+pub fn execute_withdraw_native(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    _env: Env,
+    info: MessageInfo,
+    denom: String,
+    amount: Uint128,
+) -> Result<Response, StdError> {
+    // Only owner can withdraw
+    let config = CONFIG.load(deps.storage)?;
+    if deps.api.addr_canonicalize(info.sender.as_str())? != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+
+    // Send the specified amount to the owner
+    let bank_msg = BankMsg::Send {
+        to_address: info.sender.to_string(),
+        amount: vec![Coin {
+            denom,
+            amount,
+        }],
+    };
+
+    Ok(Response::new()
+        .add_message(bank_msg)
+        .add_attribute("action", "withdraw_native")
+        .add_attribute("owner", info.sender)
+    )
 }
 
 pub fn execute_migrate_pair(

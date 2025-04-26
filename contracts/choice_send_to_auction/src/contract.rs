@@ -27,7 +27,7 @@ pub fn get_burn_auction_subaccount(deps: Deps) -> StdResult<SubaccountId> {
     let burn_auction_subaccount = config.burn_auction_subaccount;
 
     SubaccountId::new(burn_auction_subaccount)
-        .map_err(|_| StdError::generic_err("Invalid burn auction subaccount ID"))
+        .map_err(|_| StdError::generic_err("Invalid burn auction sub_account ID"))
 }
 
 #[entry_point]
@@ -37,10 +37,14 @@ pub fn instantiate(
     _info: MessageInfo,
     msg: InstantiateMsg,
 ) -> StdResult<Response> {
+    let admin = deps.api.addr_validate(&msg.admin)?;
+    let adapter_contract = deps.api.addr_validate(&msg.adapter_contract)?;
+    let sub_account = SubaccountId::new(msg.burn_auction_subaccount)?;
+
     let config = Config {
-        admin: msg.admin,
-        adapter_contract: msg.adapter_contract,
-        burn_auction_subaccount: msg.burn_auction_subaccount,
+        admin: admin.to_string(),
+        adapter_contract: adapter_contract.to_string(),
+        burn_auction_subaccount: sub_account.to_string(),
     };
     save_config(deps, &config)?;
     Ok(Response::default())
@@ -134,7 +138,8 @@ fn update_admin(
         return Err(StdError::generic_err("Unauthorized"));
     }
 
-    let new_config = Config { admin, ..config };
+    let admin = deps.api.addr_validate(&admin)?;
+    let new_config = Config { admin: admin.to_string(), ..config };
     save_config(deps, &new_config)?;
 
     Ok(Response::new().add_attribute("action", "update_admin"))

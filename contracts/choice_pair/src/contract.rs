@@ -312,7 +312,13 @@ pub fn provide_liquidity(
             }
         };
 
-        let remain_amount = deposits[i] - desired_amount;
+        let mut remain_amount = deposits[i] - desired_amount;
+
+        // Override remain_amount to 0 if CW20
+        if let AssetInfo::Token { .. } = &pool.info {
+            remain_amount = Uint128::zero();
+        }
+        
         if let Some(slippage_tolerance) = slippage_tolerance {
             if remain_amount > deposits[i].mul_floor(slippage_tolerance) {
                 return Err(ContractError::MaxSlippageAssertion {});
@@ -515,9 +521,11 @@ pub fn swap(
     let receiver = to.unwrap_or_else(|| sender.clone());
 
     let total_fee = commission_amount; // Total fee, assumed to be 0.3% of the transaction
-    let lp_amount = total_fee.multiply_ratio(2u128, 3u128); // 0.2% (2/3 of the total fee)
     let fee_wallet_amount = total_fee.multiply_ratio(1u128, 6u128); // 0.05% (1/6 of the total fee)
     let burn_amount = total_fee.multiply_ratio(1u128, 6u128); // 0.05% (1/6 of the total fee)
+    let lp_amount = total_fee
+        .checked_sub(fee_wallet_amount)?
+        .checked_sub(burn_amount)?;
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
     if !return_amount.is_zero() {
