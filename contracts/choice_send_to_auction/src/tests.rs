@@ -6,8 +6,10 @@ mod tests {
 
     use choice::asset::{Asset, AssetInfo};
     use choice::send_to_auction::{ExecuteMsg, InstantiateMsg, QueryMsg};
-    use cosmwasm_std::testing::{mock_env, MockApi, MockQuerier, MockStorage};
-    use cosmwasm_std::{from_json, Addr, Binary, Coin, Empty, MessageInfo, OwnedDeps};
+    use cosmwasm_std::testing::{message_info, mock_env, MockApi, MockQuerier, MockStorage};
+    use cosmwasm_std::{
+        from_json, Addr, Api, Binary, Coin, Empty, MessageInfo, OwnedDeps, StdError,
+    };
     use cw20::Cw20ReceiveMsg;
 
     use crate::contract::{execute, query};
@@ -26,36 +28,39 @@ mod tests {
     #[test]
     fn test_instantiate_contract() {
         let mut deps = mock_dependencies();
-    
+
         let env = mock_env();
-    
+
         // Use addr_make to generate valid Injective addresses
         let admin_addr = deps.api.addr_make("admin-seed");
         let adapter_contract_addr = deps.api.addr_make("adapter-seed");
-    
+
         let info = MessageInfo {
             sender: admin_addr.clone(),
             funds: vec![],
         };
-    
+
         let msg = InstantiateMsg {
-            admin: admin_addr.to_string(),
+            owner: admin_addr.to_string(),
             adapter_contract: adapter_contract_addr.to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111"
-                .to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
         };
-    
+
         // Call the instantiate function
         let res = instantiate(deps.as_mut(), env, info, msg).unwrap();
-    
+
         // Assert that the response is successful
         assert_eq!(res.messages.len(), 0); // No messages expected on instantiation
-    
+
         // Load the stored config
         let config = load_config(deps.as_ref()).unwrap();
-    
+
         // Assert the stored values are correct
-        assert_eq!(config.admin, admin_addr.to_string());
+        assert_eq!(
+            config.owner,
+            deps.api.addr_canonicalize(&admin_addr.to_string()).unwrap()
+        );
         assert_eq!(config.adapter_contract, adapter_contract_addr.to_string());
         assert_eq!(
             config.burn_auction_subaccount,
@@ -64,62 +69,15 @@ mod tests {
     }
 
     #[test]
-    fn test_update_admin_via_execute() {
-        let mut deps = mock_dependencies();
-    
-        let env = mock_env();
-    
-        // Use addr_make to generate proper addresses
-        let initial_admin = deps.api.addr_make("initial-admin-seed");
-        let new_admin = deps.api.addr_make("new-admin-seed");
-        let non_admin = deps.api.addr_make("non-admin-seed");
-    
-        // Instantiate the contract with the initial admin
-        let info = MessageInfo {
-            sender: initial_admin.clone(),
-            funds: vec![],
-        };
-        let msg = InstantiateMsg {
-            admin: initial_admin.to_string(),
-            adapter_contract: deps.api.addr_make("adapter-seed").to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111"
-                .to_string(),
-        };
-        instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
-    
-        // Attempt to update the admin as a non-admin (should fail)
-        let non_admin_info = MessageInfo {
-            sender: non_admin.clone(),
-            funds: vec![],
-        };
-        let update_msg = ExecuteMsg::UpdateAdmin {
-            admin: new_admin.to_string(),
-        };
-        let err = execute(deps.as_mut(), env.clone(), non_admin_info, update_msg).unwrap_err();
-        assert_eq!(err.to_string(), "Generic error: Unauthorized");
-    
-        // Attempt to update the admin as the current admin (should succeed)
-        let update_msg = ExecuteMsg::UpdateAdmin {
-            admin: new_admin.to_string(),
-        };
-        let res = execute(deps.as_mut(), env.clone(), info, update_msg).unwrap();
-        assert_eq!(res.attributes, vec![("action", "update_admin")]);
-    
-        // Verify the admin was updated
-        let config = load_config(deps.as_ref()).unwrap();
-        assert_eq!(config.admin, new_admin.to_string());
-    }
-
-    #[test]
     fn test_send_native_via_execute() {
         let mut deps = mock_dependencies();
-    
+
         let mut env = mock_env();
         env.contract.address = Addr::unchecked("inj1l2gcrfr6aenjyt5jddk79j7w5v0twskw6n70y8");
 
         let admin_addr = deps.api.addr_make("admin-seed");
         let adapter_contract_addr = deps.api.addr_make("adapter-seed");
-    
+
         let admin_info = MessageInfo {
             sender: admin_addr.clone(),
             funds: vec![Coin {
@@ -127,16 +85,16 @@ mod tests {
                 amount: 1000u128.into(),
             }],
         };
-    
+
         // Instantiate the contract
         let msg = InstantiateMsg {
-            admin: admin_addr.to_string(),
+            owner: admin_addr.to_string(),
             adapter_contract: adapter_contract_addr.to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111"
-                .to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
         };
         instantiate(deps.as_mut(), env.clone(), admin_info.clone(), msg).unwrap();
-    
+
         // Prepare the ExecuteMsg::SendNative message
         let asset = Asset {
             info: AssetInfo::NativeToken {
@@ -145,13 +103,13 @@ mod tests {
             amount: 1000u128.into(),
         };
         let execute_msg = ExecuteMsg::SendNative { asset };
-    
+
         // Call the execute function
         let res = execute(deps.as_mut(), env.clone(), admin_info, execute_msg).unwrap();
-    
+
         // Assert the response attributes
         assert_eq!(res.attributes, vec![("action", "send_native")]);
-    
+
         // Assert that the appropriate messages were created
         assert_eq!(res.messages.len(), 2); // Deposit and Transfer messages
     }
@@ -171,7 +129,7 @@ mod tests {
 
         // Instantiate the contract
         let msg = InstantiateMsg {
-            admin: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
+            owner: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
             adapter_contract: "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk".to_string(),
             burn_auction_subaccount:
                 "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
@@ -216,34 +174,37 @@ mod tests {
     #[test]
     fn test_query_config() {
         let mut deps = mock_dependencies();
-    
+
         let env = mock_env();
-    
+
         // Generate proper mocked Injective addresses
         let admin_addr = deps.api.addr_make("admin-seed");
         let adapter_contract_addr = deps.api.addr_make("adapter-seed");
-    
+
         let info = MessageInfo {
             sender: admin_addr.clone(),
             funds: vec![],
         };
-    
+
         // Instantiate the contract
         let msg = InstantiateMsg {
-            admin: admin_addr.to_string(),
+            owner: admin_addr.to_string(),
             adapter_contract: adapter_contract_addr.to_string(),
-            burn_auction_subaccount: "0x1111111111111111111111111111111111111111111111111111111111111111"
-                .to_string(), // 0x + 64 hex chars = valid Injective subaccount
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(), // 0x + 64 hex chars = valid Injective subaccount
         };
         instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
-    
+
         // Query the configuration
         let query_msg = QueryMsg::GetConfig {};
         let res = query(deps.as_ref(), env.clone(), query_msg).unwrap();
-    
+
         // Assert the configuration is correct
         let config: Config = from_json(&res).unwrap();
-        assert_eq!(config.admin, admin_addr.to_string());
+        assert_eq!(
+            config.owner,
+            deps.api.addr_canonicalize(&admin_addr.to_string()).unwrap()
+        );
         assert_eq!(config.adapter_contract, adapter_contract_addr.to_string());
         assert_eq!(
             config.burn_auction_subaccount,
@@ -266,7 +227,7 @@ mod tests {
 
         // Instantiate the contract
         let msg = InstantiateMsg {
-            admin: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
+            owner: "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz".to_string(),
             adapter_contract: "inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk".to_string(),
             burn_auction_subaccount:
                 "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
@@ -294,5 +255,143 @@ mod tests {
             err.to_string(),
             "Generic error: Invalid asset: Expected a native token"
         );
+    }
+
+    #[test]
+    fn propose_and_accept_ownership() {
+        let mut deps = mock_dependencies();
+
+        let mut env = mock_env();
+        env.contract.address = Addr::unchecked("inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9w87h3"); // Important for send_native tests
+
+        let owner = deps.api.addr_make("owner0000");
+        let proposed_owner = deps.api.addr_make("newowner0000");
+        let adapter_contract_addr = deps.api.addr_make("adapter-seed");
+
+        let info = message_info(&owner, &[]);
+
+        let msg = InstantiateMsg {
+            owner: owner.to_string(),
+            adapter_contract: adapter_contract_addr.to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+        };
+
+        instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        // Propose a new owner
+        let propose_msg = ExecuteMsg::ProposeNewOwner {
+            new_owner: proposed_owner.to_string(),
+        };
+
+        let res = execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
+        assert_eq!(
+            res.attributes,
+            vec![
+                ("action", "propose_new_owner"),
+                ("proposed_owner", proposed_owner.as_str())
+            ]
+        );
+
+        // Make sure proposed_owner is set
+        let config = load_config(deps.as_ref()).unwrap();
+        assert_eq!(
+            config.proposed_owner.unwrap().to_string(),
+            proposed_owner.to_string()
+        );
+
+        // Accept ownership by the proposed owner
+        let accept_info = message_info(&proposed_owner, &[]);
+        let accept_msg = ExecuteMsg::AcceptOwnership;
+        let res = execute(deps.as_mut(), env.clone(), accept_info.clone(), accept_msg).unwrap();
+        assert_eq!(
+            res.attributes,
+            vec![
+                ("action", "accept_ownership"),
+                ("new_owner", proposed_owner.as_str())
+            ]
+        );
+
+        // Verify ownership is updated
+        let config = load_config(deps.as_ref()).unwrap();
+        assert_eq!(
+            config.owner,
+            deps.api.addr_canonicalize(proposed_owner.as_str()).unwrap()
+        );
+        assert_eq!(config.proposed_owner, None);
+    }
+
+    #[test]
+    fn unauthorized_propose_new_owner() {
+        let mut deps = mock_dependencies();
+
+        let mut env = mock_env();
+        env.contract.address = Addr::unchecked("inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9w87h3");
+
+        let owner = deps.api.addr_make("owner0000");
+        let unauthorized = deps.api.addr_make("badactor0000");
+        let adapter_contract_addr = deps.api.addr_make("adapter-seed");
+
+        let info = message_info(&owner, &[]);
+        let msg = InstantiateMsg {
+            owner: owner.to_string(),
+            adapter_contract: adapter_contract_addr.to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+        };
+        instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        // Try to propose a new owner from a non-owner
+        let propose_msg = ExecuteMsg::ProposeNewOwner {
+            new_owner: deps.api.addr_make("newowner0000").to_string(),
+        };
+
+        let bad_info = message_info(&unauthorized, &[]);
+        let res = execute(deps.as_mut(), env.clone(), bad_info, propose_msg);
+
+        match res {
+            Err(StdError::GenericErr { msg, .. }) => assert_eq!(msg, "Unauthorized"),
+            _ => panic!("Must return unauthorized error"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_accept_ownership() {
+        let mut deps = mock_dependencies();
+
+        let mut env = mock_env();
+        env.contract.address = Addr::unchecked("inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9w87h3");
+
+        let owner = deps.api.addr_make("owner0000");
+        let proposed_owner = deps.api.addr_make("newowner0000");
+        let bad_actor = deps.api.addr_make("badactor0000");
+        let adapter_contract_addr = deps.api.addr_make("adapter-seed");
+
+        let info = message_info(&owner, &[]);
+        let msg = InstantiateMsg {
+            owner: owner.to_string(),
+            adapter_contract: adapter_contract_addr.to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+        };
+        instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        // Owner proposes a new owner
+        let propose_msg = ExecuteMsg::ProposeNewOwner {
+            new_owner: proposed_owner.to_string(),
+        };
+        execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
+
+        // Try to accept ownership with a wrong account
+        let bad_info = message_info(&bad_actor, &[]);
+        let accept_msg = ExecuteMsg::AcceptOwnership;
+        let res = execute(deps.as_mut(), env.clone(), bad_info, accept_msg);
+
+        match res {
+            Err(StdError::GenericErr { msg, .. }) => {
+                assert_eq!(msg, "No ownership proposal for you")
+            }
+            _ => panic!("Must fail with 'No ownership proposal for you'"),
+        }
     }
 }

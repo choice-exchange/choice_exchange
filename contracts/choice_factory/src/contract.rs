@@ -4,8 +4,8 @@ use choice::querier::{
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    coin, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Reply,
-    ReplyOn, Response, StdError, StdResult, SubMsg, SubMsgResult, WasmMsg, Uint128
+    coin, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
+    Reply, ReplyOn, Response, StdError, StdResult, SubMsg, SubMsgResult, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::Cw20ExecuteMsg;
@@ -80,9 +80,7 @@ pub fn execute(
         ExecuteMsg::ProposeNewOwner { new_owner } => {
             execute_propose_new_owner(deps, info, new_owner)
         }
-        ExecuteMsg::AcceptOwnership => {
-            execute_accept_ownership(deps, info)
-        }
+        ExecuteMsg::AcceptOwnership => execute_accept_ownership(deps, info),
     }
 }
 
@@ -234,7 +232,7 @@ pub fn execute_add_native_token_decimals(
         let owner_in_denom_canonical = deps.api.addr_canonicalize(owner_in_denom)?;
         if sender_canonical != owner_in_denom_canonical && sender_canonical != config.owner {
             return Err(StdError::generic_err(
-                "unauthorized: sender does not match owner in denom",
+                "unauthorized: sender does not match owner in denom and is not contract owner",
             ));
         }
     } else {
@@ -276,17 +274,13 @@ pub fn execute_withdraw_native(
     // Send the specified amount to the owner
     let bank_msg = BankMsg::Send {
         to_address: info.sender.to_string(),
-        amount: vec![Coin {
-            denom,
-            amount,
-        }],
+        amount: vec![Coin { denom, amount }],
     };
 
     Ok(Response::new()
         .add_message(bank_msg)
         .add_attribute("action", "withdraw_native")
-        .add_attribute("owner", info.sender)
-    )
+        .add_attribute("owner", info.sender))
 }
 
 pub fn execute_propose_new_owner(
@@ -317,7 +311,7 @@ pub fn execute_accept_ownership(
     let mut config = CONFIG.load(deps.storage)?;
 
     match config.proposed_owner {
-        Some(ref proposed) if proposed == &info.sender => {
+        Some(proposed) if proposed == info.sender => {
             config.owner = deps.api.addr_canonicalize(info.sender.as_str())?;
             config.proposed_owner = None; // clear proposed owner
             CONFIG.save(deps.storage, &config)?;

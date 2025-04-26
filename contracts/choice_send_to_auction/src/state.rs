@@ -1,4 +1,4 @@
-use cosmwasm_std::{Deps, DepsMut, StdResult};
+use cosmwasm_std::{Addr, CanonicalAddr, Deps, DepsMut, StdResult};
 
 use cw_storage_plus::Item;
 use serde::{Deserialize, Serialize};
@@ -7,9 +7,11 @@ pub const CONFIG: Item<Config> = Item::new("config");
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Config {
-    pub admin: String,
+    pub owner: CanonicalAddr,
     pub adapter_contract: String,
     pub burn_auction_subaccount: String,
+
+    pub proposed_owner: Option<Addr>,
 }
 
 pub fn load_config(deps: Deps) -> StdResult<Config> {

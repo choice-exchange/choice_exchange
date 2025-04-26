@@ -1053,7 +1053,10 @@ fn test_execute_add_native_token_decimals_factory() {
     );
     match res_err {
         Err(StdError::GenericErr { msg, .. }) => {
-            assert_eq!(msg, "unauthorized: sender does not match owner in denom")
+            assert_eq!(
+                msg,
+                "unauthorized: sender does not match owner in denom and is not contract owner"
+            )
         }
         _ => panic!("Expected unauthorized error"),
     }
@@ -1083,10 +1086,13 @@ fn propose_and_accept_ownership() {
     };
 
     let res = execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
-    assert_eq!(res.attributes, vec![
-        ("action", "propose_new_owner"),
-        ("proposed_owner", proposed_owner.as_str()),
-    ]);
+    assert_eq!(
+        res.attributes,
+        vec![
+            ("action", "propose_new_owner"),
+            ("proposed_owner", proposed_owner.as_str()),
+        ]
+    );
 
     // Make sure proposed_owner is set
     let config = CONFIG.load(deps.as_ref().storage).unwrap();
@@ -1096,14 +1102,20 @@ fn propose_and_accept_ownership() {
     let accept_info = message_info(&proposed_owner, &[]);
     let accept_msg = ExecuteMsg::AcceptOwnership;
     let res = execute(deps.as_mut(), env.clone(), accept_info.clone(), accept_msg).unwrap();
-    assert_eq!(res.attributes, vec![
-        ("action", "accept_ownership"),
-        ("new_owner", proposed_owner.as_str()),
-    ]);
+    assert_eq!(
+        res.attributes,
+        vec![
+            ("action", "accept_ownership"),
+            ("new_owner", proposed_owner.as_str()),
+        ]
+    );
 
     // Verify ownership is updated
     let config = CONFIG.load(deps.as_ref().storage).unwrap();
-    assert_eq!(config.owner, deps.api.addr_canonicalize(proposed_owner.as_str()).unwrap());
+    assert_eq!(
+        config.owner,
+        deps.api.addr_canonicalize(proposed_owner.as_str()).unwrap()
+    );
     assert_eq!(config.proposed_owner, None);
 }
 

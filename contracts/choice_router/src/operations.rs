@@ -26,7 +26,7 @@ pub fn execute_swap_operation(
         return Err(StdError::generic_err("unauthorized"));
     }
 
-    let messages: Vec<CosmosMsg> = match operation {
+    let messages: CosmosMsg = match operation {
         SwapOperation::Choice {
             offer_asset_info,
             ask_asset_info,
@@ -54,18 +54,18 @@ pub fn execute_swap_operation(
                 amount,
             };
 
-            vec![asset_into_swap_msg(
+            asset_into_swap_msg(
                 deps.as_ref(),
                 Addr::unchecked(pair_info.contract_addr),
                 offer_asset,
                 None,
                 to,
                 deadline,
-            )?]
+            )?
         }
     };
 
-    Ok(Response::new().add_messages(messages))
+    Ok(Response::new().add_message(messages))
 }
 
 pub fn asset_into_swap_msg(

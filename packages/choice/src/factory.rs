@@ -41,8 +41,8 @@ pub enum ExecuteMsg {
         denom: String,
         amount: Uint128,
     },
-    ProposeNewOwner { 
-        new_owner: String 
+    ProposeNewOwner {
+        new_owner: String,
     },
     AcceptOwnership,
 }

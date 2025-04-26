@@ -23,7 +23,7 @@ use std::convert::TryInto;
 use std::ops::Mul;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use choice::send_to_auction::ExecuteMsg as BurnAuctionExecuteMsg;
 
 use injective_cosmwasm::msg::{
     create_burn_tokens_msg, create_mint_tokens_msg, create_new_denom_msg,
@@ -172,6 +172,7 @@ pub fn receive_cw20(
                 if let AssetInfo::Token { contract_addr, .. } = &pool.info {
                     if contract_addr == &info.sender.to_string() {
                         authorized = true;
+                        break;
                     }
                 }
             }
@@ -318,7 +319,7 @@ pub fn provide_liquidity(
         if let AssetInfo::Token { .. } = &pool.info {
             remain_amount = Uint128::zero();
         }
-        
+
         if let Some(slippage_tolerance) = slippage_tolerance {
             if remain_amount > deposits[i].mul_floor(slippage_tolerance) {
                 return Err(ContractError::MaxSlippageAssertion {});
@@ -442,12 +443,6 @@ pub fn withdraw_liquidity(
         ]))
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum BurnManagerMsg {
-    SendNative { asset: Asset },
-}
-
 // CONTRACT - a user must do token approval
 #[allow(clippy::too_many_arguments)]
 pub fn swap(
@@ -539,12 +534,13 @@ pub fn swap(
             amount: burn_amount,
         };
 
+        let burn_handler_address = deps.api.addr_humanize(&pair_info.burn_address)?;
+
         if let AssetInfo::NativeToken { denom } = &burn_asset.info {
             // Call send_native for native tokens
-            let burn_handler_address = deps.api.addr_humanize(&pair_info.burn_address)?;
             messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: burn_handler_address.to_string(),
-                msg: to_json_binary(&BurnManagerMsg::SendNative {
+                msg: to_json_binary(&BurnAuctionExecuteMsg::SendNative {
                     asset: burn_asset.clone(),
                 })?,
                 funds: vec![Coin {
@@ -554,7 +550,6 @@ pub fn swap(
             }));
         } else if let AssetInfo::Token { contract_addr } = &burn_asset.info {
             // Send CW20 tokens directly to the burn address
-            let burn_handler_address = deps.api.addr_humanize(&pair_info.burn_address)?;
             messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: contract_addr.clone(),
                 msg: to_json_binary(&Cw20ExecuteMsg::Send {
