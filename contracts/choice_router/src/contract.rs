@@ -75,17 +75,7 @@ pub fn execute(
             operation,
             to,
             deadline,
-        } => {
-            let api = deps.api;
-            execute_swap_operation(
-                deps,
-                env,
-                info,
-                operation,
-                optional_addr_validate(api, to)?.map(|v| v.to_string()),
-                deadline,
-            )
-        }
+        } => execute_swap_operation(deps, env, info, operation, to, deadline),
         ExecuteMsg::AssertMinimumReceive {
             asset_info,
             prev_balance,
