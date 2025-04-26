@@ -18,6 +18,7 @@ pub enum ExecuteMsg {
     SendNative { asset: Asset },
     ProposeNewOwner { new_owner: String },
     AcceptOwnership,
+    CancelOwnershipProposal,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

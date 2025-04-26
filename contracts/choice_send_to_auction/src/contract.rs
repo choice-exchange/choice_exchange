@@ -65,6 +65,7 @@ pub fn execute(
             execute_propose_new_owner(deps, info, new_owner)
         }
         ExecuteMsg::AcceptOwnership => execute_accept_ownership(deps, info),
+        ExecuteMsg::CancelOwnershipProposal => execute_cancel_ownership_proposal(deps, info),
     }
 }
 
@@ -169,6 +170,27 @@ pub fn execute_accept_ownership(
         }
         _ => Err(StdError::generic_err("No ownership proposal for you")),
     }
+}
+
+pub fn execute_cancel_ownership_proposal(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> StdResult<Response<InjectiveMsgWrapper>> {
+    let mut config = load_config(deps.as_ref())?;
+
+    // Only current owner can cancel
+    if deps.api.addr_canonicalize(info.sender.as_str())? != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+
+    // Clear the proposed owner
+    config.proposed_owner = None;
+
+    save_config(deps, &config)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "cancel_ownership_proposal")
+        .add_attribute("owner", info.sender))
 }
 
 pub fn send_to_burn_auction(

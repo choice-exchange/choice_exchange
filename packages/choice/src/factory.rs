@@ -45,6 +45,7 @@ pub enum ExecuteMsg {
         new_owner: String,
     },
     AcceptOwnership,
+    CancelOwnershipProposal,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

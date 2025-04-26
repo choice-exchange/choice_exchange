@@ -394,4 +394,46 @@ mod tests {
             _ => panic!("Must fail with 'No ownership proposal for you'"),
         }
     }
+
+    #[test]
+    fn test_cancel_ownership_proposal() {
+        let mut deps = mock_dependencies();
+
+        let owner = deps.api.addr_make("owner0000");
+        let proposed_owner = deps.api.addr_make("newowner0000");
+        let adapter_contract_addr = deps.api.addr_make("adapter-seed");
+
+        let env = mock_env();
+        let info = message_info(&owner, &[]);
+
+        // Instantiate
+        let msg = InstantiateMsg {
+            owner: owner.to_string(),
+            adapter_contract: adapter_contract_addr.to_string(),
+            burn_auction_subaccount:
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+        };
+        instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        // Propose new owner
+        let propose_msg = ExecuteMsg::ProposeNewOwner {
+            new_owner: proposed_owner.to_string(),
+        };
+        execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
+
+        // Cancel proposal
+        let cancel_msg = ExecuteMsg::CancelOwnershipProposal;
+        let res = execute(deps.as_mut(), env.clone(), info.clone(), cancel_msg).unwrap();
+        assert_eq!(
+            res.attributes,
+            vec![
+                ("action", "cancel_ownership_proposal"),
+                ("owner", owner.as_str()),
+            ]
+        );
+
+        // Verify proposal is cleared
+        let config = load_config(deps.as_ref()).unwrap();
+        assert_eq!(config.proposed_owner, None);
+    }
 }
