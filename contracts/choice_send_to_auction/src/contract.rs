@@ -37,10 +37,15 @@ pub fn instantiate(
     _info: MessageInfo,
     msg: InstantiateMsg,
 ) -> StdResult<Response> {
+    let owner = deps.api.addr_validate(&msg.owner)?;
+    let adapter_contract = deps.api.addr_validate(&msg.adapter_contract)?;
+    let sub_account = SubaccountId::new(msg.burn_auction_subaccount)?;
+
     let config = Config {
-        admin: msg.admin,
-        adapter_contract: msg.adapter_contract,
-        burn_auction_subaccount: msg.burn_auction_subaccount,
+        owner: deps.api.addr_canonicalize(owner.as_str())?,
+        adapter_contract: adapter_contract.to_string(),
+        burn_auction_subaccount: sub_account.to_string(),
+        proposed_owner: None,
     };
     save_config(deps, &config)?;
     Ok(Response::default())
@@ -56,7 +61,15 @@ pub fn execute(
     match msg {
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
         ExecuteMsg::SendNative { asset } => send_native(deps, env, info, asset),
-        ExecuteMsg::UpdateAdmin { admin } => update_admin(deps, info, admin),
+        ExecuteMsg::ProposeNewOwner { new_owner } => {
+            execute_propose_new_owner(deps, info, new_owner)
+        }
+        ExecuteMsg::AcceptOwnership => execute_accept_ownership(deps, info),
+        ExecuteMsg::CancelOwnershipProposal => execute_cancel_ownership_proposal(deps, info),
+        ExecuteMsg::UpdateConfig {
+            adapter_contract,
+            burn_auction_subaccount,
+        } => execute_update_config(deps, info, adapter_contract, burn_auction_subaccount),
     }
 }
 
@@ -122,22 +135,102 @@ pub fn send_native(
         .add_attribute("action", "send_native"))
 }
 
-fn update_admin(
+pub fn execute_propose_new_owner(
     deps: DepsMut,
     info: MessageInfo,
-    admin: String,
+    new_owner: String,
 ) -> StdResult<Response<InjectiveMsgWrapper>> {
-    let config = load_config(deps.as_ref())?;
+    let mut config = load_config(deps.as_ref())?;
 
-    // Only the current admin can update
-    if info.sender.to_string() != config.admin {
+    // Only current owner can propose
+    if deps.api.addr_canonicalize(info.sender.as_str())? != config.owner {
         return Err(StdError::generic_err("Unauthorized"));
     }
 
-    let new_config = Config { admin, ..config };
-    save_config(deps, &new_config)?;
+    let validated = deps.api.addr_validate(&new_owner)?;
+    config.proposed_owner = Some(validated);
+    save_config(deps, &config)?;
 
-    Ok(Response::new().add_attribute("action", "update_admin"))
+    Ok(Response::new()
+        .add_attribute("action", "propose_new_owner")
+        .add_attribute("proposed_owner", new_owner))
+}
+
+pub fn execute_accept_ownership(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> StdResult<Response<InjectiveMsgWrapper>> {
+    let mut config = load_config(deps.as_ref())?;
+
+    match config.proposed_owner {
+        Some(proposed) if proposed == info.sender => {
+            config.owner = deps.api.addr_canonicalize(info.sender.as_str())?;
+            config.proposed_owner = None; // clear proposed owner
+            save_config(deps, &config)?;
+
+            Ok(Response::new()
+                .add_attribute("action", "accept_ownership")
+                .add_attribute("new_owner", info.sender.to_string()))
+        }
+        _ => Err(StdError::generic_err("No ownership proposal for you")),
+    }
+}
+
+pub fn execute_cancel_ownership_proposal(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> StdResult<Response<InjectiveMsgWrapper>> {
+    let mut config = load_config(deps.as_ref())?;
+
+    // Only current owner can cancel
+    if deps.api.addr_canonicalize(info.sender.as_str())? != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+
+    // Clear the proposed owner
+    config.proposed_owner = None;
+
+    save_config(deps, &config)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "cancel_ownership_proposal")
+        .add_attribute("owner", info.sender))
+}
+
+pub fn execute_update_config(
+    deps: DepsMut,
+    info: MessageInfo,
+    adapter_contract: Option<String>,
+    burn_auction_subaccount: Option<String>,
+) -> StdResult<Response<InjectiveMsgWrapper>> {
+    // load and validate owner
+    let mut cfg = load_config(deps.as_ref())?;
+    let caller = deps.api.addr_canonicalize(info.sender.as_ref())?;
+    if caller != cfg.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+
+    // apply updates
+    if let Some(addr) = adapter_contract {
+        // validate new CW20 adapter address
+        deps.api.addr_validate(&addr)?;
+        cfg.adapter_contract = addr;
+    }
+    if let Some(sa) = burn_auction_subaccount {
+        // validate new subaccount ID (66-char 0x-prefixed)
+        SubaccountId::new(sa.clone()).map_err(|_| StdError::generic_err("Invalid subaccount"))?;
+        cfg.burn_auction_subaccount = sa;
+    }
+
+    // persist
+    save_config(deps, &cfg)?;
+    Ok(Response::new()
+        .add_attribute("action", "update_config")
+        .add_attribute("adapter_contract", cfg.adapter_contract.clone())
+        .add_attribute(
+            "burn_auction_subaccount",
+            cfg.burn_auction_subaccount.clone(),
+        ))
 }
 
 pub fn send_to_burn_auction(
@@ -154,6 +247,8 @@ pub fn send_to_burn_auction(
 
     let burn_amount = asset.amount;
     let asset_info = asset.info;
+
+    let subaccount_id = checked_address_to_subaccount_id(&env.contract.address, 1);
 
     if asset_info.is_native_token() {
         if info.funds.is_empty() {
@@ -182,7 +277,6 @@ pub fn send_to_burn_auction(
         }
 
         // Native token handling
-        let subaccount_id = checked_address_to_subaccount_id(&env.contract.address, 1);
         let deposit_msg = CosmosMsg::Custom(InjectiveMsgWrapper {
             route: InjectiveRoute::Exchange,
             msg_data: InjectiveMsg::Deposit {
@@ -218,7 +312,6 @@ pub fn send_to_burn_auction(
             }
         };
 
-        let subaccount_id = checked_address_to_subaccount_id(&env.contract.address, 1);
         let converted_native_denom = format!("factory/{}/{}", cw20_adapter_address, cw20_address);
 
         let adapter_msg = CosmosMsg::Wasm(WasmMsg::Execute {

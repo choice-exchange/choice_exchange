@@ -3,6 +3,13 @@
   "title": "ExecuteMsg",
   "oneOf": [
     {
+      "type": "string",
+      "enum": [
+        "accept_ownership",
+        "cancel_ownership_proposal"
+      ]
+    },
+    {
       "type": "object",
       "required": [
         "receive"
@@ -38,16 +45,43 @@
     {
       "type": "object",
       "required": [
-        "update_admin"
+        "update_config"
       ],
       "properties": {
-        "update_admin": {
+        "update_config": {
+          "type": "object",
+          "properties": {
+            "adapter_contract": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "burn_auction_subaccount": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "propose_new_owner"
+      ],
+      "properties": {
+        "propose_new_owner": {
           "type": "object",
           "required": [
-            "admin"
+            "new_owner"
           ],
           "properties": {
-            "admin": {
+            "new_owner": {
               "type": "string"
             }
           },

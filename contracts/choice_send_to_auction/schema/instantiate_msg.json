@@ -4,17 +4,17 @@
   "type": "object",
   "required": [
     "adapter_contract",
-    "admin",
-    "burn_auction_subaccount"
+    "burn_auction_subaccount",
+    "owner"
   ],
   "properties": {
     "adapter_contract": {
       "type": "string"
     },
-    "admin": {
+    "burn_auction_subaccount": {
       "type": "string"
     },
-    "burn_auction_subaccount": {
+    "owner": {
       "type": "string"
     }
   },

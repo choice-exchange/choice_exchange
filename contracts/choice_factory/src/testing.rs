@@ -66,32 +66,10 @@ fn update_config() {
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
-    // Update owner using UpdateConfigParams
-    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
-    let update_params = UpdateConfigParams {
-        owner: Some(deps.api.addr_make("addr0001").to_string()),
-        pair_code_id: None,
-        burn_address: None,
-        fee_wallet_address: None,
-    };
-    let msg = ExecuteMsg::UpdateConfig {
-        params: update_params,
-    };
-
-    let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-    assert_eq!(0, res.messages.len());
-
-    // Query and check updated state
-    let query_res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
-    let config_res: ConfigResponse = from_json(&query_res).unwrap();
-    assert_eq!(321u64, config_res.pair_code_id);
-    assert_eq!(deps.api.addr_make("addr0001").to_string(), config_res.owner);
-
     // Update other config fields
     let env = mock_env();
-    let info = message_info(&deps.api.addr_make("addr0001"), &[]);
+    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let update_params = UpdateConfigParams {
-        owner: None,
         pair_code_id: Some(100u64),
         burn_address: None,
         fee_wallet_address: None,
@@ -107,13 +85,12 @@ fn update_config() {
     let query_res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
     let config_res: ConfigResponse = from_json(&query_res).unwrap();
     assert_eq!(100u64, config_res.pair_code_id);
-    assert_eq!(deps.api.addr_make("addr0001").to_string(), config_res.owner);
+    assert_eq!(deps.api.addr_make("addr0000").to_string(), config_res.owner);
 
     // Try an update with unauthorized user
     let env = mock_env();
-    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    let info = message_info(&deps.api.addr_make("addr0001"), &[]);
     let update_params = UpdateConfigParams {
-        owner: None,
         pair_code_id: None,
         burn_address: None,
         fee_wallet_address: None,
@@ -488,6 +465,7 @@ fn reply_only_create_pair() {
                     .api
                     .addr_canonicalize(&deps.api.addr_make("feeaddr0000").to_string())
                     .unwrap(),
+                proposed_owner: None,
             },
         )
         .unwrap();
@@ -625,6 +603,7 @@ fn reply_create_pair_with_provide() {
                     .api
                     .addr_canonicalize(&deps.api.addr_make("feeaddr0000").to_string())
                     .unwrap(),
+                proposed_owner: None,
             },
         )
         .unwrap();
@@ -1026,6 +1005,7 @@ fn test_execute_add_native_token_decimals_factory() {
                     .api
                     .addr_canonicalize(&deps.api.addr_make("feeaddr0000").to_string())
                     .unwrap(),
+                proposed_owner: None,
             },
         )
         .unwrap();
@@ -1073,8 +1053,178 @@ fn test_execute_add_native_token_decimals_factory() {
     );
     match res_err {
         Err(StdError::GenericErr { msg, .. }) => {
-            assert_eq!(msg, "unauthorized: sender does not match owner in denom")
+            assert_eq!(
+                msg,
+                "unauthorized: sender does not match owner in denom and is not contract owner"
+            )
         }
         _ => panic!("Expected unauthorized error"),
     }
+}
+
+#[test]
+fn propose_and_accept_ownership() {
+    let mut deps = mock_dependencies(&[]);
+
+    // Instantiate contract
+    let msg = InstantiateMsg {
+        pair_code_id: 321u64,
+        burn_address: deps.api.addr_make("burnaddr0000").to_string(),
+        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
+    };
+
+    let env = mock_env();
+    let owner = deps.api.addr_make("owner0000");
+    let proposed_owner = deps.api.addr_make("newowner0000");
+
+    let info = message_info(&owner, &[]);
+    instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+    // Propose a new owner
+    let propose_msg = ExecuteMsg::ProposeNewOwner {
+        new_owner: proposed_owner.to_string(),
+    };
+
+    let res = execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
+    assert_eq!(
+        res.attributes,
+        vec![
+            ("action", "propose_new_owner"),
+            ("proposed_owner", proposed_owner.as_str()),
+        ]
+    );
+
+    // Make sure proposed_owner is set
+    let config = CONFIG.load(deps.as_ref().storage).unwrap();
+    assert_eq!(Some(proposed_owner.clone()), config.proposed_owner);
+
+    // Accept ownership by the proposed owner
+    let accept_info = message_info(&proposed_owner, &[]);
+    let accept_msg = ExecuteMsg::AcceptOwnership;
+    let res = execute(deps.as_mut(), env.clone(), accept_info.clone(), accept_msg).unwrap();
+    assert_eq!(
+        res.attributes,
+        vec![
+            ("action", "accept_ownership"),
+            ("new_owner", proposed_owner.as_str()),
+        ]
+    );
+
+    // Verify ownership is updated
+    let config = CONFIG.load(deps.as_ref().storage).unwrap();
+    assert_eq!(
+        config.owner,
+        deps.api.addr_canonicalize(proposed_owner.as_str()).unwrap()
+    );
+    assert_eq!(config.proposed_owner, None);
+}
+
+#[test]
+fn unauthorized_propose_new_owner() {
+    let mut deps = mock_dependencies(&[]);
+
+    // Instantiate contract
+    let msg = InstantiateMsg {
+        pair_code_id: 321u64,
+        burn_address: deps.api.addr_make("burnaddr0000").to_string(),
+        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
+    };
+
+    let env = mock_env();
+    let owner = deps.api.addr_make("owner0000");
+    let unauthorized = deps.api.addr_make("badactor0000");
+
+    let info = message_info(&owner, &[]);
+    instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+    // Try to propose a new owner from a non-owner
+    let propose_msg = ExecuteMsg::ProposeNewOwner {
+        new_owner: deps.api.addr_make("newowner0000").to_string(),
+    };
+
+    let bad_info = message_info(&unauthorized, &[]);
+    let res = execute(deps.as_mut(), env.clone(), bad_info, propose_msg);
+
+    match res {
+        Err(StdError::GenericErr { msg, .. }) => assert_eq!(msg, "Unauthorized"),
+        _ => panic!("Must return unauthorized error"),
+    }
+}
+
+#[test]
+fn unauthorized_accept_ownership() {
+    let mut deps = mock_dependencies(&[]);
+
+    // Instantiate contract
+    let msg = InstantiateMsg {
+        pair_code_id: 321u64,
+        burn_address: deps.api.addr_make("burnaddr0000").to_string(),
+        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
+    };
+
+    let env = mock_env();
+    let owner = deps.api.addr_make("owner0000");
+    let proposed_owner = deps.api.addr_make("newowner0000");
+    let bad_actor = deps.api.addr_make("badactor0000");
+
+    let info = message_info(&owner, &[]);
+    instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+    // Owner proposes a new owner
+    let propose_msg = ExecuteMsg::ProposeNewOwner {
+        new_owner: proposed_owner.to_string(),
+    };
+    execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
+
+    // Try to accept ownership with a wrong account
+    let bad_info = message_info(&bad_actor, &[]);
+    let accept_msg = ExecuteMsg::AcceptOwnership;
+    let res = execute(deps.as_mut(), env.clone(), bad_info, accept_msg);
+
+    match res {
+        Err(StdError::GenericErr { msg, .. }) => {
+            assert_eq!(msg, "No ownership proposal for you")
+        }
+        _ => panic!("Must fail with 'No ownership proposal for you'"),
+    }
+}
+
+#[test]
+fn test_cancel_ownership_proposal() {
+    let mut deps = mock_dependencies(&[]);
+
+    let owner = deps.api.addr_make("owner0000");
+    let proposed_owner = deps.api.addr_make("newowner0000");
+
+    let env = mock_env();
+    let info = message_info(&owner, &[]);
+
+    // Instantiate
+    let msg = InstantiateMsg {
+        pair_code_id: 321u64,
+        burn_address: deps.api.addr_make("burnaddr0000").to_string(),
+        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
+    };
+    instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+    // Propose new owner
+    let propose_msg = ExecuteMsg::ProposeNewOwner {
+        new_owner: proposed_owner.to_string(),
+    };
+    execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
+
+    // Cancel proposal
+    let cancel_msg = ExecuteMsg::CancelOwnershipProposal;
+    let res = execute(deps.as_mut(), env.clone(), info.clone(), cancel_msg).unwrap();
+    assert_eq!(
+        res.attributes,
+        vec![
+            ("action", "cancel_ownership_proposal"),
+            ("owner", owner.as_str()),
+        ]
+    );
+
+    // Verify proposal is cleared
+    let config = CONFIG.load(deps.as_ref().storage).unwrap();
+    assert_eq!(config.proposed_owner, None);
 }

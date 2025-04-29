@@ -1,3 +1,4 @@
+use cosmwasm_std::Uint128;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +13,6 @@ pub struct InstantiateMsg {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct UpdateConfigParams {
-    pub owner: Option<String>,
     pub pair_code_id: Option<u64>,
     pub burn_address: Option<String>,
     pub fee_wallet_address: Option<String>,
@@ -37,6 +37,15 @@ pub enum ExecuteMsg {
         contract: String,
         code_id: Option<u64>,
     },
+    WithdrawNative {
+        denom: String,
+        amount: Uint128,
+    },
+    ProposeNewOwner {
+        new_owner: String,
+    },
+    AcceptOwnership,
+    CancelOwnershipProposal,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
