@@ -1,6 +1,6 @@
 [package]
 name = "choice-router"
-version = "1.1.1"
+version = "1.1.2"
 authors = ["Dan Van Eijck"]
 edition = "2018"
 description = "A Choice router contract - provides multi-step operations to facilitate single sign operation"
@@ -36,4 +36,4 @@ injective-math       = { version = "0.3.0" }
 schemars = "0.8.10"
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 
-choice = { path = "../../packages/choice", default-features = false, version = "1.1.1"}
+choice = { path = "../../packages/choice", default-features = false, version = "1.1.2"}

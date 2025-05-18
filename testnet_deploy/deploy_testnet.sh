@@ -95,7 +95,7 @@ CW20_ADAPTER_ADDRESS=$(instantiate_contract "$CW20_ADAPTER_CODE_ID" "$INIT_CW20"
 # 6. Instantiate burn manager contract 
 INIT_BURN=$(cat <<EOF
 {
-  "admin": "$ADMIN_ADDRESS",
+  "owner": "$ADMIN_ADDRESS",
   "adapter_contract": "$CW20_ADAPTER_ADDRESS",
   "burn_auction_subaccount": "0x1111111111111111111111111111111111111111111111111111111111111111"
 }

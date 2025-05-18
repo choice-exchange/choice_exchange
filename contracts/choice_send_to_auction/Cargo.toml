@@ -1,6 +1,6 @@
 [package]
 name = "choice-send-to-auction"
-version = "1.1.1"
+version = "1.1.2"
 authors = ["Dan Van Eijck"]
 edition = "2021"
 
@@ -34,4 +34,4 @@ thiserror         = { version = "2.0.12" }
 
 hex               = { version = "0.4.3" }
 
-choice              = { path = "../../packages/choice", default-features = false, version = "1.1.1" }
+choice              = { path = "../../packages/choice", default-features = false, version = "1.1.2" }

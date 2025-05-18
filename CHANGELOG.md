@@ -1,5 +1,13 @@
 # Change log
 
+## v1.1.2
+
+**Date:** `2025-05-18`  
+**GitHub:** [@danvaneijck](https://github.com/danvaneijck)
+
+- added fixes from security audit
+- 2 step admin transfer system
+
 ## v1.1.1
 
 **Date:** `2025-03-20`  

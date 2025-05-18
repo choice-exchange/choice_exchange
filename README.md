@@ -8,6 +8,12 @@ Choice Exchange is an AMM protocol forked from TerraSwap, modernized to work on 
 
 [Testnet Contracts](deployed_contracts.md)
 
+## Security Audit
+
+A security audit was performed by SCV Security and can be found here:
+
+[Audit v1.0](audit/audit_v1.0)
+
 ## Main changes
 
 The Choice exchange protocol has extended the contracts of TerraSwap in several ways.
