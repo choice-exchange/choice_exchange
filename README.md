@@ -12,7 +12,7 @@ Choice Exchange is an AMM protocol forked from TerraSwap, modernized to work on 
 
 A security audit was performed by SCV Security and can be found here:
 
-[Audit v1.0](audit/audit_v1.0)
+[Audit v1.0](audit/audit_v1.0.pdf)
 
 ## Main changes
 
