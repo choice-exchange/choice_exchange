@@ -551,7 +551,7 @@ pub fn query_native_token_decimal(
     Ok(NativeTokenDecimalsResponse { decimals })
 }
 
-const TARGET_CONTRACT_VERSION: &str = "1.1.1";
+const TARGET_CONTRACT_VERSION: &str = "1.1.2";
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(
     deps: DepsMut<InjectiveQueryWrapper>,

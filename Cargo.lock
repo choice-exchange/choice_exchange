@@ -227,7 +227,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "choice"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "choice-factory"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "choice",
  "cosmwasm-schema",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "choice-farm"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "choice",
  "cosmwasm-schema",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "choice-pair"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "choice",
  "cosmwasm-schema",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "choice-router"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "choice",
  "cosmwasm-schema",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "choice-send-to-auction"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "choice",
  "cosmwasm-schema",

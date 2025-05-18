@@ -1,6 +1,6 @@
 [package]
 name = "choice-farm"
-version = "1.1.1"
+version = "1.1.2"
 authors = ["Dan Van Eijck"]
 edition = "2018"
 description = "A Staking contract for Choice Exchange"
@@ -36,7 +36,7 @@ cosmwasm-std      = { version = "2.2.2", features = [
 ] }
 cw-storage-plus   = { version = "2.0.0" }
 cosmwasm-schema   = { version = "2.2.2" }
-choice            = { path = "../../packages/choice", default-features = false, version = "1.1.1" }
+choice            = { path = "../../packages/choice", default-features = false, version = "1.1.2" }
 
 schemars          = "0.8.22"
 serde             = { version = "1.0.219", default-features = false, features = ["derive"] }
