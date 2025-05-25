@@ -573,6 +573,13 @@ pub fn swap(
         );
     }
 
+    // new pool amounts
+    let offer_pool_post = offer_pool.amount.checked_add(offer_amount)?;
+    let ask_pool_post = ask_pool.amount
+        .checked_sub(return_amount)?
+        .checked_sub(fee_wallet_amount)?
+        .checked_sub(burn_amount)?;
+
     // 1. send collateral token from the contract to a user
     // 2. send inactive commission to collector
     Ok(Response::new().add_messages(messages).add_attributes(vec![
@@ -588,6 +595,8 @@ pub fn swap(
         ("burn_amount", &burn_amount.to_string()),
         ("fee_wallet_amount", &fee_wallet_amount.to_string()),
         ("pool_amount", &lp_amount.to_string()),
+        ("offer_pool_balance", &offer_pool_post.to_string()),
+        ("ask_pool_balance", &ask_pool_post.to_string()),
     ]))
 }
 

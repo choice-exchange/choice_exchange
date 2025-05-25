@@ -108,7 +108,15 @@ mod tests {
         let res = execute(deps.as_mut(), env.clone(), admin_info, execute_msg).unwrap();
 
         // Assert the response attributes
-        assert_eq!(res.attributes, vec![("action", "send_native")]);
+        assert_eq!(
+            res.attributes,
+            vec![
+                ("action", "send_native"),
+                ("burn_action", "send_to_burn_auction"),
+                ("burn_asset", "inj"),
+                ("burn_amount", "1000"),
+            ]
+        );
 
         // Assert that the appropriate messages were created
         assert_eq!(res.messages.len(), 2); // Deposit and Transfer messages
@@ -163,7 +171,9 @@ mod tests {
             vec![
                 ("action", "receive_cw20"),
                 ("sender", cw20_sender),
-                ("amount", cw20_amount.to_string().as_str())
+                ("burn_action", "send_to_burn_auction"),
+                ("burn_asset", cw20_contract),
+                ("burn_amount", &cw20_amount.to_string()),
             ]
         );
 

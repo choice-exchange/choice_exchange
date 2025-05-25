@@ -864,6 +864,12 @@ fn try_native_to_token() {
             < 3i128
     );
 
+    let expected_offer_pool_post = collateral_pool_amount + offer_amount;
+    let expected_ask_pool_post = asset_pool_amount
+        - expected_return_amount
+        - expected_fee_wallet_amount
+        - expected_burn_amount;
+
     assert_eq!(
         res.attributes,
         vec![
@@ -879,6 +885,8 @@ fn try_native_to_token() {
             attr("burn_amount", expected_burn_amount.to_string()),
             attr("fee_wallet_amount", expected_fee_wallet_amount.to_string()),
             attr("pool_amount", expected_lp_amount.to_string()),
+            attr("offer_pool_balance", expected_offer_pool_post.to_string()),
+            attr("ask_pool_balance", expected_ask_pool_post.to_string()),
         ]
     );
 
@@ -1081,6 +1089,12 @@ fn try_token_to_native() {
             < 3i128
     );
 
+    let expected_offer_pool_post = asset_pool_amount + offer_amount;
+    let expected_ask_pool_post = collateral_pool_amount
+        - expected_return_amount
+        - expected_fee_wallet_amount
+        - expected_burn_amount;
+
     assert_eq!(
         res.attributes,
         vec![
@@ -1096,6 +1110,8 @@ fn try_token_to_native() {
             attr("burn_amount", expected_burn_amount.to_string()),
             attr("fee_wallet_amount", expected_fee_wallet_amount.to_string()),
             attr("pool_amount", expected_lp_amount.to_string()),
+            attr("offer_pool_balance", expected_offer_pool_post.to_string()),
+            attr("ask_pool_balance", expected_ask_pool_post.to_string()),
         ]
     );
 
