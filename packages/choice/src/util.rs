@@ -77,13 +77,13 @@ mod test {
         let mut deps = mock_dependencies(&[]);
         set_contract_version(deps.as_mut().storage, NAME, TARGET_VERSION).unwrap();
 
-        let res = migrate_version(deps.as_mut(), "invalide_version", NAME, CURRENT_VERSION);
+        let res = migrate_version(deps.as_mut(), "invalid_version", NAME, CURRENT_VERSION);
 
         assert_eq!(
             res,
             Err(StdError::generic_err(format!(
                 "invalid contract version. target {}, but source is {}",
-                "invalide_version", TARGET_VERSION
+                "invalid_version", TARGET_VERSION
             )))
         );
 

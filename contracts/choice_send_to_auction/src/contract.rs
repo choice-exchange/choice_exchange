@@ -133,7 +133,7 @@ pub fn send_native(
     }
 
     let asset_info_for_log = asset.info.clone();
-    let asset_amount_for_log = asset.amount.clone();
+    let asset_amount_for_log = asset.amount;
 
     send_to_burn_auction(deps, env, info, asset, &mut messages)?;
 
