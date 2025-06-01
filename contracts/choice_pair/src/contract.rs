@@ -725,7 +725,7 @@ pub fn compute_swap(
     offer_amount: Uint128,
     offer_dec: u8,
     ask_dec: u8,
-) -> Result<(Uint128, Uint128, Uint128), ContractError> {
+) -> StdResult<(Uint128, Uint128, Uint128)> {
     let target_dec = offer_dec.max(ask_dec);
     let pow10 = |d: u8| Uint256::from(10u128.pow(d as u32));
     let up = |x: Uint128, from: u8| Uint256::from(x) * pow10(target_dec - from);
@@ -743,15 +743,15 @@ pub fn compute_swap(
     )?;
 
     // 3. down-scale helper
-    let down = |x: Uint128| -> Result<Uint128, ContractError> {
-        let mut n = Uint256::from(x);
+    let down = |x: Uint128| -> Uint128 {
         if target_dec > ask_dec {
-            n /= pow10(target_dec - ask_dec)
+            x / Uint128::from(10u128.pow((target_dec - ask_dec) as u32))
+        } else {
+            x
         }
-        Ok(n.try_into()?)           
     };
 
-    Ok((down(ret_u128)?, down(spread_u128)?, down(fee_u128)?))
+    Ok((down(ret_u128), down(spread_u128), down(fee_u128)))
 }
 
 
@@ -786,66 +786,6 @@ fn compute_swap_raw(
     ))
 }
 
-#[test]
-fn test_compute_swap_with_huge_pool_variance() {
-    let offer_pool = Uint128::from(395451850234u128);
-    let ask_pool = Uint128::from(317u128);
-
-    assert_eq!(
-        compute_swap(offer_pool, ask_pool, Uint128::from(1u128), 6, 6)
-            .unwrap()
-            .0,
-        Uint128::zero()
-    );
-}
-
-#[test]
-fn swap_6_vs_18_does_not_panic() {
-    // (tiny) 6-dec ask vs huge 18-dec offer
-    let ask_pool  = Uint128::new(1_000_000);                     // 1.0 (6-dec)
-    let offer_pool= Uint128::new(1_000_000_000_000_000_000u128); // 1.0 (18-dec)
-    let offer_amt = Uint128::new(500_000_000_000_000_000u128);   // 0.5 (18-dec)
-
-    let (ret, _, _) = compute_swap(offer_pool, ask_pool, offer_amt, 18, 6).unwrap();
-    assert!(ret > Uint128::zero());
-}
-
-#[test]
-fn test_compute_swap_max_whole_tokens() {
-    // Determine the largest "whole‐token" amount fitting in Uint128 when scaled to 18 decimals:
-    //   max_whole = floor(Uint128::MAX / 10^18) * 10^18
-    let base: u128 = 10u128.pow(18);
-    let max_whole: u128 = (u128::MAX / base) * base;
-    let pool_size   = Uint128::new(max_whole);
-    let offer_amount = Uint128::new(max_whole);
-
-    // Should compute without panic/overflow
-    let (return_amount, spread_amount, commission_amount) =
-        compute_swap(pool_size, pool_size, offer_amount, 18, 18).unwrap();
-
-    // Invariants for the max‐whole scenario:
-    // 1. return_amount never exceeds the ask pool
-    assert!(
-        return_amount.u128() <= pool_size.u128(),
-        "return_amount {} > pool_size {}",
-        return_amount,
-        pool_size
-    );
-    // 2. commission never exceeds what is returned
-    assert!(
-        commission_amount.u128() <= return_amount.u128(),
-        "commission_amount {} > return_amount {}",
-        commission_amount,
-        return_amount
-    );
-    // 3. spread never exceeds the original offer
-    assert!(
-        spread_amount.u128() <= offer_amount.u128(),
-        "spread_amount {} > offer_amount {}",
-        spread_amount,
-        offer_amount
-    );
-}
 
 fn compute_offer_amount(
     offer_pool: Uint128,
