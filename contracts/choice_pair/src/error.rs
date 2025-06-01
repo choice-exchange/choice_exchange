@@ -41,4 +41,7 @@ pub enum ContractError {
         min_lp_token: String,
         given_lp: String,
     },
+
+    #[error("LP supply overflow")]
+    LpSupplyOverflow {}
 }

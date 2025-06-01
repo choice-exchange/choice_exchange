@@ -13,8 +13,7 @@ use choice::pair::{
 };
 use cosmwasm_std::testing::{message_info, mock_env, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    attr, to_json_binary, Api, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256, ReplyOn,
-    Response, StdError, SubMsg, Uint128, WasmMsg,
+    attr, coins, to_json_binary, Addr, Api, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256, ReplyOn, Response, StdError, SubMsg, Uint128, Uint256, WasmMsg
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use injective_cosmwasm::msg::{create_new_denom_msg, create_set_token_metadata_msg};
@@ -1818,8 +1817,6 @@ fn test_initial_liquidity_provide() {
 
 #[test]
 fn test_create_pair_simulated() {
-    use cosmwasm_std::{Coin, SubMsg, Uint128, Uint256};
-    // Setup our mock dependencies.
     let mut deps = mock_dependencies(&[]);
 
     // Set the token factory supply to zero for the LP token.
@@ -1828,11 +1825,11 @@ fn test_create_pair_simulated() {
         Uint128::zero(),
     )]);
 
-    // Set up the native balance for the contract for the SAI asset.
+    // Set up the native balance for the contract for the asset.
     deps.querier.with_balance(&[(
         &MOCK_CONTRACT_ADDR.to_string(),
         vec![Coin {
-            denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+            denom: "token".to_string(),
             amount: Uint128::from(200000000000u128),
         }],
     )]);
@@ -1848,12 +1845,12 @@ fn test_create_pair_simulated() {
     )]);
 
     // Instantiate the contract with two assets:
-    // - Asset 0: Native token SAI.
+    // - Asset 0: Native token
     // - Asset 1: CW20 token.
     let instantiate_msg = InstantiateMsg {
         asset_infos: [
             AssetInfo::NativeToken {
-                denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+                denom: "token".to_string(),
             },
             AssetInfo::Token {
                 contract_addr: cw20_addr.to_string(),
@@ -1871,13 +1868,13 @@ fn test_create_pair_simulated() {
 
     // Create the pair by executing a CreatePair message.
     // Assets:
-    // - Native: 200000000000 (SAI)
+    // - Native: 200000000000 
     // - CW20: 10000000000000000000000000
     let create_pair_msg = ExecuteMsg::ProvideLiquidity {
         assets: [
             Asset {
                 info: AssetInfo::NativeToken {
-                    denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+                    denom: "token".to_string(),
                 },
                 amount: Uint128::from(200000000000u128),
             },
@@ -1898,7 +1895,7 @@ fn test_create_pair_simulated() {
     let exec_info = message_info(
         &creator,
         &[Coin {
-            denom: "factory/inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz/SAI".to_string(),
+            denom: "token".to_string(),
             amount: Uint128::from(200000000000u128),
         }],
     );
@@ -1939,4 +1936,156 @@ fn test_create_pair_simulated() {
         creator.to_string(), // mint to creator
     ));
     assert_eq!(mint_msg, expected_mint_msg);
+}
+
+
+#[test]
+fn simulate_token_to_native_underflow() {
+    let total_share = Uint128::new(2_624_880_949_681_337_452u128);
+
+    let ask_pool_native = Uint128::new(112_671_819_035u128);
+
+    let offer_pool_token =
+        Uint128::new(61_169_543_951_810_129_262_735_575u128);
+
+        let offer_amount = Uint128::new(100_000_000_000_000_000_000u128);
+
+    let mut deps = mock_dependencies(&[]);
+
+    deps.querier.with_balance(&[(
+        &MOCK_CONTRACT_ADDR.to_string(),
+        vec![
+            Coin {
+                denom: "token"
+                    .to_string(),
+                amount: ask_pool_native,
+            },
+            Coin {
+                denom: format!("factory/{}/lp", MOCK_CONTRACT_ADDR),
+                amount: total_share,
+            },
+        ],
+    )]);
+
+    deps.querier.with_token_balances(&[(
+        &deps.api.addr_make("cw20token").to_string(),
+        &[(
+            &MOCK_CONTRACT_ADDR.to_string(),
+            &offer_pool_token,
+        )],
+    )]);
+
+    deps.querier.with_token_factory_denom_supply(&[(
+        &format!("factory/{}/lp", MOCK_CONTRACT_ADDR),
+        total_share,
+    )]);
+
+    let creator = deps.api.addr_make("creator");
+
+    let init_msg = InstantiateMsg {
+        asset_infos: [
+            AssetInfo::NativeToken {
+                denom: "token"
+                    .to_string(),
+            },
+            AssetInfo::Token {
+                contract_addr: deps.api.addr_make("cw20token").to_string(),
+            },
+        ],
+        asset_decimals: [6u8, 18u8], 
+        burn_address: deps.api.addr_make("burnaddr0000").to_string(),
+        fee_wallet_address: deps.api.addr_make("feeaddr0000").to_string(),
+    };
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&creator, &[]),
+        init_msg,
+    )
+    .unwrap();
+
+    let _ = query_simulation(
+        deps.as_ref(),
+        Asset {
+            info: AssetInfo::Token {
+                contract_addr: deps.api.addr_make("cw20token").to_string(),
+            },
+            amount: offer_amount,
+        },
+    )
+    .unwrap();
+}
+
+
+#[test]
+fn provide_liquidity_lp_overflow() {
+
+
+    let mut deps = mock_dependencies(&[]);
+    let pair_addr = Addr::unchecked(MOCK_CONTRACT_ADDR);
+    let lp_denom  = format!("factory/{}/lp", MOCK_CONTRACT_ADDR);
+
+    deps.querier.with_balance(&[(
+        &pair_addr.to_string(),
+        vec![
+            Coin { denom: "uusd".into(),  amount: Uint128::new(1_000) },
+            Coin { denom: "uluna".into(), amount: Uint128::new(1_000) },
+        ],
+    )]);
+    deps.querier
+        .with_token_factory_denom_supply(&[(&lp_denom, Uint128::MAX)]);
+
+    let creator = deps.api.addr_make("creator");
+    let burn = deps.api.addr_make("burn");              
+    let fees = deps.api.addr_make("fees");              
+
+    let inst_info = message_info(&creator, &[]);             
+
+    instantiate(
+        deps.as_mut(),                                       
+        mock_env(),
+        inst_info,                                            
+        InstantiateMsg {
+            asset_infos: [
+                AssetInfo::NativeToken { denom: "uusd".into() },
+                AssetInfo::NativeToken { denom: "uluna".into() },
+            ],
+            asset_decimals: [6, 6],
+            burn_address:   burn.to_string(),
+            fee_wallet_address: fees.to_string(),
+        },
+    )
+    .unwrap();
+
+    let exec_msg = ExecuteMsg::ProvideLiquidity {
+        assets: [
+            Asset {
+                info:   AssetInfo::NativeToken { denom: "uusd".into() },
+                amount: Uint128::new(1),
+            },
+            Asset {
+                info:   AssetInfo::NativeToken { denom: "uluna".into() },
+                amount: Uint128::new(1),
+            },
+        ],
+        receiver: None,
+        deadline: None,
+        slippage_tolerance: None,
+    };
+
+    let lp_addr   = deps.api.addr_make("liquidity_provider");  // pre-compute
+    let exec_info = message_info(
+        &lp_addr,
+        &coins(1, "uusd")
+            .into_iter()
+            .chain(coins(1, "uluna"))
+            .collect::<Vec<_>>(),
+    );
+
+    let res = execute(deps.as_mut(), mock_env(), exec_info, exec_msg);
+
+    match res {
+        Err(ContractError::LpSupplyOverflow{}) => (),          
+        other => panic!("expected LpSupplyOverflow, got {:?}", other),
+    }
 }
