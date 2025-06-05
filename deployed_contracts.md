@@ -26,4 +26,6 @@
 
 ## Testnet dApp
 
-You can interact with the contracts at https://testnet.choice.exchange (code `letmein`)
+You can interact with the contracts at https://testnet.choice.exchange
+
+new pair code 32051
