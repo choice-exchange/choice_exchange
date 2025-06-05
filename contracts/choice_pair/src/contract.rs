@@ -298,6 +298,14 @@ pub fn provide_liquidity(
         return Err(ContractError::InvalidZeroAmount {});
     }
 
+    // the total lp token cannot exceed the max value of a Uint128
+    if total_share
+        .checked_add(share)
+        .is_err()                       
+    {
+        return Err(ContractError::LpSupplyOverflow{});  
+    }
+
     // refund of remaining native token & desired of token
     let mut refund_assets: Vec<Asset> = vec![];
     for (i, pool) in pools.iter().enumerate() {
@@ -495,7 +503,7 @@ pub fn swap(
 
     let offer_amount = offer_asset.amount;
     let (return_amount, spread_amount, commission_amount) =
-        compute_swap(offer_pool.amount, ask_pool.amount, offer_amount)?;
+        compute_swap(offer_pool.amount, ask_pool.amount, offer_amount, offer_decimal, ask_decimal)?;
 
     let return_asset = Asset {
         info: ask_pool.info.clone(),
@@ -573,6 +581,13 @@ pub fn swap(
         );
     }
 
+    // new pool amounts
+    let offer_pool_post = offer_pool.amount.checked_add(offer_amount)?;
+    let ask_pool_post = ask_pool.amount
+        .checked_sub(return_amount)?
+        .checked_sub(fee_wallet_amount)?
+        .checked_sub(burn_amount)?;
+
     // 1. send collateral token from the contract to a user
     // 2. send inactive commission to collector
     Ok(Response::new().add_messages(messages).add_attributes(vec![
@@ -588,6 +603,8 @@ pub fn swap(
         ("burn_amount", &burn_amount.to_string()),
         ("fee_wallet_amount", &fee_wallet_amount.to_string()),
         ("pool_amount", &lp_amount.to_string()),
+        ("offer_pool_balance", &offer_pool_post.to_string()),
+        ("ask_pool_balance", &ask_pool_post.to_string()),
     ]))
 }
 
@@ -644,18 +661,24 @@ pub fn query_simulation(
 
     let offer_pool: Asset;
     let ask_pool: Asset;
+    let offer_decimal: u8;
+    let ask_decimal: u8;
     if offer_asset.info.equal(&pools[0].info) {
         offer_pool = pools[0].clone();
         ask_pool = pools[1].clone();
+        offer_decimal = pair_info.asset_decimals[0];
+        ask_decimal = pair_info.asset_decimals[1];
     } else if offer_asset.info.equal(&pools[1].info) {
         offer_pool = pools[1].clone();
         ask_pool = pools[0].clone();
+        offer_decimal = pair_info.asset_decimals[1];
+        ask_decimal = pair_info.asset_decimals[0];
     } else {
         return Err(ContractError::AssetMismatch {});
     }
 
     let (return_amount, spread_amount, commission_amount) =
-        compute_swap(offer_pool.amount, ask_pool.amount, offer_asset.amount)?;
+        compute_swap(offer_pool.amount, ask_pool.amount, offer_asset.amount, offer_decimal, ask_decimal)?;
 
     Ok(SimulationResponse {
         return_amount,
@@ -695,7 +718,44 @@ pub fn query_reverse_simulation(
     })
 }
 
-fn compute_swap(
+
+pub fn compute_swap(
+    offer_pool: Uint128,
+    ask_pool: Uint128,
+    offer_amount: Uint128,
+    offer_dec: u8,
+    ask_dec: u8,
+) -> StdResult<(Uint128, Uint128, Uint128)> {
+    let target_dec = offer_dec.max(ask_dec);
+    let pow10 = |d: u8| Uint256::from(10u128.pow(d as u32));
+    let up = |x: Uint128, from: u8| Uint256::from(x) * pow10(target_dec - from);
+
+    // 1. upscale helper
+    let offer_pool_u   = up(offer_pool,   offer_dec);
+    let ask_pool_u     = up(ask_pool,     ask_dec);
+    let offer_amount_u = up(offer_amount, offer_dec);
+
+    // 2. raw math
+    let (ret_u128, spread_u128, fee_u128) = compute_swap_raw(
+        offer_pool_u.try_into()?,   
+        ask_pool_u.try_into()?,     
+        offer_amount_u.try_into()?, 
+    )?;
+
+    // 3. down-scale helper
+    let down = |x: Uint128| -> Uint128 {
+        if target_dec > ask_dec {
+            x / Uint128::from(10u128.pow((target_dec - ask_dec) as u32))
+        } else {
+            x
+        }
+    };
+
+    Ok((down(ret_u128), down(spread_u128), down(fee_u128)))
+}
+
+
+fn compute_swap_raw(
     offer_pool: Uint128,
     ask_pool: Uint128,
     offer_amount: Uint128,
@@ -726,18 +786,6 @@ fn compute_swap(
     ))
 }
 
-#[test]
-fn test_compute_swap_with_huge_pool_variance() {
-    let offer_pool = Uint128::from(395451850234u128);
-    let ask_pool = Uint128::from(317u128);
-
-    assert_eq!(
-        compute_swap(offer_pool, ask_pool, Uint128::from(1u128))
-            .unwrap()
-            .0,
-        Uint128::zero()
-    );
-}
 
 fn compute_offer_amount(
     offer_pool: Uint128,

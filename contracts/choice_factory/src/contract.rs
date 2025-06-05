@@ -237,7 +237,7 @@ pub fn execute_add_native_token_decimals(
             ));
         }
     } else {
-        // For non-factory denoms, require that the sender is the contract owner.
+        // For non-factory denominations, require that the sender is the contract owner.
         if deps.api.addr_canonicalize(info.sender.as_str())? != config.owner {
             return Err(StdError::generic_err("unauthorized"));
         }
