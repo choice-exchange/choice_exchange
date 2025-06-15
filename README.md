@@ -8,6 +8,34 @@ Choice Exchange is an AMM protocol forked from TerraSwap, modernized to work on 
 
 [Testnet Contracts](deployed_contracts.md)
 
+## Mainnet
+
+Choice Treasury Multisig:
+
+`inj1c2yleauy9say73tsx3dk5tvlgwwzdh96r76zv4`
+
+Choice Dev Multisig:
+
+`inj1vcszz8j58m79exzdlpa8m9u5eyu9r37u7jhm7k`
+
+### Mainnet Code IDs
+
+| Component    | Code ID |
+| ------------ | ------- |
+| Pair         | 1692    |
+| Factory      | 1693    |
+| Burn Manager | 1690    |
+| Router       | 1691    |
+
+### Mainnet Contract Addresses
+
+| Component    | Address                                      |
+| ------------ | -------------------------------------------- |
+| CW20 Adapter | `inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk` |
+| Burn Manager | `inj1yr7srge0lku4h3gd473qdlpdfw63ejdjwkh4c0` |
+| Factory      | `inj1k9lcqtn3y92h4t3tdsu7z8qx292mhxhgsssmxg` |
+| Router       | `inj1ne2durmsx2jurvy4wgnhegv3xt6789up8xgum3` |
+
 ## Security Audit
 
 A security audit was performed by SCV Security and can be found here:
