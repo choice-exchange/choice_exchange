@@ -1,4 +1,6 @@
-# Testnet Deployment
+# Deployed Contracts
+
+## Testnet Deployment
 
 ## Code IDs
 
@@ -28,23 +30,33 @@
 
 You can interact with the contracts at https://testnet.choice.exchange (code `letmein`)
 
-# Mainnet 
+## Mainnet 
 
 Choice Treasury Multisig: `inj1c2yleauy9say73tsx3dk5tvlgwwzdh96r76zv4`
 
 Choice Dev Multisig: `inj1vcszz8j58m79exzdlpa8m9u5eyu9r37u7jhm7k`
 
-Code IDs:
-  Pair:                1692
-  Factory:             1693
-  Burn Manager:        1690
-  Router:              1691
+## Mainnet Code IDs
 
-Contract Addresses:
-  CW20 Adapter:        inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk
-  Burn Manager:        inj1yr7srge0lku4h3gd473qdlpdfw63ejdjwkh4c0
-  Factory:             inj1k9lcqtn3y92h4t3tdsu7z8qx292mhxhgsssmxg
-  Router:              inj1ne2durmsx2jurvy4wgnhegv3xt6789up8xgum3
+| Component    | Code ID |
+| ------------ | ------- |
+| Pair         | 1692    |
+| Factory      | 1693    |
+| Burn Manager | 1690    |
+| Router       | 1691    |
 
-Fee Wallet Address:        inj1c2yleauy9say73tsx3dk5tvlgwwzdh96r76zv4
-Admin Address:        inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz
+## Mainnet Contract Addresses
+
+| Component    | Address                                      |
+| ------------ | -------------------------------------------- |
+| CW20 Adapter | `inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk` |
+| Burn Manager | `inj1yr7srge0lku4h3gd473qdlpdfw63ejdjwkh4c0` |
+| Factory      | `inj1k9lcqtn3y92h4t3tdsu7z8qx292mhxhgsssmxg` |
+| Router       | `inj1ne2durmsx2jurvy4wgnhegv3xt6789up8xgum3` |
+
+## Misc
+
+| Label         | Address                                      |
+| ------------- | -------------------------------------------- |
+| Fee Wallet    | `inj1c2yleauy9say73tsx3dk5tvlgwwzdh96r76zv4` |
+| Admin Address | `inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz` |
