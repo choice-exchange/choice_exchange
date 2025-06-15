@@ -11,7 +11,7 @@ FROM="testnet"
 PASSWORD="12345678"
 
 # Factory contract address (update this to your deployed factory contract address)
-FACTORY_CONTRACT="inj185n47hcx7lm4art0j8sm2yu4a7pdnpgdpjrcsy"
+FACTORY_CONTRACT="inj150qeu7h9ktn2aqz94tepsh089u63nasfc2t6sw"
 
 # Admin address that sends the bank funds (update to admin of the factory contract)
 ADMIN_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"
@@ -25,6 +25,7 @@ TOKENS=(
   "factory/inj17vytdwqczqz72j65saukplrktd4gyfme5agf6c/atom:8"   # ATOM
   "factory/inj17vytdwqczqz72j65saukplrktd4gyfme5agf6c/weth:8"   # wETH
   "peggy0x87aB3B4C8661e07D6372361211B96ed4Dc36B1B5:6"           # USDT
+  "factory/inj1jdt04erw6jdmh6c939u87kldf3mvvmkedsjp3w/DOJO:6"  
 )
 
 for token in "${TOKENS[@]}"; do
