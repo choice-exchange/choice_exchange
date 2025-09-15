@@ -2,7 +2,7 @@
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    coins, from_json, to_json_binary, Addr, BankMsg, Binary, CanonicalAddr, Coin, CosmosMsg,
+    coins, from_json, to_json_binary, Addr, BankMsg, Binary, CanonicalAddr, CosmosMsg,
     Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128, WasmMsg,
 };
 
@@ -59,18 +59,15 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
             let config: Config = read_config(deps.storage)?;
             // For native tokens, check that the funds sent match the staking token denom.
             if let AssetInfo::NativeToken { ref denom } = config.staking_token {
-                let expected_coin = Coin {
-                    denom: denom.clone(),
-                    amount,
-                };
-
-                // Check that info.funds contains a coin with the expected denom and matches the expected amount.
-                let found = info
-                    .funds
-                    .iter()
-                    .find(|&c| c.denom == expected_coin.denom && c.amount == expected_coin.amount);
-                if found.is_none() {
-                    return Err(StdError::generic_err("Insufficient funds for bonding"));
+                if info.funds.len() != 1 {
+                    return Err(StdError::generic_err("Only the staking token is accepted for bonding"));
+                }
+                let received_coin = &info.funds[0];
+                if received_coin.denom != *denom || received_coin.amount != amount {
+                    return Err(StdError::generic_err(format!(
+                        "Incorrect native token sent. Expected {} {}, got {} {}",
+                        amount, denom, received_coin.amount, received_coin.denom
+                    )));
                 }
                 bond(deps, env, info.sender.clone(), amount)
             } else {
