@@ -333,6 +333,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "choice-vault"
+version = "1.1.2"
+dependencies = [
+ "choice",
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus",
+ "cw2",
+ "cw20",
+ "schemars",
+ "serde",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "cloudabi"
 version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

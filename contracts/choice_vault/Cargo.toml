@@ -1,0 +1,44 @@
+[package]
+name = "choice-vault"
+version = "1.1.2"
+authors = ["Dan Van Eijck"]
+edition = "2018"
+description = "A vault that can auto compound rewards on a choice farm"
+license = "Apache-2.0"
+
+exclude = [
+  # Those files are rust-optimizer artifacts. You might want to commit them for convenience but they should not be part of the source code publication.
+  "contract.wasm",
+  "hash.txt",
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+
+[features]
+# for quicker tests, cargo test --lib
+# for more explicit tests, cargo test --features=backtraces
+library = []
+
+[dependencies]
+cw2               = { version = "2.0.0" }
+cw20              = { version = "2.0.0" }
+cosmwasm-std      = { version = "2.2.2", features = [
+    "abort",
+    "cosmwasm_1_2",
+    "cosmwasm_1_3",
+    "cosmwasm_1_4",
+    "cosmwasm_2_0",
+    "iterator",
+    "stargate"
+] }
+cw-storage-plus   = { version = "2.0.0" }
+cosmwasm-schema   = { version = "2.2.2" }
+choice            = { path = "../../packages/choice", default-features = false, version = "1.1.2" }
+
+schemars          = "0.8.22"
+serde             = { version = "1.0.219", default-features = false, features = ["derive"] }
+thiserror            = { version = "2.0.12" }
