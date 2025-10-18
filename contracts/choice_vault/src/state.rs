@@ -18,7 +18,7 @@ pub struct Config {
     /// The address of the farm/staking contract.
     pub farm_contract: Addr,
     /// The contract address of the LP token.
-    pub lp_token: Addr,
+    pub lp_token: AssetInfo,
     /// The address of the farm's reward token.
     pub reward_token: AssetInfo,
     pub asset_infos: [AssetInfo; 2],

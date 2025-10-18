@@ -42,7 +42,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: reward_denom.to_string(),
             },
@@ -77,7 +79,12 @@ mod tests {
         assert_eq!(config.owner, owner_addr);
         assert_eq!(config.pair_contract, pair_contract_addr);
         assert_eq!(config.farm_contract, farm_contract_addr);
-        assert_eq!(config.lp_token, lp_token_addr);
+        assert_eq!(
+            config.lp_token,
+            AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            }
+        );
         assert_eq!(
             config.reward_token,
             AssetInfo::NativeToken {
@@ -121,7 +128,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -221,7 +230,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -335,7 +346,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -460,7 +473,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -568,7 +583,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -701,7 +718,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: reward_denom.to_string(),
             },
@@ -891,7 +910,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: reward_denom.to_string(),
             },
@@ -1037,7 +1058,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: lp_token_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1104,7 +1127,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: deps.api.addr_make("farm0000").to_string(),
-            lp_token: lp_token_addr.to_string(), // The vault is configured to only accept this token
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1153,12 +1178,15 @@ mod tests {
         let mut deps = mock_dependencies();
         let owner_addr = deps.api.addr_make("owner");
         let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
 
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: deps.api.addr_make("lp_token0000").to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1227,7 +1255,7 @@ mod tests {
         let pair_contract_addr = deps.api.addr_make("pair0000");
         let vault_addr = deps.api.addr_make("vault_contract");
         let fee_recipient_addr = deps.api.addr_make("fee_recipient");
-
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
         let reward_denom = "uinj";
 
         // Instantiate with a 10% fee
@@ -1235,7 +1263,9 @@ mod tests {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: deps.api.addr_make("lp_token0000").to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: reward_denom.to_string(),
             },
@@ -1347,6 +1377,7 @@ mod tests {
         let compounder_addr = deps.api.addr_make("compounder");
         let farm_contract_addr = deps.api.addr_make("farm0000");
         let vault_addr = deps.api.addr_make("vault_contract");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
 
         let minimum_rewards = Uint128::new(100);
 
@@ -1356,7 +1387,9 @@ mod tests {
             slippage_tolerance: Decimal::percent(1),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
-            lp_token: deps.api.addr_make("lp_token0000").to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1429,13 +1462,16 @@ mod tests {
         let mut deps = mock_dependencies();
         let owner_addr = deps.api.addr_make("owner");
         let new_owner_addr = deps.api.addr_make("new_owner");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
 
         // Instantiate the contract
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: deps.api.addr_make("farm0000").to_string(),
-            lp_token: deps.api.addr_make("lp_token0000").to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1503,6 +1539,7 @@ mod tests {
         let owner_addr = deps.api.addr_make("owner");
         let new_owner_addr = deps.api.addr_make("new_owner");
         let random_user_addr = deps.api.addr_make("random_user");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
 
         // Instantiate the contract
         let instantiate_msg = InstantiateMsg {
@@ -1510,7 +1547,9 @@ mod tests {
             // ... other fields can be defaults
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: deps.api.addr_make("farm0000").to_string(),
-            lp_token: deps.api.addr_make("lp_token0000").to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1576,13 +1615,16 @@ mod tests {
         let owner_addr = deps.api.addr_make("owner");
         let new_owner_addr = deps.api.addr_make("new_owner");
         let random_user_addr = deps.api.addr_make("random_user");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
 
         // Instantiate the contract
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: deps.api.addr_make("farm0000").to_string(),
-            lp_token: deps.api.addr_make("lp_token0000").to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1646,6 +1688,7 @@ mod tests {
         let owner_addr = deps.api.addr_make("owner");
         let compounder_addr = deps.api.addr_make("compounder");
         let random_caller = deps.api.addr_make("random_caller");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
 
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
@@ -1653,7 +1696,9 @@ mod tests {
             slippage_tolerance: Decimal::percent(1),
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: deps.api.addr_make("farm0000").to_string(),
-            lp_token: deps.api.addr_make("lp_token0000").to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
@@ -1698,5 +1743,180 @@ mod tests {
 
         // Assert that it fails with Unauthorized
         assert!(matches!(res, Err(ContractError::Unauthorized {})));
+    }
+
+    #[test]
+    fn test_deposit_and_withdraw_native_lp() {
+        // --- Arrange ---
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let compounder_addr = deps.api.addr_make("compounder");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let user1_addr = deps.api.addr_make("user1");
+
+        // Define the native LP token denomination
+        let native_lp_denom = "factory/inj1paircontract/lp";
+
+        // Instantiate the contract with the native LP token configuration
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            compounder: compounder_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::NativeToken {
+                denom: native_lp_denom.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+        };
+        let creator = deps.api.addr_make("creator");
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator, &[]),
+            instantiate_msg.clone(),
+        )
+        .unwrap();
+
+        // --- 1. TEST NATIVE DEPOSIT ---
+
+        // Arrange for deposit
+        let deposit_amount = Uint128::new(100);
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: "any".to_string(),
+                reward_index: Decimal::zero(),
+                bond_amount: Uint128::zero(), // First depositor
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // Act: Execute the native deposit
+        let msg = ExecuteMsg::DepositNativeLp {};
+        let info = message_info(
+            &user1_addr,
+            &[cosmwasm_std::coin(deposit_amount.u128(), native_lp_denom)], // Attach funds
+        );
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // Assert deposit success
+        // 1a. Check state: User should have shares
+        let user_info: UserInfoResponse = from_json(
+            &query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user1_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(user_info.shares, deposit_amount);
+
+        // 1b. Check message: The contract must send a `Bond` message to the farm
+        assert_eq!(res.messages.len(), 1);
+        let expected_bond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: farm_contract_addr.to_string(),
+            msg: to_json_binary(&FarmExecuteMsg::Bond {
+                amount: deposit_amount,
+            })
+            .unwrap(),
+            funds: vec![cosmwasm_std::coin(deposit_amount.u128(), native_lp_denom)],
+        });
+        assert_eq!(res.messages[0].msg, expected_bond_msg);
+
+        // --- 2. TEST NATIVE WITHDRAWAL ---
+
+        // Arrange for withdrawal
+        // We'll reset the state to simulate the user already having deposited.
+        let mut deps = mock_dependencies(); // Fresh dependencies
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator, &[]),
+            instantiate_msg,
+        )
+        .unwrap(); // Re-instantiate
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &deposit_amount)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: deposit_amount,
+                },
+            )
+            .unwrap();
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: "any".to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: deposit_amount, // Vault has 100 native LP tokens staked
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // Act: Execute the withdrawal
+        let msg = ExecuteMsg::Withdraw {
+            shares: deposit_amount,
+        };
+        let info = message_info(&user1_addr, &[]);
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // Assert withdrawal success
+        // 2a. Check state: User's shares should be gone
+        let user_info: UserInfoResponse = from_json(
+            &query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user1_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(user_info.shares, Uint128::zero());
+
+        // 2b. Check messages: Should be an `Unbond` WasmMsg and a `BankMsg::Send`
+        assert_eq!(res.messages.len(), 2);
+
+        // Message 1 should be `Unbond`
+        let expected_unbond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: farm_contract_addr.to_string(),
+            msg: to_json_binary(&FarmExecuteMsg::Unbond {
+                amount: deposit_amount,
+            })
+            .unwrap(),
+            funds: vec![],
+        });
+        assert_eq!(res.messages[0].msg, expected_unbond_msg);
+
+        // Message 2 should be `BankMsg::Send` to give the native tokens back
+        let expected_send_msg = CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+            to_address: user1_addr.to_string(),
+            amount: vec![cosmwasm_std::coin(deposit_amount.u128(), native_lp_denom)],
+        });
+        assert_eq!(res.messages[1].msg, expected_send_msg);
     }
 }

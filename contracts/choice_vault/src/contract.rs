@@ -37,7 +37,6 @@ pub fn instantiate(
     let owner_addr = deps.api.addr_validate(&msg.owner)?;
     let pair_contract_addr = deps.api.addr_validate(&msg.pair_contract)?;
     let farm_contract_addr = deps.api.addr_validate(&msg.farm_contract)?;
-    let lp_token_addr = deps.api.addr_validate(&msg.lp_token)?;
 
     let fee_recipient_addr = if let Some(fee_recipient) = &msg.fee_recipient {
         Some(deps.api.addr_validate(fee_recipient)?)
@@ -57,7 +56,7 @@ pub fn instantiate(
         owner: owner_addr,
         pair_contract: pair_contract_addr,
         farm_contract: farm_contract_addr,
-        lp_token: lp_token_addr,
+        lp_token: msg.lp_token,
         reward_token: msg.reward_token,
         asset_infos: msg.asset_infos,
         fee_recipient: fee_recipient_addr,
@@ -87,6 +86,7 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
+        ExecuteMsg::DepositNativeLp {} => execute_deposit_native_lp(deps, env, info),
         ExecuteMsg::Withdraw { shares } => execute_withdraw(deps, env, info, shares),
         ExecuteMsg::Compound { belief_price } => execute_compound(deps, env, info, belief_price),
         ExecuteMsg::UpdateConfig {
@@ -177,13 +177,58 @@ pub fn receive_cw20(
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
-    if info.sender != config.lp_token {
-        return Err(ContractError::Unauthorized {});
+    // Check that the configured LP token is the one sending the message
+    match config.lp_token {
+        AssetInfo::Token { contract_addr } => {
+            if info.sender.to_string() != contract_addr {
+                return Err(ContractError::Unauthorized {});
+            }
+        }
+        AssetInfo::NativeToken { .. } => {
+            // This hook should not be called for native LP tokens
+            return Err(ContractError::Std(StdError::generic_err(
+                "Receive hook called for a native LP token vault",
+            )));
+        }
     }
 
     match from_json(&cw20_msg.msg)? {
         Cw20HookMsg::Deposit {} => execute_deposit(deps, env, cw20_msg.sender, cw20_msg.amount),
     }
+}
+
+pub fn execute_deposit_native_lp(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+
+    let native_lp_denom = match config.lp_token {
+        AssetInfo::NativeToken { denom } => denom,
+        AssetInfo::Token { .. } => {
+            return Err(ContractError::Std(StdError::generic_err(
+                "Native deposit called for a CW20 LP token vault",
+            )));
+        }
+    };
+
+    // Find the sent native token in the message funds
+    let amount = info
+        .funds
+        .iter()
+        .find(|c| c.denom == native_lp_denom)
+        .map(|c| c.amount)
+        .unwrap_or_else(Uint128::zero);
+
+    if amount.is_zero() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "No native LP tokens sent for deposit",
+        )));
+    }
+
+    // Pass the sender's address (the actual depositor) and amount to the common deposit logic
+    execute_deposit(deps, env, info.sender.to_string(), amount)
 }
 
 pub fn execute_deposit(
@@ -208,18 +253,13 @@ pub fn execute_deposit(
     let total_lp_staked = staker_info.bond_amount;
 
     // Calculate the number of shares to mint.
-    // This is proportional to the current ratio of shares to LP tokens.
     let shares_to_mint = if total_shares.is_zero() || total_lp_staked.is_zero() {
-        // If we are the first depositor, 1 LP token = 1 share.
         amount
     } else {
-        // Otherwise, shares = (amount * total_shares) / total_lp_staked
         amount.multiply_ratio(total_shares, total_lp_staked)
     };
 
     if shares_to_mint.is_zero() {
-        // This can happen due to rounding if a very small amount is deposited.
-        // We should reject it to prevent dust deposits.
         return Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
             "Received zero shares for the deposit",
         )));
@@ -238,19 +278,30 @@ pub fn execute_deposit(
     total_shares += shares_to_mint;
     TOTAL_SHARES.save(deps.storage, &total_shares)?;
 
-    // Now that the shares are minted, create a message to stake the received
-    // LP tokens into the farm contract.
-    // The message is a Cw20 Send message to the LP token contract, which in turn
-    // calls the farm contract's Receive hook with a "Bond" message.
-    let bond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: config.lp_token.to_string(),
-        msg: to_json_binary(&Cw20ExecuteMsg::Send {
-            contract: config.farm_contract.to_string(),
-            amount,
-            msg: to_json_binary(&choice::staking::Cw20HookMsg::Bond {})?,
-        })?,
-        funds: vec![],
-    });
+    // After minting shares, create the correct message to stake the received LP tokens.
+    let bond_msg = match config.lp_token {
+        AssetInfo::Token { contract_addr } => {
+            // For CW20 tokens, use the `Send` hook pattern.
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: contract_addr.to_string(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Send {
+                    contract: config.farm_contract.to_string(),
+                    amount,
+                    msg: to_json_binary(&choice::staking::Cw20HookMsg::Bond {})?,
+                })?,
+                funds: vec![],
+            })
+        }
+        AssetInfo::NativeToken { denom } => {
+            // For native tokens, call the farm's `Bond` message directly
+            // and attach the native coins in the `funds` array.
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: config.farm_contract.to_string(),
+                msg: to_json_binary(&FarmExecuteMsg::Bond { amount })?,
+                funds: vec![cosmwasm_std::coin(amount.u128(), denom)],
+            })
+        }
+    };
 
     Ok(Response::new()
         .add_message(bond_msg)
@@ -330,15 +381,24 @@ pub fn execute_withdraw(
         funds: vec![],
     });
 
-    // Message 2: Transfer the withdrawn LP tokens from our vault to the user.
-    let transfer_lp_msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: config.lp_token.to_string(),
-        msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-            recipient: sender_addr.to_string(),
-            amount: lp_to_withdraw,
-        })?,
-        funds: vec![],
-    });
+    // Create the message to transfer LP tokens back to the user
+    let transfer_lp_msg = match config.lp_token {
+        AssetInfo::Token { contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_addr.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: sender_addr.to_string(),
+                amount: lp_to_withdraw,
+            })?,
+            funds: vec![],
+        }),
+        AssetInfo::NativeToken { denom } => CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+            to_address: sender_addr.to_string(),
+            amount: vec![cosmwasm_std::Coin {
+                denom,
+                amount: lp_to_withdraw,
+            }],
+        }),
+    };
 
     Ok(Response::new()
         .add_messages(vec![unbond_msg, transfer_lp_msg])
@@ -638,23 +698,48 @@ pub fn handle_swap_reply(deps: DepsMut, env: Env) -> Result<Response, ContractEr
 pub fn handle_provide_liquidity_reply(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
-    // LP tokens are always CW20, so we use query_token_balance
-    let new_lp_balance =
-        query_token_balance(&deps.querier, config.lp_token.clone(), env.contract.address)?;
+    // Query the balance of the new LP tokens and create the correct bond message
+    let (new_lp_balance, bond_msg) = match config.lp_token {
+        // Case 1: The LP token is a CW20 token
+        AssetInfo::Token { contract_addr } => {
+            // We must validate the string address from the config into an Addr type before querying.
+            let lp_token_addr = deps.api.addr_validate(&contract_addr)?;
+
+            let balance = query_token_balance(&deps.querier, lp_token_addr, env.contract.address)?;
+
+            // For CW20, we use the `Send` hook, which calls the farm's `Receive` entry point
+            let msg = CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: contract_addr.to_string(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Send {
+                    contract: config.farm_contract.to_string(),
+                    amount: balance,
+                    msg: to_json_binary(&choice::staking::Cw20HookMsg::Bond {})?,
+                })?,
+                funds: vec![],
+            });
+            (balance, msg)
+        }
+        // Case 2: The LP token is a native token
+        AssetInfo::NativeToken { denom } => {
+            let balance = query_balance(&deps.querier, env.contract.address, denom.clone())?;
+
+            // For native tokens, we call the farm's `Bond` execute message directly,
+            // passing the amount in the message body and the actual coins in the `funds` array.
+            let msg = CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: config.farm_contract.to_string(),
+                msg: to_json_binary(&FarmExecuteMsg::Bond { amount: balance })?,
+                funds: vec![cosmwasm_std::Coin {
+                    denom,
+                    amount: balance,
+                }],
+            });
+            (balance, msg)
+        }
+    };
 
     if new_lp_balance.is_zero() {
         return Ok(Response::new().add_attribute("status", "no_lp_tokens_received"));
     }
-
-    let bond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: config.lp_token.to_string(),
-        msg: to_json_binary(&Cw20ExecuteMsg::Send {
-            contract: config.farm_contract.to_string(),
-            amount: new_lp_balance,
-            msg: to_json_binary(&choice::staking::Cw20HookMsg::Bond {})?,
-        })?,
-        funds: vec![],
-    });
 
     Ok(Response::new()
         .add_message(bond_msg)

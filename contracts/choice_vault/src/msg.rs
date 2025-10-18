@@ -9,7 +9,7 @@ pub struct InstantiateMsg {
     pub owner: String,
     pub pair_contract: String,
     pub farm_contract: String,
-    pub lp_token: String,
+    pub lp_token: AssetInfo,
     pub reward_token: AssetInfo,
     pub asset_infos: [AssetInfo; 2],
     pub fee_recipient: Option<String>,
@@ -29,6 +29,9 @@ pub struct CompoundPayload {
 pub enum ExecuteMsg {
     /// Handles receiving CW20 tokens.
     Receive(Cw20ReceiveMsg),
+
+    /// Handles receiving native LP tokens. This is the new entry point for native deposits.
+    DepositNativeLp {},
 
     /// Withdraws a user's funds by redeeming shares.
     Withdraw {
