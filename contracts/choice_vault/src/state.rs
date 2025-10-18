@@ -2,13 +2,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use choice::asset::AssetInfo; // Using the shared library
-use cosmwasm_std::{Addr, Uint128};
+use cosmwasm_std::{Addr, Decimal, Uint128};
 use cw_storage_plus::{Item, Map};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Config {
-    /// The address that can trigger the compound function (keeper)
+    /// The contract's owner, who can change configuration.
     pub owner: Addr,
+    /// The trusted address allowed to call the Compound function.
+    pub compounder: Addr,
+    /// The slippage tolerance to use for swaps during compounding.
+    pub slippage_tolerance: Decimal,
     /// The address of the AMM pair contract.
     pub pair_contract: Addr,
     /// The address of the farm/staking contract.
@@ -17,8 +21,14 @@ pub struct Config {
     pub lp_token: Addr,
     /// The address of the farm's reward token.
     pub reward_token: AssetInfo,
-
     pub asset_infos: [AssetInfo; 2],
+    /// The address that will receive the compounding fees.
+    pub fee_recipient: Option<Addr>,
+    /// The percentage of rewards to take as a fee.
+    pub fee_percentage: Option<Decimal>,
+    pub minimum_reward_to_compound: Uint128,
+    /// A new owner address that has been proposed but not yet accepted.
+    pub proposed_owner: Option<Addr>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]

@@ -14,4 +14,7 @@ pub enum ContractError {
 
     #[error("Invalid CW20 hook message")]
     InvalidCw20HookMsg {},
+
+    #[error("Fee percentage must be between 0 and 1")]
+    InvalidFeePercentage {},
 }

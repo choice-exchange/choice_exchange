@@ -2,8 +2,8 @@ use choice::asset::{Asset, AssetInfo};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Reply, ReplyOn,
-    Response, StdResult, SubMsg, Uint128, WasmMsg,
+    from_json, to_json_binary, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
+    ReplyOn, Response, StdError, StdResult, SubMsg, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
@@ -13,7 +13,9 @@ use choice::querier::{query_balance, query_token_balance};
 use choice::staking::{ExecuteMsg as FarmExecuteMsg, QueryMsg as FarmQueryMsg, StakerInfoResponse};
 
 use crate::error::ContractError;
-use crate::msg::{Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg, UserInfoResponse};
+use crate::msg::{
+    CompoundPayload, Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg, UserInfoResponse,
+};
 use crate::state::{Config, UserInfo, CONFIG, TOTAL_SHARES, USERS};
 
 const CONTRACT_NAME: &str = "crates.io:choice-vault";
@@ -37,6 +39,20 @@ pub fn instantiate(
     let farm_contract_addr = deps.api.addr_validate(&msg.farm_contract)?;
     let lp_token_addr = deps.api.addr_validate(&msg.lp_token)?;
 
+    let fee_recipient_addr = if let Some(fee_recipient) = &msg.fee_recipient {
+        Some(deps.api.addr_validate(fee_recipient)?)
+    } else {
+        None
+    };
+
+    if let Some(fee_percentage) = msg.fee_percentage {
+        if fee_percentage > Decimal::one() {
+            return Err(ContractError::InvalidFeePercentage {});
+        }
+    }
+
+    let compounder_addr = deps.api.addr_validate(&msg.compounder)?;
+
     let config = Config {
         owner: owner_addr,
         pair_contract: pair_contract_addr,
@@ -44,6 +60,12 @@ pub fn instantiate(
         lp_token: lp_token_addr,
         reward_token: msg.reward_token,
         asset_infos: msg.asset_infos,
+        fee_recipient: fee_recipient_addr,
+        fee_percentage: msg.fee_percentage,
+        minimum_reward_to_compound: msg.minimum_reward_to_compound,
+        proposed_owner: None,
+        compounder: compounder_addr,
+        slippage_tolerance: msg.slippage_tolerance,
     };
 
     CONFIG.save(deps.storage, &config)?;
@@ -66,14 +88,79 @@ pub fn execute(
     match msg {
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
         ExecuteMsg::Withdraw { shares } => execute_withdraw(deps, env, info, shares),
-        ExecuteMsg::Compound {} => execute_compound(deps, env, info),
+        ExecuteMsg::Compound { belief_price } => execute_compound(deps, env, info, belief_price),
+        ExecuteMsg::UpdateConfig {
+            compounder,
+            slippage_tolerance,
+            fee_recipient,
+            fee_percentage,
+            minimum_reward_to_compound,
+        } => execute_update_config(
+            deps,
+            info,
+            compounder,
+            slippage_tolerance,
+            fee_recipient,
+            fee_percentage,
+            minimum_reward_to_compound,
+        ),
+        ExecuteMsg::ProposeNewOwner { new_owner } => {
+            execute_propose_new_owner(deps, info, new_owner)
+        }
+        ExecuteMsg::AcceptOwnership => execute_accept_ownership(deps, info),
+        ExecuteMsg::CancelOwnershipProposal => execute_cancel_ownership_proposal(deps, info),
     }
+}
+
+pub fn execute_update_config(
+    deps: DepsMut,
+    info: MessageInfo,
+    compounder: Option<String>,
+    slippage_tolerance: Option<Decimal>,
+    fee_recipient: Option<String>,
+    fee_percentage: Option<Decimal>,
+    minimum_reward_to_compound: Option<Uint128>,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+
+    // Only the owner can update the config
+    if info.sender != config.owner {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    if let Some(compounder) = compounder {
+        config.compounder = deps.api.addr_validate(&compounder)?;
+    }
+
+    if let Some(slippage) = slippage_tolerance {
+        config.slippage_tolerance = slippage;
+    }
+
+    if let Some(fee_recipient) = fee_recipient {
+        config.fee_recipient = Some(deps.api.addr_validate(&fee_recipient)?);
+    }
+
+    if let Some(fee_percentage) = fee_percentage {
+        // Validate that the fee percentage is not greater than 100%
+        if fee_percentage > Decimal::one() {
+            return Err(ContractError::InvalidFeePercentage {});
+        }
+        config.fee_percentage = Some(fee_percentage);
+    }
+
+    if let Some(minimum_reward) = minimum_reward_to_compound {
+        config.minimum_reward_to_compound = minimum_reward;
+    }
+
+    CONFIG.save(deps.storage, &config)?;
+
+    Ok(Response::new().add_attribute("action", "update_config"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractError> {
     match msg.id {
-        HARVEST_REPLY_ID => handle_harvest_reply(deps, env),
+        HARVEST_REPLY_ID => handle_harvest_reply(deps, env, msg),
         SWAP_REPLY_ID => handle_swap_reply(deps, env),
         PROVIDE_LIQUIDITY_REPLY_ID => handle_provide_liquidity_reply(deps, env),
         _ => Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
@@ -265,9 +352,11 @@ pub fn execute_compound(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
+    belief_price: Decimal,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
+
+    if info.sender != config.compounder {
         return Err(ContractError::Unauthorized {});
     }
 
@@ -285,6 +374,16 @@ pub fn execute_compound(
             .add_attribute("status", "no_rewards"));
     }
 
+    let payload = CompoundPayload { belief_price };
+
+    // Ensure rewards are above the minimum threshold.
+    // This prevents unprofitable compounding.
+    if staker_info.pending_reward < config.minimum_reward_to_compound {
+        return Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
+            "Pending rewards are below the minimum threshold to compound",
+        )));
+    }
+
     let harvest_msg = SubMsg {
         id: HARVEST_REPLY_ID,
         msg: CosmosMsg::Wasm(WasmMsg::Execute {
@@ -294,7 +393,7 @@ pub fn execute_compound(
         }),
         gas_limit: None,
         reply_on: ReplyOn::Success,
-        payload: Binary::default(),
+        payload: to_json_binary(&payload)?,
     };
 
     Ok(Response::new()
@@ -331,12 +430,20 @@ fn query_user_info(deps: Deps, user: String) -> StdResult<UserInfoResponse> {
 }
 
 // This function is called after the HARVEST is successful
-pub fn handle_harvest_reply(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
+pub fn handle_harvest_reply(
+    deps: DepsMut,
+    env: Env,
+    msg: Reply,
+) -> Result<Response, ContractError> {
+    let payload: CompoundPayload = from_json(&msg.payload)?;
+    let belief_price = payload.belief_price;
+
     let config = CONFIG.load(deps.storage)?;
+    let slippage_tolerance = config.slippage_tolerance;
     let reward_asset_info = config.reward_token.clone();
 
     // Use the querier functions from the 'choice' library to get the balance
-    let reward_balance = match reward_asset_info.clone() {
+    let mut reward_balance = match reward_asset_info.clone() {
         AssetInfo::Token { contract_addr } => query_token_balance(
             &deps.querier,
             deps.api.addr_validate(&contract_addr)?,
@@ -351,6 +458,44 @@ pub fn handle_harvest_reply(deps: DepsMut, env: Env) -> Result<Response, Contrac
         return Ok(Response::new().add_attribute("status", "no_rewards_after_harvest"));
     }
 
+    let mut messages: Vec<CosmosMsg> = vec![];
+    let fee_recipient = config.fee_recipient;
+    let fee_percentage = config.fee_percentage;
+
+    // If a fee is configured, calculate it and create a message to send it.
+    if let (Some(recipient), Some(percentage)) = (fee_recipient, fee_percentage) {
+        let fee_amount = reward_balance.multiply_ratio(
+            percentage.atomics(),
+            Uint128::new(1_000_000_000_000_000_000u128),
+        );
+
+        if !fee_amount.is_zero() {
+            let fee_msg = match reward_asset_info.clone() {
+                AssetInfo::Token { contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr,
+                    msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                        recipient: recipient.to_string(),
+                        amount: fee_amount,
+                    })?,
+                    funds: vec![],
+                }),
+                AssetInfo::NativeToken { denom } => CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+                    to_address: recipient.to_string(),
+                    amount: vec![cosmwasm_std::Coin {
+                        denom,
+                        amount: fee_amount,
+                    }],
+                }),
+            };
+
+            messages.push(fee_msg);
+
+            reward_balance = reward_balance
+                .checked_sub(fee_amount)
+                .map_err(StdError::from)?;
+        }
+    }
+
     let amount_to_swap = reward_balance.multiply_ratio(1u128, 2u128);
     let offer_asset = Asset {
         info: reward_asset_info,
@@ -362,8 +507,8 @@ pub fn handle_harvest_reply(deps: DepsMut, env: Env) -> Result<Response, Contrac
             contract_addr: config.pair_contract.to_string(),
             msg: to_json_binary(&PairExecuteMsg::Swap {
                 offer_asset: offer_asset.clone(),
-                belief_price: None,
-                max_spread: None,
+                belief_price: Some(belief_price),
+                max_spread: Some(slippage_tolerance),
                 to: None,
                 deadline: None,
             })?,
@@ -397,6 +542,7 @@ pub fn handle_harvest_reply(deps: DepsMut, env: Env) -> Result<Response, Contrac
     };
 
     Ok(Response::new()
+        .add_messages(messages)
         .add_submessage(swap_sub_msg)
         .add_attribute("status", "step_2_swap_initiated")
         .add_attribute("amount_to_swap", amount_to_swap))
@@ -428,6 +574,26 @@ pub fn handle_swap_reply(deps: DepsMut, env: Env) -> Result<Response, ContractEr
                 query_balance(&deps.querier, env.contract.address.clone(), denom.clone())?
             }
         };
+    }
+
+    let mut messages: Vec<CosmosMsg> = vec![];
+
+    for asset in &assets_to_provide {
+        // If the asset is a CW20 token and we have a balance, grant an allowance to the pair contract
+        if let AssetInfo::Token { contract_addr } = &asset.info {
+            if !asset.amount.is_zero() {
+                let allowance_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: contract_addr.to_string(),
+                    msg: to_json_binary(&Cw20ExecuteMsg::IncreaseAllowance {
+                        spender: config.pair_contract.to_string(),
+                        amount: asset.amount,
+                        expires: None,
+                    })?,
+                    funds: vec![],
+                });
+                messages.push(allowance_msg);
+            }
+        }
     }
 
     // Collect native token funds to send with the ProvideLiquidity message
@@ -464,6 +630,7 @@ pub fn handle_swap_reply(deps: DepsMut, env: Env) -> Result<Response, ContractEr
     };
 
     Ok(Response::new()
+        .add_messages(messages) // Add the allowance messages before the submessage
         .add_submessage(provide_liquidity_msg)
         .add_attribute("status", "step_3_provide_liquidity_initiated"))
 }
@@ -494,4 +661,75 @@ pub fn handle_provide_liquidity_reply(deps: DepsMut, env: Env) -> Result<Respons
         .add_attribute("action", "compound")
         .add_attribute("status", "step_4_complete")
         .add_attribute("lp_tokens_staked", new_lp_balance))
+}
+
+/// Creates a proposal to transfer ownership of the contract.
+/// Only the current owner can call this.
+pub fn execute_propose_new_owner(
+    deps: DepsMut,
+    info: MessageInfo,
+    new_owner: String,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+
+    // Check if the sender is the current owner
+    if info.sender != config.owner {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    // Validate and store the proposed new owner address
+    let new_owner_addr = deps.api.addr_validate(&new_owner)?;
+    config.proposed_owner = Some(new_owner_addr);
+    CONFIG.save(deps.storage, &config)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "propose_new_owner")
+        .add_attribute("proposed_owner", new_owner))
+}
+
+/// Accepts an ownership transfer proposal.
+/// Only the proposed new owner can call this.
+pub fn execute_accept_ownership(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+
+    // Check if there is a proposal and if the sender is the proposed owner
+    match config.proposed_owner {
+        Some(proposed) if proposed == info.sender => {
+            config.owner = proposed; // The proposed owner is now the new owner
+            config.proposed_owner = None; // Clear the proposal
+            CONFIG.save(deps.storage, &config)?;
+
+            Ok(Response::new()
+                .add_attribute("action", "accept_ownership")
+                .add_attribute("new_owner", info.sender.to_string()))
+        }
+        _ => Err(ContractError::Std(StdError::generic_err(
+            "No ownership proposal for this address to accept",
+        ))),
+    }
+}
+
+/// Cancels an ownership transfer proposal.
+/// Only the current owner can call this.
+pub fn execute_cancel_ownership_proposal(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+
+    // Check if the sender is the current owner
+    if info.sender != config.owner {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    // Clear the proposed owner
+    config.proposed_owner = None;
+    CONFIG.save(deps.storage, &config)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "cancel_ownership_proposal")
+        .add_attribute("owner", info.sender.to_string()))
 }
