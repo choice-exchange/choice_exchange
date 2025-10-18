@@ -353,12 +353,14 @@ pub fn execute_withdraw(
     let total_shares_before_burn = TOTAL_SHARES.load(deps.storage)?;
     TOTAL_SHARES.save(deps.storage, &(total_shares_before_burn - shares))?;
 
+    let env_time = Some(env.block.time.seconds());
+
     // Query the farm contract to get the vault's total LP balance
     let staker_info: StakerInfoResponse = deps.querier.query_wasm_smart(
         config.farm_contract.clone(),
         &FarmQueryMsg::StakerInfo {
             staker: env.contract.address.to_string(),
-            block_time: None,
+            block_time: env_time,
         },
     )?;
     let total_lp_staked = staker_info.bond_amount;
@@ -420,11 +422,13 @@ pub fn execute_compound(
         return Err(ContractError::Unauthorized {});
     }
 
+    let env_time = Some(env.block.time.seconds());
+
     let staker_info: StakerInfoResponse = deps.querier.query_wasm_smart(
         config.farm_contract.clone(),
         &FarmQueryMsg::StakerInfo {
             staker: env.contract.address.to_string(),
-            block_time: None,
+            block_time: env_time,
         },
     )?;
 
@@ -583,8 +587,8 @@ pub fn handle_harvest_reply(
                 contract: config.pair_contract.to_string(),
                 amount: offer_asset.amount,
                 msg: to_json_binary(&PairCw20HookMsg::Swap {
-                    belief_price: None,
-                    max_spread: None,
+                   belief_price: Some(belief_price),
+                    max_spread: Some(slippage_tolerance),
                     to: None,
                     deadline: None,
                 })?,
