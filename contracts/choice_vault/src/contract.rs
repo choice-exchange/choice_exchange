@@ -14,16 +14,21 @@ use choice::staking::{ExecuteMsg as FarmExecuteMsg, QueryMsg as FarmQueryMsg, St
 
 use crate::error::ContractError;
 use crate::msg::{
-    CompoundPayload, Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg, UserInfoResponse,
+    CompoundRoutePayload, Cw20HookMsg, ExecuteMsg, HarvestReplyPayload, InstantiateMsg, QueryMsg,
+    UserInfoResponse,
 };
-use crate::state::{Config, UserInfo, CONFIG, TOTAL_SHARES, USERS};
+use crate::state::{
+    CompoundingInfo, Config, SwapHop as StateSwapHop, UserInfo, COMPOUNDING_INFO, CONFIG,
+    TOTAL_SHARES, USERS,
+};
 
 const CONTRACT_NAME: &str = "crates.io:choice-vault";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const HARVEST_REPLY_ID: u64 = 1;
-pub const SWAP_REPLY_ID: u64 = 2;
-pub const PROVIDE_LIQUIDITY_REPLY_ID: u64 = 3;
+pub const ROUTE_SWAP_REPLY_ID: u64 = 2;
+pub const FINAL_SWAP_REPLY_ID: u64 = 3;
+pub const PROVIDE_LIQUIDITY_REPLY_ID: u64 = 4;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -52,6 +57,14 @@ pub fn instantiate(
 
     let compounder_addr = deps.api.addr_validate(&msg.compounder)?;
 
+    let mut reward_to_lp_token_route_validated: Vec<StateSwapHop> = vec![];
+    for hop in msg.reward_to_lp_token_route {
+        reward_to_lp_token_route_validated.push(StateSwapHop {
+            pair_contract: deps.api.addr_validate(&hop.pair_contract)?,
+            to_asset_info: hop.to_asset_info,
+        });
+    }
+
     let config = Config {
         owner: owner_addr,
         pair_contract: pair_contract_addr,
@@ -65,10 +78,12 @@ pub fn instantiate(
         proposed_owner: None,
         compounder: compounder_addr,
         slippage_tolerance: msg.slippage_tolerance,
+        reward_to_lp_token_route: reward_to_lp_token_route_validated,
     };
 
     CONFIG.save(deps.storage, &config)?;
     TOTAL_SHARES.save(deps.storage, &Uint128::zero())?;
+    COMPOUNDING_INFO.save(deps.storage, &CompoundingInfo::default())?;
 
     Ok(Response::new()
         .add_attribute("action", "instantiate")
@@ -88,7 +103,7 @@ pub fn execute(
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
         ExecuteMsg::DepositNativeLp {} => execute_deposit_native_lp(deps, env, info),
         ExecuteMsg::Withdraw { shares } => execute_withdraw(deps, env, info, shares),
-        ExecuteMsg::Compound { belief_price } => execute_compound(deps, env, info, belief_price),
+        ExecuteMsg::Compound { belief_prices } => execute_compound(deps, env, info, belief_prices),
         ExecuteMsg::UpdateConfig {
             compounder,
             slippage_tolerance,
@@ -161,8 +176,9 @@ pub fn execute_update_config(
 pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractError> {
     match msg.id {
         HARVEST_REPLY_ID => handle_harvest_reply(deps, env, msg),
-        SWAP_REPLY_ID => handle_swap_reply(deps, env),
-        PROVIDE_LIQUIDITY_REPLY_ID => handle_provide_liquidity_reply(deps, env),
+        ROUTE_SWAP_REPLY_ID => handle_route_swap_reply(deps, env, msg),
+        FINAL_SWAP_REPLY_ID => handle_final_swap_reply(deps, env, msg),
+        PROVIDE_LIQUIDITY_REPLY_ID => handle_provide_liquidity_reply(deps, env, msg),
         _ => Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
             "Unknown reply id",
         ))),
@@ -414,12 +430,19 @@ pub fn execute_compound(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    belief_price: Decimal,
+    belief_prices: Vec<Decimal>,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
     if info.sender != config.compounder {
         return Err(ContractError::Unauthorized {});
+    }
+
+    let expected_price_count = config.reward_to_lp_token_route.len() + 1;
+    if belief_prices.len() != expected_price_count {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Incorrect number of belief_prices provided for the configured swap route",
+        )));
     }
 
     let env_time = Some(env.block.time.seconds());
@@ -438,8 +461,6 @@ pub fn execute_compound(
             .add_attribute("status", "no_rewards"));
     }
 
-    let payload = CompoundPayload { belief_price };
-
     // Ensure rewards are above the minimum threshold.
     // This prevents unprofitable compounding.
     if staker_info.pending_reward < config.minimum_reward_to_compound {
@@ -447,6 +468,12 @@ pub fn execute_compound(
             "Pending rewards are below the minimum threshold to compound",
         )));
     }
+
+    let payload = HarvestReplyPayload {
+        belief_prices,
+        reward_amount_to_compound: staker_info.pending_reward,
+        tvl_before_compound: staker_info.bond_amount,
+    };
 
     let harvest_msg = SubMsg {
         id: HARVEST_REPLY_ID,
@@ -472,7 +499,12 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::TotalShares {} => to_json_binary(&query_total_shares(deps)?),
         QueryMsg::UserInfo { user } => to_json_binary(&query_user_info(deps, user)?),
+        QueryMsg::CompoundingInfo {} => to_json_binary(&query_compounding_info(deps)?),
     }
+}
+
+fn query_compounding_info(deps: Deps) -> StdResult<CompoundingInfo> {
+    COMPOUNDING_INFO.load(deps.storage)
 }
 
 fn query_config(deps: Deps) -> StdResult<Config> {
@@ -499,14 +531,12 @@ pub fn handle_harvest_reply(
     env: Env,
     msg: Reply,
 ) -> Result<Response, ContractError> {
-    let payload: CompoundPayload = from_json(&msg.payload)?;
-    let belief_price = payload.belief_price;
-
+    let payload: HarvestReplyPayload = from_json(&msg.payload)?;
     let config = CONFIG.load(deps.storage)?;
-    let slippage_tolerance = config.slippage_tolerance;
-    let reward_asset_info = config.reward_token.clone();
+    let slippage_tolerance = config.slippage_tolerance; // Get slippage from config
 
-    // Use the querier functions from the 'choice' library to get the balance
+    // Query the balance of the reward token we just harvested
+    let reward_asset_info = config.reward_token.clone();
     let mut reward_balance = match reward_asset_info.clone() {
         AssetInfo::Token { contract_addr } => query_token_balance(
             &deps.querier,
@@ -522,12 +552,9 @@ pub fn handle_harvest_reply(
         return Ok(Response::new().add_attribute("status", "no_rewards_after_harvest"));
     }
 
+    // Handle fees first (logic remains the same)
     let mut messages: Vec<CosmosMsg> = vec![];
-    let fee_recipient = config.fee_recipient;
-    let fee_percentage = config.fee_percentage;
-
-    // If a fee is configured, calculate it and create a message to send it.
-    if let (Some(recipient), Some(percentage)) = (fee_recipient, fee_percentage) {
+    if let (Some(recipient), Some(percentage)) = (config.fee_recipient, config.fee_percentage) {
         let fee_amount = reward_balance.multiply_ratio(
             percentage.atomics(),
             Uint128::new(1_000_000_000_000_000_000u128),
@@ -551,69 +578,173 @@ pub fn handle_harvest_reply(
                     }],
                 }),
             };
-
             messages.push(fee_msg);
-
             reward_balance = reward_balance
                 .checked_sub(fee_amount)
                 .map_err(StdError::from)?;
         }
     }
 
-    let amount_to_swap = reward_balance.multiply_ratio(1u128, 2u128);
-    let offer_asset = Asset {
-        info: reward_asset_info,
-        amount: amount_to_swap,
-    };
+    // --- NEW ROUTER LOGIC ---
+    if !config.reward_to_lp_token_route.is_empty() {
+        // A. Multi-hop route is defined
+        let first_hop = &config.reward_to_lp_token_route[0];
+        let belief_price = payload.belief_prices[0];
 
-    let swap_cosmos_msg = match &offer_asset.info {
-        AssetInfo::NativeToken { denom } => CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: config.pair_contract.to_string(),
-            msg: to_json_binary(&PairExecuteMsg::Swap {
-                offer_asset: offer_asset.clone(),
-                belief_price: Some(belief_price),
-                max_spread: Some(slippage_tolerance),
-                to: None,
-                deadline: None,
-            })?,
-            funds: vec![cosmwasm_std::Coin {
-                denom: denom.clone(),
-                amount: offer_asset.amount,
-            }],
-        }),
-        AssetInfo::Token { contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: contract_addr.clone(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Send {
-                contract: config.pair_contract.to_string(),
-                amount: offer_asset.amount,
-                msg: to_json_binary(&PairCw20HookMsg::Swap {
-                   belief_price: Some(belief_price),
-                    max_spread: Some(slippage_tolerance),
-                    to: None,
-                    deadline: None,
-                })?,
-            })?,
-            funds: vec![],
-        }),
-    };
+        let offer_asset = Asset {
+            info: reward_asset_info,
+            amount: reward_balance,
+        };
 
-    let swap_sub_msg = SubMsg {
-        id: SWAP_REPLY_ID,
-        msg: swap_cosmos_msg,
-        gas_limit: None,
-        reply_on: ReplyOn::Success,
-        payload: Binary::default(),
-    };
+        let route_payload = CompoundRoutePayload {
+            hop_index: 1, // Next hop will be index 1
+            belief_prices: payload.belief_prices,
+            reward_amount_to_compound: payload.reward_amount_to_compound, // <-- Forward
+            tvl_before_compound: payload.tvl_before_compound,
+        };
 
-    Ok(Response::new()
-        .add_messages(messages)
-        .add_submessage(swap_sub_msg)
-        .add_attribute("status", "step_2_swap_initiated")
-        .add_attribute("amount_to_swap", amount_to_swap))
+        let swap_msg = create_swap_submsg(
+            first_hop.pair_contract.clone(),
+            offer_asset,
+            belief_price,
+            slippage_tolerance, // Pass slippage in
+            ROUTE_SWAP_REPLY_ID,
+            to_json_binary(&route_payload)?,
+        )?;
+
+        Ok(Response::new()
+            .add_messages(messages)
+            .add_submessage(swap_msg)
+            .add_attribute("action", "compound_route_started"))
+    } else {
+        // B. No route defined, original 50/50 swap logic.
+        let amount_to_swap = reward_balance.multiply_ratio(1u128, 2u128);
+        let offer_asset = Asset {
+            info: reward_asset_info,
+            amount: amount_to_swap,
+        };
+        let belief_price = payload.belief_prices[0];
+
+        let swap_msg = create_swap_submsg(
+            config.pair_contract,
+            offer_asset,
+            belief_price,
+            slippage_tolerance, // Pass slippage in
+            FINAL_SWAP_REPLY_ID,
+            to_json_binary(&payload)?,
+        )?;
+
+        Ok(Response::new()
+            .add_messages(messages)
+            .add_submessage(swap_msg)
+            .add_attribute("status", "step_2_swap_initiated")
+            .add_attribute("amount_to_swap", amount_to_swap))
+    }
 }
 
-pub fn handle_swap_reply(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
+pub fn handle_route_swap_reply(
+    deps: DepsMut,
+    env: Env,
+    msg: Reply,
+) -> Result<Response, ContractError> {
+    let payload: CompoundRoutePayload = from_json(&msg.payload)?;
     let config = CONFIG.load(deps.storage)?;
+    let slippage_tolerance = config.slippage_tolerance; // Get slippage from config
+    let current_hop_index = (payload.hop_index - 1) as usize;
+    let next_hop_index = payload.hop_index as usize;
+
+    if next_hop_index < config.reward_to_lp_token_route.len() {
+        // --- THERE ARE MORE HOPS ---
+        let previous_hop = &config.reward_to_lp_token_route[current_hop_index];
+        let next_hop = &config.reward_to_lp_token_route[next_hop_index];
+        let belief_price = payload.belief_prices[next_hop_index];
+
+        let amount_to_swap = match previous_hop.to_asset_info.clone() {
+            AssetInfo::Token { contract_addr } => query_token_balance(
+                &deps.querier,
+                deps.api.addr_validate(&contract_addr)?,
+                env.contract.address,
+            )?,
+            AssetInfo::NativeToken { denom } => {
+                query_balance(&deps.querier, env.contract.address, denom)?
+            }
+        };
+
+        let offer_asset = Asset {
+            info: previous_hop.to_asset_info.clone(),
+            amount: amount_to_swap,
+        };
+
+        let next_payload = CompoundRoutePayload {
+            hop_index: payload.hop_index + 1,
+            belief_prices: payload.belief_prices,
+            reward_amount_to_compound: payload.reward_amount_to_compound, // <-- Forward
+            tvl_before_compound: payload.tvl_before_compound,
+        };
+
+        let swap_msg = create_swap_submsg(
+            next_hop.pair_contract.clone(),
+            offer_asset,
+            belief_price,
+            slippage_tolerance, // Pass slippage in
+            ROUTE_SWAP_REPLY_ID,
+            to_json_binary(&next_payload)?,
+        )?;
+
+        Ok(Response::new()
+            .add_submessage(swap_msg)
+            .add_attribute("action", "route_swap")
+            .add_attribute("hop_executed", current_hop_index.to_string()))
+    } else {
+        // --- THE ROUTE IS COMPLETE ---
+        let last_hop = config.reward_to_lp_token_route.last().unwrap();
+        let belief_price = *payload.belief_prices.last().unwrap();
+
+        let final_asset_balance = match last_hop.to_asset_info.clone() {
+            AssetInfo::Token { contract_addr } => query_token_balance(
+                &deps.querier,
+                deps.api.addr_validate(&contract_addr)?,
+                env.contract.address,
+            )?,
+            AssetInfo::NativeToken { denom } => {
+                query_balance(&deps.querier, env.contract.address, denom)?
+            }
+        };
+
+        let amount_to_swap = final_asset_balance.multiply_ratio(1u128, 2u128);
+        let offer_asset = Asset {
+            info: last_hop.to_asset_info.clone(),
+            amount: amount_to_swap,
+        };
+
+        let final_payload = HarvestReplyPayload {
+            belief_prices: payload.belief_prices,
+            reward_amount_to_compound: payload.reward_amount_to_compound, // <-- Forward
+            tvl_before_compound: payload.tvl_before_compound,             // <-- Forward
+        };
+
+        let swap_msg = create_swap_submsg(
+            config.pair_contract,
+            offer_asset,
+            belief_price,
+            slippage_tolerance, // Pass slippage in
+            FINAL_SWAP_REPLY_ID,
+            to_json_binary(&final_payload)?,
+        )?;
+
+        Ok(Response::new()
+            .add_submessage(swap_msg)
+            .add_attribute("action", "route_swap_complete"))
+    }
+}
+
+pub fn handle_final_swap_reply(
+    deps: DepsMut,
+    env: Env,
+    msg: Reply,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    let payload: HarvestReplyPayload = from_json(&msg.payload)?;
 
     // Query balances for both assets in the pair using the provided library functions
     let mut assets_to_provide: [Asset; 2] = [
@@ -690,7 +821,7 @@ pub fn handle_swap_reply(deps: DepsMut, env: Env) -> Result<Response, ContractEr
         }),
         gas_limit: None,
         reply_on: ReplyOn::Success,
-        payload: Binary::default(),
+        payload: to_json_binary(&payload)?,
     };
 
     Ok(Response::new()
@@ -699,8 +830,20 @@ pub fn handle_swap_reply(deps: DepsMut, env: Env) -> Result<Response, ContractEr
         .add_attribute("status", "step_3_provide_liquidity_initiated"))
 }
 
-pub fn handle_provide_liquidity_reply(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
+pub fn handle_provide_liquidity_reply(
+    deps: DepsMut,
+    env: Env,
+    msg: Reply,
+) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
+    let payload: HarvestReplyPayload = from_json(&msg.payload)?;
+
+    let new_compounding_info = CompoundingInfo {
+        last_compound_time: env.block.time.seconds(),
+        last_reward_amount_compounded: payload.reward_amount_to_compound,
+        total_lp_staked_at_last_compound: payload.tvl_before_compound,
+    };
+    COMPOUNDING_INFO.save(deps.storage, &new_compounding_info)?;
 
     // Query the balance of the new LP tokens and create the correct bond message
     let (new_lp_balance, bond_msg) = match config.lp_token {
@@ -750,6 +893,55 @@ pub fn handle_provide_liquidity_reply(deps: DepsMut, env: Env) -> Result<Respons
         .add_attribute("action", "compound")
         .add_attribute("status", "step_4_complete")
         .add_attribute("lp_tokens_staked", new_lp_balance))
+}
+
+/// Helper function to create a swap submessage.
+fn create_swap_submsg(
+    pair_contract: cosmwasm_std::Addr,
+    offer_asset: Asset,
+    belief_price: Decimal,
+    slippage_tolerance: Decimal,
+    reply_id: u64,
+    payload: Binary,
+) -> StdResult<SubMsg> {
+    let swap_cosmos_msg = match &offer_asset.info {
+        AssetInfo::NativeToken { denom } => CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: pair_contract.to_string(),
+            msg: to_json_binary(&PairExecuteMsg::Swap {
+                offer_asset: offer_asset.clone(),
+                belief_price: Some(belief_price),
+                max_spread: Some(slippage_tolerance),
+                to: None,
+                deadline: None,
+            })?,
+            funds: vec![cosmwasm_std::Coin {
+                denom: denom.clone(),
+                amount: offer_asset.amount,
+            }],
+        }),
+        AssetInfo::Token { contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_addr.clone(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Send {
+                contract: pair_contract.to_string(),
+                amount: offer_asset.amount,
+                msg: to_json_binary(&PairCw20HookMsg::Swap {
+                    belief_price: None,
+                    max_spread: Some(slippage_tolerance),
+                    to: None,
+                    deadline: None,
+                })?,
+            })?,
+            funds: vec![],
+        }),
+    };
+
+    Ok(SubMsg {
+        id: reply_id,
+        msg: swap_cosmos_msg,
+        gas_limit: None,
+        reply_on: ReplyOn::Success,
+        payload,
+    })
 }
 
 /// Creates a proposal to transfer ownership of the contract.

@@ -23,6 +23,20 @@
       "additionalProperties": false
     },
     {
+      "description": "Handles receiving native LP tokens. This is the new entry point for native deposits.",
+      "type": "object",
+      "required": [
+        "deposit_native_lp"
+      ],
+      "properties": {
+        "deposit_native_lp": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
       "description": "Withdraws a user's funds by redeeming shares.",
       "type": "object",
       "required": [
@@ -54,11 +68,14 @@
         "compound": {
           "type": "object",
           "required": [
-            "belief_price"
+            "belief_prices"
           ],
           "properties": {
-            "belief_price": {
-              "$ref": "#/definitions/Decimal"
+            "belief_prices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Decimal"
+              }
             }
           },
           "additionalProperties": false

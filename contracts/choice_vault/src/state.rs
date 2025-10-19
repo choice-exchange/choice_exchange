@@ -29,6 +29,20 @@ pub struct Config {
     pub minimum_reward_to_compound: Uint128,
     /// A new owner address that has been proposed but not yet accepted.
     pub proposed_owner: Option<Addr>,
+
+    /// A list of swap operations to perform to convert the reward token
+    /// into one of the two underlying assets of the `pair_contract`.
+    /// If this route is empty, the contract assumes the reward token
+    /// is already one of the LP's assets.
+    pub reward_to_lp_token_route: Vec<SwapHop>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct SwapHop {
+    /// The address of the pair contract for this specific hop.
+    pub pair_contract: Addr,
+    /// The asset we expect to receive from this swap.
+    pub to_asset_info: AssetInfo,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
@@ -36,6 +50,19 @@ pub struct UserInfo {
     /// The number of shares the user owns in the vault.
     pub shares: Uint128,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
+pub struct CompoundingInfo {
+    /// The block time (in seconds) of the last successful compound.
+    pub last_compound_time: u64,
+    /// The amount of the `reward_token` harvested and compounded in the last run. (Profit)
+    pub last_reward_amount_compounded: Uint128,
+    /// The total LP tokens staked by the vault *before* the last compound. (Principal)
+    pub total_lp_staked_at_last_compound: Uint128,
+}
+
+// Add this new Item to your list of constants
+pub const COMPOUNDING_INFO: Item<CompoundingInfo> = Item::new("compounding_info");
 
 /// The contract's configuration.
 pub const CONFIG: Item<Config> = Item::new("config");

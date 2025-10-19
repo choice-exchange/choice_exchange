@@ -17,11 +17,31 @@ pub struct InstantiateMsg {
     pub minimum_reward_to_compound: Uint128,
     pub compounder: String,
     pub slippage_tolerance: Decimal,
+    pub reward_to_lp_token_route: Vec<SwapHop>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct CompoundPayload {
-    pub belief_price: Decimal,
+pub struct SwapHop {
+    pub pair_contract: String,
+    pub to_asset_info: AssetInfo,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct HarvestReplyPayload {
+    pub belief_prices: Vec<Decimal>,
+    pub reward_amount_to_compound: Uint128,
+    pub tvl_before_compound: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct CompoundRoutePayload {
+    /// The index of the *next* hop to be executed.
+    pub hop_index: u32,
+    /// The full list of belief prices for the entire operation.
+    pub belief_prices: Vec<Decimal>,
+    /// For compounding info
+    pub reward_amount_to_compound: Uint128,
+    pub tvl_before_compound: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -40,7 +60,7 @@ pub enum ExecuteMsg {
 
     /// Triggers the auto-compounding of rewards.
     Compound {
-        belief_price: Decimal,
+        belief_prices: Vec<Decimal>,
     },
 
     /// Allows the owner to update the fee configuration.
@@ -74,6 +94,8 @@ pub enum QueryMsg {
     TotalShares {},
     /// Returns information for a specific user.
     UserInfo { user: String },
+    /// Returns information about the last compounding event for APR calculation.
+    CompoundingInfo {},
 }
 
 // We define a custom struct for each query response

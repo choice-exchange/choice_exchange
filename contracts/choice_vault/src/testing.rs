@@ -1,21 +1,21 @@
 #[cfg(test)]
 mod tests {
     use crate::contract::{
-        execute, instantiate, query, reply, HARVEST_REPLY_ID, PROVIDE_LIQUIDITY_REPLY_ID,
-        SWAP_REPLY_ID,
+        execute, instantiate, query, reply, FINAL_SWAP_REPLY_ID, HARVEST_REPLY_ID,
+        PROVIDE_LIQUIDITY_REPLY_ID, ROUTE_SWAP_REPLY_ID,
     };
     use crate::error::ContractError;
     use crate::mock_querier::mock_dependencies;
-    use crate::msg::{CompoundPayload, Cw20HookMsg, UserInfoResponse};
+    use crate::msg::{CompoundRoutePayload, Cw20HookMsg, HarvestReplyPayload, UserInfoResponse};
     use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-    use crate::state::{Config, UserInfo, TOTAL_SHARES, USERS};
+    use crate::state::{CompoundingInfo, Config, UserInfo, TOTAL_SHARES, USERS};
     use choice::asset::AssetInfo;
     use choice::staking::{
         Cw20HookMsg as FarmCw20HookMsg, ExecuteMsg as FarmExecuteMsg, StakerInfoResponse,
     };
     use cosmwasm_std::testing::{message_info, mock_env};
     use cosmwasm_std::{
-        from_json, to_json_binary, Binary, CosmosMsg, Decimal, StdError, SubMsg, Uint128, WasmMsg,
+        from_json, to_json_binary, Coin, CosmosMsg, Decimal, StdError, SubMsg, Uint128, WasmMsg,
     };
     use cosmwasm_std::{Reply, SubMsgResponse, SubMsgResult};
     use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
@@ -61,6 +61,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
 
         let info = message_info(&creator_addr, &[]);
@@ -147,6 +148,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let info = message_info(&creator_addr, &[]);
         instantiate(deps.as_mut(), mock_env(), info, instantiate_msg).unwrap();
@@ -249,6 +251,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
         instantiate(
@@ -365,6 +368,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         instantiate(
             deps.as_mut(),
@@ -492,6 +496,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         instantiate(
             deps.as_mut(),
@@ -602,6 +607,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         instantiate(
             deps.as_mut(),
@@ -714,6 +720,9 @@ mod tests {
         let token_b_denom = "uusd"; // Native
 
         let creator_addr = deps.api.addr_make("creator");
+        let pending_rewards = Uint128::new(20);
+        let total_lp_staked = Uint128::new(1000);
+
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
             pair_contract: pair_contract_addr.to_string(),
@@ -737,6 +746,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         instantiate(
             deps.as_mut(),
@@ -746,7 +756,6 @@ mod tests {
         )
         .unwrap();
 
-        let pending_rewards = Uint128::new(20);
         deps.querier.with_staker_info(
             farm_contract_addr.to_string(),
             StakerInfoResponse {
@@ -794,7 +803,7 @@ mod tests {
             env.clone(),
             info,
             ExecuteMsg::Compound {
-                belief_price: Decimal::one(),
+                belief_prices: vec![Decimal::one()],
             },
         )
         .unwrap();
@@ -802,8 +811,10 @@ mod tests {
         assert_eq!(res.messages[0].id, HARVEST_REPLY_ID);
 
         // ==> STEP 2: Handle Harvest Reply
-        let payload = CompoundPayload {
-            belief_price: Decimal::one(),
+        let payload = HarvestReplyPayload {
+            belief_prices: vec![Decimal::one()], // Pass a vector with one price
+            reward_amount_to_compound: pending_rewards,
+            tvl_before_compound: total_lp_staked,
         };
         let reply_msg = Reply {
             id: HARVEST_REPLY_ID,
@@ -813,27 +824,25 @@ mod tests {
                 data: None,
             }),
             gas_used: 0,
-            payload: to_json_binary(&payload).unwrap(), // <-- THIS IS THE FIX
+            payload: to_json_binary(&payload).unwrap(),
         };
         let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
         assert_eq!(res.messages.len(), 1);
-        assert_eq!(res.messages[0].id, SWAP_REPLY_ID);
+        assert_eq!(res.messages[0].id, FINAL_SWAP_REPLY_ID);
 
         // ==> STEP 3: Handle Swap Reply
         let reply_msg = Reply {
-            id: SWAP_REPLY_ID,
+            id: FINAL_SWAP_REPLY_ID,
             result: SubMsgResult::Ok(SubMsgResponse {
                 events: vec![],
                 msg_responses: vec![],
                 data: None,
             }),
             gas_used: 0,
-            payload: Binary::default(),
+            payload: to_json_binary(&payload).unwrap(),
         };
         let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
 
-        // +++ FIX IS HERE +++
-        // We now expect TWO messages: The IncreaseAllowance and the ProvideLiquidity SubMsg
         assert_eq!(res.messages.len(), 2);
 
         // Verify the first message is IncreaseAllowance for the CW20 token
@@ -861,7 +870,7 @@ mod tests {
                 data: None,
             }),
             gas_used: 0,
-            payload: Binary::default(),
+            payload: to_json_binary(&payload).unwrap(),
         };
         let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
 
@@ -889,6 +898,18 @@ mod tests {
         assert!(res
             .attributes
             .contains(&cosmwasm_std::attr("lp_tokens_staked", "9")));
+
+        let compounding_info: CompoundingInfo =
+            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::CompoundingInfo {}).unwrap())
+                .unwrap();
+        assert_eq!(
+            compounding_info.last_reward_amount_compounded,
+            pending_rewards
+        );
+        assert_eq!(
+            compounding_info.total_lp_staked_at_last_compound,
+            total_lp_staked
+        );
     }
 
     #[test]
@@ -904,6 +925,9 @@ mod tests {
         let reward_denom = "uinj";
         let token_a_denom = "uatom"; // Native
         let token_b_denom = "uusd"; // Native
+
+        let pending_rewards = Uint128::new(20);
+        let total_lp_staked = Uint128::new(1000);
 
         let creator_addr = deps.api.addr_make("creator");
         let instantiate_msg = InstantiateMsg {
@@ -930,6 +954,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         instantiate(
             deps.as_mut(),
@@ -939,7 +964,6 @@ mod tests {
         )
         .unwrap();
 
-        let pending_rewards = Uint128::new(20);
         deps.querier.with_staker_info(
             farm_contract_addr.to_string(),
             StakerInfoResponse {
@@ -988,13 +1012,15 @@ mod tests {
             env.clone(),
             info,
             ExecuteMsg::Compound {
-                belief_price: Decimal::one(),
+                belief_prices: vec![Decimal::one()],
             },
         )
         .unwrap();
 
-        let payload = CompoundPayload {
-            belief_price: Decimal::one(),
+        let payload = HarvestReplyPayload {
+            belief_prices: vec![Decimal::one()], // Pass a vector with one price
+            reward_amount_to_compound: pending_rewards,
+            tvl_before_compound: total_lp_staked,
         };
         let reply_msg = Reply {
             id: HARVEST_REPLY_ID,
@@ -1004,20 +1030,20 @@ mod tests {
                 data: None,
             }),
             gas_used: 0,
-            payload: to_json_binary(&payload).unwrap(), // <-- THIS IS THE FIX
+            payload: to_json_binary(&payload).unwrap(),
         };
         reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
 
         // ==> Check STEP 3: Handle Swap Reply <==
         let reply_msg = Reply {
-            id: SWAP_REPLY_ID,
+            id: FINAL_SWAP_REPLY_ID,
             result: SubMsgResult::Ok(SubMsgResponse {
                 events: vec![],
                 msg_responses: vec![],
                 data: None,
             }),
             gas_used: 0,
-            payload: Binary::default(),
+            payload: to_json_binary(&payload).unwrap(),
         };
         let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
 
@@ -1034,7 +1060,7 @@ mod tests {
                 data: None,
             }),
             gas_used: 0,
-            payload: Binary::default(),
+            payload: to_json_binary(&payload).unwrap(),
         };
         let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
 
@@ -1077,6 +1103,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
         instantiate(
@@ -1146,6 +1173,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
         instantiate(
@@ -1203,6 +1231,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
         instantiate(
@@ -1226,7 +1255,7 @@ mod tests {
 
         // --- Act ---
         let msg = ExecuteMsg::Compound {
-            belief_price: Decimal::one(),
+            belief_prices: vec![Decimal::one()],
         };
         let info = message_info(&owner_addr, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
@@ -1282,6 +1311,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
 
@@ -1319,8 +1349,10 @@ mod tests {
         let mut env = mock_env();
         env.contract.address = vault_addr;
 
-        let payload = CompoundPayload {
-            belief_price: Decimal::one(), // A default belief_price is fine for this test
+        let payload = HarvestReplyPayload {
+            belief_prices: vec![Decimal::one()], // Pass a vector with one price
+            reward_amount_to_compound: total_rewards, // Use the actual reward amount
+            tvl_before_compound: Uint128::new(1000),
         };
         let reply_msg = Reply {
             id: HARVEST_REPLY_ID,
@@ -1355,7 +1387,7 @@ mod tests {
         let expected_swap_amount = remaining_rewards.multiply_ratio(1u128, 2u128); // Half of remaining
 
         let swap_submessage = res.messages.get(1).unwrap();
-        assert_eq!(swap_submessage.id, SWAP_REPLY_ID);
+        assert_eq!(swap_submessage.id, FINAL_SWAP_REPLY_ID);
 
         // To verify the amount, we need to decode the inner message
         if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &swap_submessage.msg {
@@ -1404,6 +1436,7 @@ mod tests {
             fee_recipient: None,
             fee_percentage: None,
             minimum_reward_to_compound: minimum_rewards,
+            reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator");
         instantiate(
@@ -1429,7 +1462,7 @@ mod tests {
         );
 
         let msg = ExecuteMsg::Compound {
-            belief_price: Decimal::one(),
+            belief_prices: vec![Decimal::one()],
         };
         let info = message_info(&compounder_addr, &[]); // Correct compounder calls
         let res = execute(deps.as_mut(), env.clone(), info, msg.clone());
@@ -1488,6 +1521,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::new(100),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
 
@@ -1566,6 +1600,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
         instantiate(
@@ -1641,6 +1676,7 @@ mod tests {
             minimum_reward_to_compound: Uint128::zero(),
             compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
         };
         let creator_addr = deps.api.addr_make("creator");
         instantiate(
@@ -1713,6 +1749,7 @@ mod tests {
             fee_recipient: None,
             fee_percentage: None,
             minimum_reward_to_compound: Uint128::zero(),
+            reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator");
         instantiate(
@@ -1736,7 +1773,7 @@ mod tests {
 
         // A random, non-compounder user calls Compound
         let msg = ExecuteMsg::Compound {
-            belief_price: Decimal::one(),
+            belief_prices: vec![Decimal::one()],
         };
         let info = message_info(&random_caller, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg);
@@ -1781,6 +1818,7 @@ mod tests {
             fee_recipient: None,
             fee_percentage: None,
             minimum_reward_to_compound: Uint128::zero(),
+            reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator");
         instantiate(
@@ -1918,5 +1956,214 @@ mod tests {
             amount: vec![cosmwasm_std::coin(deposit_amount.u128(), native_lp_denom)],
         });
         assert_eq!(res.messages[1].msg, expected_send_msg);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_compound_with_multi_hop_route() {
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let compounder_addr = deps.api.addr_make("compounder");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let vault_addr = deps.api.addr_make("vault_contract");
+
+        // --- Define all assets and pairs for the route ---
+        let reward_token_sai = deps.api.addr_make("reward_sai_token");
+        let intermediate_token_shroom = deps.api.addr_make("intermediate_shroom_token");
+        let final_token_inj = "uinj"; // native
+        let final_lp_token = deps.api.addr_make("shroom_inj_lp_token");
+
+        let pending_rewards = Uint128::new(1000);
+        let total_lp_staked = Uint128::new(5000);
+
+        // Pair for the route hop (SAI -> SHROOM)
+        let route_pair_sai_shroom = deps.api.addr_make("pair_sai_shroom");
+        // Final pair for the LP (SHROOM/INJ)
+        let final_pair_shroom_inj = deps.api.addr_make("pair_shroom_inj");
+
+        // --- Instantiate with a 1-hop route ---
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            compounder: compounder_addr.to_string(),
+            pair_contract: final_pair_shroom_inj.to_string(), // Final LP pair
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: final_lp_token.to_string(),
+            },
+            reward_token: AssetInfo::Token {
+                contract_addr: reward_token_sai.to_string(),
+            },
+            asset_infos: [
+                AssetInfo::Token {
+                    contract_addr: intermediate_token_shroom.to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: final_token_inj.to_string(),
+                },
+            ],
+            reward_to_lp_token_route: vec![crate::msg::SwapHop {
+                pair_contract: route_pair_sai_shroom.to_string(),
+                to_asset_info: AssetInfo::Token {
+                    contract_addr: intermediate_token_shroom.to_string(),
+                },
+            }],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            slippage_tolerance: Decimal::percent(1),
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // --- Mock the entire chain of events ---
+        let mut env = mock_env();
+        env.contract.address = vault_addr.clone();
+
+        // 1. Farm has 1000 SAI as pending rewards
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: vault_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: Uint128::new(5000),
+                pending_reward: Uint128::new(1000),
+            },
+        );
+        // 2. After harvest, vault has 1000 SAI
+        deps.querier.with_token_balance(
+            &reward_token_sai.to_string(),
+            &vault_addr.to_string(),
+            Uint128::new(1000),
+        );
+        // 3. After first swap (SAI->SHROOM), vault has 500 SHROOM
+        deps.querier.with_token_balance(
+            &intermediate_token_shroom.to_string(),
+            &vault_addr.to_string(),
+            Uint128::new(500),
+        );
+        // 4. After second swap (50% of SHROOM -> INJ), vault has 250 SHROOM and 100 INJ
+        deps.querier.with_token_balance(
+            &intermediate_token_shroom.to_string(),
+            &vault_addr.to_string(),
+            Uint128::new(250),
+        );
+        deps.querier.with_balance(&[(
+            vault_addr.to_string(),
+            &[Coin::new(Uint128::new(100), final_token_inj)],
+        )]);
+        // 5. After providing liquidity, vault receives 150 new LP tokens
+        deps.querier.with_token_balance(
+            &final_lp_token.to_string(),
+            &vault_addr.to_string(),
+            Uint128::new(150),
+        );
+
+        // --- Execute the compound flow step-by-step ---
+
+        // ==> STEP 1: Execute Compound
+        // We need 2 belief prices: one for SAI->SHROOM, one for SHROOM->INJ
+        let belief_prices = vec![
+            Decimal::from_ratio(2u128, 1u128),
+            Decimal::from_ratio(5u128, 2u128),
+        ];
+        let info = message_info(&compounder_addr, &[]);
+        let res = execute(
+            deps.as_mut(),
+            env.clone(),
+            info,
+            ExecuteMsg::Compound {
+                belief_prices: belief_prices.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(res.messages[0].id, HARVEST_REPLY_ID);
+
+        // ==> STEP 2: Handle Harvest Reply -> Should start the route
+        let harvest_payload = HarvestReplyPayload {
+            belief_prices: belief_prices.clone(),
+            reward_amount_to_compound: pending_rewards,
+            tvl_before_compound: total_lp_staked,
+        };
+        let reply_msg = Reply {
+            id: HARVEST_REPLY_ID,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                data: None,
+                msg_responses: vec![],
+            }),
+            payload: to_json_binary(&harvest_payload).unwrap(),
+            gas_used: 0,
+        };
+        let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+        assert_eq!(res.messages.len(), 1);
+        assert_eq!(res.messages[0].id, ROUTE_SWAP_REPLY_ID); // It correctly starts the route
+
+        // ==> STEP 3: Handle Route Swap Reply -> Route is now complete, should start final swap
+        let route_payload = CompoundRoutePayload {
+            hop_index: 1,
+            belief_prices: belief_prices.clone(),
+            reward_amount_to_compound: pending_rewards,
+            tvl_before_compound: total_lp_staked,
+        };
+        let reply_msg = Reply {
+            id: ROUTE_SWAP_REPLY_ID,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                data: None,
+                msg_responses: vec![],
+            }),
+            payload: to_json_binary(&route_payload).unwrap(),
+            gas_used: 0,
+        };
+        let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+        assert_eq!(res.messages.len(), 1);
+        assert_eq!(res.messages[0].id, FINAL_SWAP_REPLY_ID); // It correctly transitions to the final swap
+
+        // ==> STEP 4: Handle Final Swap Reply
+        let final_swap_payload = HarvestReplyPayload {
+            belief_prices: belief_prices,
+            reward_amount_to_compound: pending_rewards,
+            tvl_before_compound: total_lp_staked,
+        };
+        let reply_msg = Reply {
+            id: FINAL_SWAP_REPLY_ID,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                data: None,
+                msg_responses: vec![],
+            }),
+            payload: to_json_binary(&final_swap_payload).unwrap(),
+            gas_used: 0,
+        };
+        let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+        assert_eq!(res.messages.len(), 2); // Allowance + Provide Liquidity
+        assert_eq!(res.messages[1].id, PROVIDE_LIQUIDITY_REPLY_ID);
+
+        // ==> STEP 5: Handle Provide Liquidity Reply
+        let reply_msg = Reply {
+            id: PROVIDE_LIQUIDITY_REPLY_ID,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                data: None,
+                msg_responses: vec![],
+            }),
+            payload: to_json_binary(&final_swap_payload).unwrap(),
+            gas_used: 0,
+        };
+        let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+        assert_eq!(res.messages.len(), 1);
+        assert!(res
+            .attributes
+            .iter()
+            .any(|attr| attr.key == "status" && attr.value == "step_4_complete"));
+        assert!(res
+            .attributes
+            .iter()
+            .any(|attr| attr.key == "lp_tokens_staked" && attr.value == "150"));
     }
 }

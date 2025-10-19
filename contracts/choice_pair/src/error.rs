@@ -43,5 +43,5 @@ pub enum ContractError {
     },
 
     #[error("LP supply overflow")]
-    LpSupplyOverflow {}
+    LpSupplyOverflow {},
 }
