@@ -3,9 +3,13 @@
   "title": "UserInfoResponse",
   "type": "object",
   "required": [
+    "pending_deposit",
     "shares"
   ],
   "properties": {
+    "pending_deposit": {
+      "$ref": "#/definitions/Uint128"
+    },
     "shares": {
       "$ref": "#/definitions/Uint128"
     }

@@ -51,6 +51,20 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "description": "Returns information about the last compounding event for APR calculation.",
+      "type": "object",
+      "required": [
+        "compounding_info"
+      ],
+      "properties": {
+        "compounding_info": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }
