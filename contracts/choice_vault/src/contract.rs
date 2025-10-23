@@ -1,4 +1,3 @@
-use choice::asset::{Asset, AssetInfo};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
@@ -8,6 +7,7 @@ use cosmwasm_std::{
 use cw2::set_contract_version;
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 
+use choice::asset::{Asset, AssetInfo};
 use choice::pair::{Cw20HookMsg as PairCw20HookMsg, ExecuteMsg as PairExecuteMsg};
 use choice::querier::{query_balance, query_token_balance};
 use choice::staking::{ExecuteMsg as FarmExecuteMsg, QueryMsg as FarmQueryMsg, StakerInfoResponse};
@@ -19,7 +19,7 @@ use crate::msg::{
 };
 use crate::state::{
     CompoundingInfo, Config, SwapHop as StateSwapHop, UserInfo, COMPOUNDING_INFO, CONFIG,
-    TOTAL_SHARES, USERS,
+    TOTAL_PENDING_DEPOSITS, TOTAL_SHARES, USERS,
 };
 
 const CONTRACT_NAME: &str = "crates.io:choice-vault";
@@ -83,6 +83,7 @@ pub fn instantiate(
 
     CONFIG.save(deps.storage, &config)?;
     TOTAL_SHARES.save(deps.storage, &Uint128::zero())?;
+    TOTAL_PENDING_DEPOSITS.save(deps.storage, &Uint128::zero())?;
     COMPOUNDING_INFO.save(deps.storage, &CompoundingInfo::default())?;
 
     Ok(Response::new()
@@ -101,9 +102,12 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
-        ExecuteMsg::DepositNativeLp {} => execute_deposit_native_lp(deps, env, info),
+        ExecuteMsg::Deposit {} => execute_deposit_native(deps, env, info),
         ExecuteMsg::Withdraw { shares } => execute_withdraw(deps, env, info, shares),
-        ExecuteMsg::Compound { belief_prices } => execute_compound(deps, env, info, belief_prices),
+        ExecuteMsg::Compound {} => execute_compound(deps, env, info),
+        ExecuteMsg::ActivatePendingDeposits { users } => {
+            execute_activate_pending_deposits(deps, env, info, users)
+        }
         ExecuteMsg::UpdateConfig {
             compounder,
             slippage_tolerance,
@@ -213,7 +217,7 @@ pub fn receive_cw20(
     }
 }
 
-pub fn execute_deposit_native_lp(
+pub fn execute_deposit_native(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
@@ -249,82 +253,52 @@ pub fn execute_deposit_native_lp(
 
 pub fn execute_deposit(
     deps: DepsMut,
-    env: Env,
+    _env: Env,
     sender: String,
     amount: Uint128,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    let mut total_shares = TOTAL_SHARES.load(deps.storage)?;
     let sender_addr = deps.api.addr_validate(&sender)?;
 
-    // Query the farm contract to find out the total amount of LP tokens
-    // our vault currently has staked.
-    let staker_info: StakerInfoResponse = deps.querier.query_wasm_smart(
-        config.farm_contract.clone(),
-        &FarmQueryMsg::StakerInfo {
-            staker: env.contract.address.to_string(),
-            block_time: None, // Use current block time
-        },
-    )?;
-    let total_lp_staked = staker_info.bond_amount;
-
-    // Calculate the number of shares to mint.
-    let shares_to_mint = if total_shares.is_zero() || total_lp_staked.is_zero() {
-        amount
-    } else {
-        amount.multiply_ratio(total_shares, total_lp_staked)
-    };
-
-    if shares_to_mint.is_zero() {
-        return Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
-            "Received zero shares for the deposit",
-        )));
-    }
-
-    // Update the user's share count and the total shares.
+    // Update the user's pending deposit count.
     USERS.update(
         deps.storage,
         &sender_addr,
         |user_info| -> StdResult<UserInfo> {
             let mut info = user_info.unwrap_or_default();
-            info.shares += shares_to_mint;
+            info.pending_deposit += amount; // Add to pending, not shares
             Ok(info)
         },
     )?;
-    total_shares += shares_to_mint;
-    TOTAL_SHARES.save(deps.storage, &total_shares)?;
 
-    // After minting shares, create the correct message to stake the received LP tokens.
+    TOTAL_PENDING_DEPOSITS.update(deps.storage, |mut total| -> StdResult<_> {
+        total += amount;
+        Ok(total)
+    })?;
+
+    // The capital should be put to work immediately to generate rewards.
     let bond_msg = match config.lp_token {
-        AssetInfo::Token { contract_addr } => {
-            // For CW20 tokens, use the `Send` hook pattern.
-            CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: contract_addr.to_string(),
-                msg: to_json_binary(&Cw20ExecuteMsg::Send {
-                    contract: config.farm_contract.to_string(),
-                    amount,
-                    msg: to_json_binary(&choice::staking::Cw20HookMsg::Bond {})?,
-                })?,
-                funds: vec![],
-            })
-        }
-        AssetInfo::NativeToken { denom } => {
-            // For native tokens, call the farm's `Bond` message directly
-            // and attach the native coins in the `funds` array.
-            CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: config.farm_contract.to_string(),
-                msg: to_json_binary(&FarmExecuteMsg::Bond { amount })?,
-                funds: vec![cosmwasm_std::coin(amount.u128(), denom)],
-            })
-        }
+        AssetInfo::Token { contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_addr.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Send {
+                contract: config.farm_contract.to_string(),
+                amount,
+                msg: to_json_binary(&choice::staking::Cw20HookMsg::Bond {})?,
+            })?,
+            funds: vec![],
+        }),
+        AssetInfo::NativeToken { denom } => CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: config.farm_contract.to_string(),
+            msg: to_json_binary(&FarmExecuteMsg::Bond { amount })?,
+            funds: vec![cosmwasm_std::coin(amount.u128(), denom)],
+        }),
     };
 
     Ok(Response::new()
         .add_message(bond_msg)
-        .add_attribute("action", "deposit")
+        .add_attribute("action", "deposit_pending")
         .add_attribute("depositor", sender)
-        .add_attribute("lp_amount", amount.to_string())
-        .add_attribute("shares_minted", shares_to_mint.to_string()))
+        .add_attribute("lp_amount_pending", amount.to_string()))
 }
 
 pub fn execute_withdraw(
@@ -333,64 +307,70 @@ pub fn execute_withdraw(
     info: MessageInfo,
     shares: Uint128,
 ) -> Result<Response, ContractError> {
-    if shares.is_zero() {
-        return Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
-            "Cannot withdraw zero shares",
-        )));
-    }
-
     let config = CONFIG.load(deps.storage)?;
     let sender_addr = info.sender;
 
-    // Decrease the user's share balance, checking for sufficient funds
-    let user_info = USERS.update(
-        deps.storage,
-        &sender_addr,
-        |user| -> Result<_, ContractError> {
-            match user {
-                Some(mut user_info) => {
-                    user_info.shares = user_info
-                        .shares
-                        .checked_sub(shares)
-                        .map_err(|_| ContractError::InsufficientShares {})?;
-                    Ok(user_info)
-                }
-                None => Err(ContractError::InsufficientShares {}),
-            }
-        },
-    )?;
+    let user_info = USERS
+        .load(deps.storage, &sender_addr)
+        .map_err(|_| ContractError::InsufficientShares {})?;
 
-    // If the user's shares are now zero, remove them from storage to save gas.
-    if user_info.shares.is_zero() {
-        USERS.remove(deps.storage, &sender_addr);
+    if user_info.shares < shares {
+        return Err(ContractError::InsufficientShares {});
     }
 
-    // Update total shares by subtracting the burnt shares
+    // 1. Get the current state of all necessary totals BEFORE any changes.
     let total_shares_before_burn = TOTAL_SHARES.load(deps.storage)?;
-    TOTAL_SHARES.save(deps.storage, &(total_shares_before_burn - shares))?;
+    let total_pending_deposits_before = TOTAL_PENDING_DEPOSITS.load(deps.storage)?;
+    let pending_to_withdraw = user_info.pending_deposit;
 
-    let env_time = Some(env.block.time.seconds());
-
-    // Query the farm contract to get the vault's total LP balance
+    // 2. Query the farm for the vault's total current asset balance.
     let staker_info: StakerInfoResponse = deps.querier.query_wasm_smart(
         config.farm_contract.clone(),
         &FarmQueryMsg::StakerInfo {
             staker: env.contract.address.to_string(),
-            block_time: env_time,
+            block_time: None,
         },
     )?;
     let total_lp_staked = staker_info.bond_amount;
 
-    // Calculate the amount of LP tokens to redeem
-    // lp_to_withdraw = (shares_to_burn * total_lp_staked) / total_shares_before_burn
-    let lp_to_withdraw = shares.multiply_ratio(total_lp_staked, total_shares_before_burn);
+    // 3. Isolate the true value of all actively earning shares.
+    let lp_value_of_all_shares = total_lp_staked
+        .checked_sub(total_pending_deposits_before)
+        .map_err(StdError::from)?;
 
-    // --- Message Generation ---
-    // The withdrawal is a two-step process executed atomically:
-    // 1. Vault tells the Farm to `unbond`. The Farm sends LP tokens to the Vault.
-    // 2. Vault immediately sends those newly received LP tokens to the user.
+    // 4. Calculate the LP value of the shares this user is withdrawing.
+    let lp_from_shares = if shares.is_zero() || total_shares_before_burn.is_zero() {
+        Uint128::zero()
+    } else {
+        shares.multiply_ratio(lp_value_of_all_shares, total_shares_before_burn)
+    };
 
-    // Message 1: Unbond from the farm contract.
+    // 5. The total amount to give the user is the value of their shares PLUS their pending deposit.
+    let lp_to_withdraw = lp_from_shares + pending_to_withdraw;
+
+    if lp_to_withdraw.is_zero() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Cannot withdraw zero LP tokens",
+        )));
+    }
+
+    // All calculations are done. Now, we safely update the state.
+    let mut updated_user_info = user_info;
+    updated_user_info.shares -= shares;
+    updated_user_info.pending_deposit = Uint128::zero();
+
+    if updated_user_info.shares.is_zero() {
+        USERS.remove(deps.storage, &sender_addr);
+    } else {
+        USERS.save(deps.storage, &sender_addr, &updated_user_info)?;
+    }
+
+    TOTAL_SHARES.save(deps.storage, &(total_shares_before_burn - shares))?;
+    TOTAL_PENDING_DEPOSITS.save(
+        deps.storage,
+        &(total_pending_deposits_before - pending_to_withdraw),
+    )?;
+
     let unbond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: config.farm_contract.to_string(),
         msg: to_json_binary(&FarmExecuteMsg::Unbond {
@@ -399,7 +379,6 @@ pub fn execute_withdraw(
         funds: vec![],
     });
 
-    // Create the message to transfer LP tokens back to the user
     let transfer_lp_msg = match config.lp_token {
         AssetInfo::Token { contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: contract_addr.to_string(),
@@ -423,26 +402,19 @@ pub fn execute_withdraw(
         .add_attribute("action", "withdraw")
         .add_attribute("withdrawer", sender_addr.to_string())
         .add_attribute("shares_burnt", shares.to_string())
-        .add_attribute("lp_amount_withdrawn", lp_to_withdraw.to_string()))
+        .add_attribute("pending_lp_withdrawn", pending_to_withdraw.to_string())
+        .add_attribute("total_lp_withdrawn", lp_to_withdraw.to_string()))
 }
 
 pub fn execute_compound(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    belief_prices: Vec<Decimal>,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
     if info.sender != config.compounder {
         return Err(ContractError::Unauthorized {});
-    }
-
-    let expected_price_count = config.reward_to_lp_token_route.len() + 1;
-    if belief_prices.len() != expected_price_count {
-        return Err(ContractError::Std(StdError::generic_err(
-            "Incorrect number of belief_prices provided for the configured swap route",
-        )));
     }
 
     let env_time = Some(env.block.time.seconds());
@@ -470,7 +442,6 @@ pub fn execute_compound(
     }
 
     let payload = HarvestReplyPayload {
-        belief_prices,
         reward_amount_to_compound: staker_info.pending_reward,
         tvl_before_compound: staker_info.bond_amount,
     };
@@ -522,6 +493,7 @@ fn query_user_info(deps: Deps, user: String) -> StdResult<UserInfoResponse> {
         .unwrap_or_default();
     Ok(UserInfoResponse {
         shares: user_info.shares,
+        pending_deposit: user_info.pending_deposit,
     })
 }
 
@@ -533,7 +505,7 @@ pub fn handle_harvest_reply(
 ) -> Result<Response, ContractError> {
     let payload: HarvestReplyPayload = from_json(&msg.payload)?;
     let config = CONFIG.load(deps.storage)?;
-    let slippage_tolerance = config.slippage_tolerance; // Get slippage from config
+    let slippage_tolerance = config.slippage_tolerance;
 
     // Query the balance of the reward token we just harvested
     let reward_asset_info = config.reward_token.clone();
@@ -552,7 +524,7 @@ pub fn handle_harvest_reply(
         return Ok(Response::new().add_attribute("status", "no_rewards_after_harvest"));
     }
 
-    // Handle fees first (logic remains the same)
+    // Handle fees
     let mut messages: Vec<CosmosMsg> = vec![];
     if let (Some(recipient), Some(percentage)) = (config.fee_recipient, config.fee_percentage) {
         let fee_amount = reward_balance.multiply_ratio(
@@ -585,11 +557,9 @@ pub fn handle_harvest_reply(
         }
     }
 
-    // --- NEW ROUTER LOGIC ---
     if !config.reward_to_lp_token_route.is_empty() {
         // A. Multi-hop route is defined
         let first_hop = &config.reward_to_lp_token_route[0];
-        let belief_price = payload.belief_prices[0];
 
         let offer_asset = Asset {
             info: reward_asset_info,
@@ -597,17 +567,15 @@ pub fn handle_harvest_reply(
         };
 
         let route_payload = CompoundRoutePayload {
-            hop_index: 1, // Next hop will be index 1
-            belief_prices: payload.belief_prices,
-            reward_amount_to_compound: payload.reward_amount_to_compound, // <-- Forward
+            hop_index: 1,
+            reward_amount_to_compound: payload.reward_amount_to_compound,
             tvl_before_compound: payload.tvl_before_compound,
         };
 
         let swap_msg = create_swap_submsg(
             first_hop.pair_contract.clone(),
             offer_asset,
-            belief_price,
-            slippage_tolerance, // Pass slippage in
+            slippage_tolerance,
             ROUTE_SWAP_REPLY_ID,
             to_json_binary(&route_payload)?,
         )?;
@@ -623,13 +591,11 @@ pub fn handle_harvest_reply(
             info: reward_asset_info,
             amount: amount_to_swap,
         };
-        let belief_price = payload.belief_prices[0];
 
         let swap_msg = create_swap_submsg(
             config.pair_contract,
             offer_asset,
-            belief_price,
-            slippage_tolerance, // Pass slippage in
+            slippage_tolerance,
             FINAL_SWAP_REPLY_ID,
             to_json_binary(&payload)?,
         )?;
@@ -649,7 +615,7 @@ pub fn handle_route_swap_reply(
 ) -> Result<Response, ContractError> {
     let payload: CompoundRoutePayload = from_json(&msg.payload)?;
     let config = CONFIG.load(deps.storage)?;
-    let slippage_tolerance = config.slippage_tolerance; // Get slippage from config
+    let slippage_tolerance = config.slippage_tolerance;
     let current_hop_index = (payload.hop_index - 1) as usize;
     let next_hop_index = payload.hop_index as usize;
 
@@ -657,7 +623,6 @@ pub fn handle_route_swap_reply(
         // --- THERE ARE MORE HOPS ---
         let previous_hop = &config.reward_to_lp_token_route[current_hop_index];
         let next_hop = &config.reward_to_lp_token_route[next_hop_index];
-        let belief_price = payload.belief_prices[next_hop_index];
 
         let amount_to_swap = match previous_hop.to_asset_info.clone() {
             AssetInfo::Token { contract_addr } => query_token_balance(
@@ -677,16 +642,14 @@ pub fn handle_route_swap_reply(
 
         let next_payload = CompoundRoutePayload {
             hop_index: payload.hop_index + 1,
-            belief_prices: payload.belief_prices,
-            reward_amount_to_compound: payload.reward_amount_to_compound, // <-- Forward
+            reward_amount_to_compound: payload.reward_amount_to_compound,
             tvl_before_compound: payload.tvl_before_compound,
         };
 
         let swap_msg = create_swap_submsg(
             next_hop.pair_contract.clone(),
             offer_asset,
-            belief_price,
-            slippage_tolerance, // Pass slippage in
+            slippage_tolerance,
             ROUTE_SWAP_REPLY_ID,
             to_json_binary(&next_payload)?,
         )?;
@@ -698,7 +661,6 @@ pub fn handle_route_swap_reply(
     } else {
         // --- THE ROUTE IS COMPLETE ---
         let last_hop = config.reward_to_lp_token_route.last().unwrap();
-        let belief_price = *payload.belief_prices.last().unwrap();
 
         let final_asset_balance = match last_hop.to_asset_info.clone() {
             AssetInfo::Token { contract_addr } => query_token_balance(
@@ -718,16 +680,14 @@ pub fn handle_route_swap_reply(
         };
 
         let final_payload = HarvestReplyPayload {
-            belief_prices: payload.belief_prices,
-            reward_amount_to_compound: payload.reward_amount_to_compound, // <-- Forward
-            tvl_before_compound: payload.tvl_before_compound,             // <-- Forward
+            reward_amount_to_compound: payload.reward_amount_to_compound,
+            tvl_before_compound: payload.tvl_before_compound,
         };
 
         let swap_msg = create_swap_submsg(
             config.pair_contract,
             offer_asset,
-            belief_price,
-            slippage_tolerance, // Pass slippage in
+            slippage_tolerance,
             FINAL_SWAP_REPLY_ID,
             to_json_binary(&final_payload)?,
         )?;
@@ -899,7 +859,6 @@ pub fn handle_provide_liquidity_reply(
 fn create_swap_submsg(
     pair_contract: cosmwasm_std::Addr,
     offer_asset: Asset,
-    belief_price: Decimal,
     slippage_tolerance: Decimal,
     reply_id: u64,
     payload: Binary,
@@ -909,7 +868,7 @@ fn create_swap_submsg(
             contract_addr: pair_contract.to_string(),
             msg: to_json_binary(&PairExecuteMsg::Swap {
                 offer_asset: offer_asset.clone(),
-                belief_price: Some(belief_price),
+                belief_price: None,
                 max_spread: Some(slippage_tolerance),
                 to: None,
                 deadline: None,
@@ -1013,4 +972,85 @@ pub fn execute_cancel_ownership_proposal(
     Ok(Response::new()
         .add_attribute("action", "cancel_ownership_proposal")
         .add_attribute("owner", info.sender.to_string()))
+}
+
+pub fn execute_activate_pending_deposits(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    users: Vec<String>,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+
+    // PERMISSION CHECK: Only the compounder can run this.
+    if info.sender != config.compounder {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    // BATCH SIZE GUARD: Protect against gas limit attacks.
+    const MAX_BATCH_SIZE: usize = 30;
+    if users.len() > MAX_BATCH_SIZE {
+        return Err(ContractError::BatchTooLarge {});
+    }
+
+    // Load totals ONCE before the loop for gas efficiency.
+    let mut total_shares = TOTAL_SHARES.load(deps.storage)?;
+    let staker_info: StakerInfoResponse = deps.querier.query_wasm_smart(
+        config.farm_contract.clone(),
+        &FarmQueryMsg::StakerInfo {
+            staker: env.contract.address.to_string(),
+            block_time: None,
+        },
+    )?;
+    let total_lp_staked = staker_info.bond_amount;
+    let mut total_pending_deposits = TOTAL_PENDING_DEPOSITS.load(deps.storage)?;
+
+    let mut activated_count = 0u32;
+
+    for user_addr_str in users {
+        let user_addr = deps.api.addr_validate(&user_addr_str)?;
+        let mut user_info = match USERS.may_load(deps.storage, &user_addr)? {
+            Some(info) => info,
+            None => continue, // Skip if user not found
+        };
+
+        if user_info.pending_deposit.is_zero() {
+            continue; // Skip if user has no pending deposits
+        }
+
+        let amount_to_activate = user_info.pending_deposit;
+
+        // Calculate shares
+        let shares_to_mint = if total_shares.is_zero() || total_lp_staked.is_zero() {
+            amount_to_activate
+        } else {
+            amount_to_activate.multiply_ratio(total_shares, total_lp_staked)
+        };
+
+        if shares_to_mint.is_zero() {
+            continue; // Skip if deposit is too small to mint any shares
+        }
+
+        // Update state for this user
+        user_info.shares += shares_to_mint;
+        user_info.pending_deposit = Uint128::zero();
+        USERS.save(deps.storage, &user_addr, &user_info)?;
+
+        total_pending_deposits = total_pending_deposits
+            .checked_sub(amount_to_activate)
+            .map_err(StdError::from)?;
+
+        // Increment total shares for the next calculation
+        total_shares += shares_to_mint;
+        activated_count += 1;
+    }
+
+    // Save the final total_shares value to storage ONCE after the loop.
+    TOTAL_SHARES.save(deps.storage, &total_shares)?;
+    TOTAL_PENDING_DEPOSITS.save(deps.storage, &total_pending_deposits)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "batch_activate_deposits")
+        .add_attribute("caller", info.sender)
+        .add_attribute("activated_user_count", activated_count.to_string()))
 }

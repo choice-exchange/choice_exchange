@@ -28,7 +28,6 @@ pub struct SwapHop {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct HarvestReplyPayload {
-    pub belief_prices: Vec<Decimal>,
     pub reward_amount_to_compound: Uint128,
     pub tvl_before_compound: Uint128,
 }
@@ -37,8 +36,6 @@ pub struct HarvestReplyPayload {
 pub struct CompoundRoutePayload {
     /// The index of the *next* hop to be executed.
     pub hop_index: u32,
-    /// The full list of belief prices for the entire operation.
-    pub belief_prices: Vec<Decimal>,
     /// For compounding info
     pub reward_amount_to_compound: Uint128,
     pub tvl_before_compound: Uint128,
@@ -51,7 +48,7 @@ pub enum ExecuteMsg {
     Receive(Cw20ReceiveMsg),
 
     /// Handles receiving native LP tokens. This is the new entry point for native deposits.
-    DepositNativeLp {},
+    Deposit {},
 
     /// Withdraws a user's funds by redeeming shares.
     Withdraw {
@@ -59,8 +56,11 @@ pub enum ExecuteMsg {
     },
 
     /// Triggers the auto-compounding of rewards.
-    Compound {
-        belief_prices: Vec<Decimal>,
+    Compound {},
+
+    /// Keeper-only function to activate pending deposits for a batch of users.
+    ActivatePendingDeposits {
+        users: Vec<String>,
     },
 
     /// Allows the owner to update the fee configuration.
@@ -102,4 +102,5 @@ pub enum QueryMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct UserInfoResponse {
     pub shares: Uint128,
+    pub pending_deposit: Uint128,
 }

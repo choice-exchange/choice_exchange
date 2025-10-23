@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use choice::asset::AssetInfo; // Using the shared library
+use choice::asset::AssetInfo;
 use cosmwasm_std::{Addr, Decimal, Uint128};
 use cw_storage_plus::{Item, Map};
 
@@ -49,6 +49,8 @@ pub struct SwapHop {
 pub struct UserInfo {
     /// The number of shares the user owns in the vault.
     pub shares: Uint128,
+    /// LP tokens deposited but not yet converted to shares.
+    pub pending_deposit: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
@@ -72,3 +74,6 @@ pub const TOTAL_SHARES: Item<Uint128> = Item::new("total_shares");
 
 /// Maps a user's address to their share information.
 pub const USERS: Map<&Addr, UserInfo> = Map::new("users");
+
+/// The total amount of LP tokens held in the pending_deposit state across all users.
+pub const TOTAL_PENDING_DEPOSITS: Item<Uint128> = Item::new("total_pending_deposits");

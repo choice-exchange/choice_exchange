@@ -17,4 +17,7 @@ pub enum ContractError {
 
     #[error("Fee percentage must be between 0 and 1")]
     InvalidFeePercentage {},
+
+    #[error("Batch size exceeds the maximum limit")]
+    BatchTooLarge {},
 }
