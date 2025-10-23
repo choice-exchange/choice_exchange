@@ -1,8 +1,8 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
-    ReplyOn, Response, StdError, StdResult, SubMsg, Uint128, WasmMsg,
+    from_json, to_json_binary, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Order,
+    Reply, ReplyOn, Response, StdError, StdResult, SubMsg, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
@@ -11,11 +11,12 @@ use choice::asset::{Asset, AssetInfo};
 use choice::pair::{Cw20HookMsg as PairCw20HookMsg, ExecuteMsg as PairExecuteMsg};
 use choice::querier::{query_balance, query_token_balance};
 use choice::staking::{ExecuteMsg as FarmExecuteMsg, QueryMsg as FarmQueryMsg, StakerInfoResponse};
+use cw_storage_plus::Bound;
 
 use crate::error::ContractError;
 use crate::msg::{
-    CompoundRoutePayload, Cw20HookMsg, ExecuteMsg, HarvestReplyPayload, InstantiateMsg, QueryMsg,
-    UserInfoResponse,
+    CompoundRoutePayload, Cw20HookMsg, ExecuteMsg, HarvestReplyPayload, InstantiateMsg,
+    PendingDepositsResponse, QueryMsg, UserInfoResponse,
 };
 use crate::state::{
     CompoundingInfo, Config, SwapHop as StateSwapHop, UserInfo, COMPOUNDING_INFO, CONFIG,
@@ -471,6 +472,9 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::TotalShares {} => to_json_binary(&query_total_shares(deps)?),
         QueryMsg::UserInfo { user } => to_json_binary(&query_user_info(deps, user)?),
         QueryMsg::CompoundingInfo {} => to_json_binary(&query_compounding_info(deps)?),
+        QueryMsg::PendingDeposits { start_after, limit } => {
+            to_json_binary(&query_pending_deposits(deps, start_after, limit)?)
+        }
     }
 }
 
@@ -494,6 +498,50 @@ fn query_user_info(deps: Deps, user: String) -> StdResult<UserInfoResponse> {
     Ok(UserInfoResponse {
         shares: user_info.shares,
         pending_deposit: user_info.pending_deposit,
+    })
+}
+
+const DEFAULT_PAGINATION_LIMIT: u32 = 10;
+const MAX_PAGINATION_LIMIT: u32 = 30;
+
+pub fn query_pending_deposits(
+    deps: Deps,
+    start_after: Option<String>,
+    limit: Option<u32>,
+) -> StdResult<PendingDepositsResponse> {
+    let limit = limit
+        .unwrap_or(DEFAULT_PAGINATION_LIMIT)
+        .min(MAX_PAGINATION_LIMIT) as usize;
+
+    // Validate the start_after address if provided
+    let start = start_after
+        .map(|addr| deps.api.addr_validate(&addr))
+        .transpose()?;
+
+    // Create the lower bound for the range query
+    let start_bound = start.as_ref().map(Bound::exclusive);
+
+    let mut users_with_pending = vec![];
+    let mut last_user: Option<String> = None;
+
+    // Iterate over the USERS map within the specified range
+    for result in USERS
+        .range(deps.storage, start_bound, None, Order::Ascending)
+        .take(limit)
+    {
+        let (addr, user_info) = result?;
+
+        // Check if the user has a pending deposit
+        if !user_info.pending_deposit.is_zero() {
+            let user_addr_str = addr.to_string();
+            users_with_pending.push(user_addr_str.clone());
+            last_user = Some(user_addr_str);
+        }
+    }
+
+    Ok(PendingDepositsResponse {
+        users: users_with_pending,
+        last_user,
     })
 }
 

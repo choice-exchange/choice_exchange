@@ -96,6 +96,11 @@ pub enum QueryMsg {
     UserInfo { user: String },
     /// Returns information about the last compounding event for APR calculation.
     CompoundingInfo {},
+    /// Pending deposits for the keeper bot to query
+    PendingDeposits {
+        start_after: Option<String>,
+        limit: Option<u32>,
+    },
 }
 
 // We define a custom struct for each query response
@@ -103,4 +108,10 @@ pub enum QueryMsg {
 pub struct UserInfoResponse {
     pub shares: Uint128,
     pub pending_deposit: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct PendingDepositsResponse {
+    pub users: Vec<String>,
+    pub last_user: Option<String>,
 }

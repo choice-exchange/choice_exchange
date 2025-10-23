@@ -1,12 +1,17 @@
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::contract::{
         execute, instantiate, query, reply, FINAL_SWAP_REPLY_ID, HARVEST_REPLY_ID,
         PROVIDE_LIQUIDITY_REPLY_ID, ROUTE_SWAP_REPLY_ID,
     };
     use crate::error::ContractError;
     use crate::mock_querier::mock_dependencies;
-    use crate::msg::{CompoundRoutePayload, Cw20HookMsg, HarvestReplyPayload, UserInfoResponse};
+    use crate::msg::{
+        CompoundRoutePayload, Cw20HookMsg, HarvestReplyPayload, PendingDepositsResponse,
+        UserInfoResponse,
+    };
     use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
     use crate::state::{
         CompoundingInfo, Config, UserInfo, TOTAL_PENDING_DEPOSITS, TOTAL_SHARES, USERS,
@@ -2659,5 +2664,178 @@ mod tests {
         // 8. Verify the totals are now zero.
         let total_pending = TOTAL_PENDING_DEPOSITS.load(&deps.storage).unwrap();
         assert_eq!(total_pending, Uint128::zero());
+    }
+
+    #[test]
+    fn test_query_pending_users_pagination() {
+        // --- Arrange ---
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let pair_contract_addr = deps.api.addr_make("pair0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: pair_contract_addr.to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // We create the Addr objects first, so we can reference them later.
+        let user1_addr = deps.api.addr_make("user1"); // has pending
+        let user2_addr = deps.api.addr_make("user2"); // has NO pending, should be skipped
+        let user3_addr = deps.api.addr_make("user3"); // has pending
+        let user4_addr = deps.api.addr_make("user4"); // has pending
+        let user5_addr = deps.api.addr_make("user5"); // has pending
+
+        // Save user info to storage
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: Uint128::new(10),
+                },
+            )
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user2_addr,
+                &UserInfo {
+                    shares: Uint128::new(100),
+                    pending_deposit: Uint128::zero(),
+                },
+            )
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user3_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: Uint128::new(30),
+                },
+            )
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user4_addr,
+                &UserInfo {
+                    shares: Uint128::new(50),
+                    pending_deposit: Uint128::new(40),
+                },
+            )
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user5_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: Uint128::new(50),
+                },
+            )
+            .unwrap();
+
+        // --- Act & Assert: SCENARIO 1 - Get the first page ---
+        println!("Testing first page...");
+        let query_msg = QueryMsg::PendingDeposits {
+            start_after: None,
+            limit: Some(2),
+        };
+        let res = query(deps.as_ref(), mock_env(), query_msg).unwrap();
+        let page1: PendingDepositsResponse = from_json(&res).unwrap();
+
+        assert_eq!(page1.users.len(), 2, "Page 1 should return exactly 2 users");
+
+        let all_pending_users: HashSet<String> = [
+            user1_addr.to_string(),
+            user3_addr.to_string(),
+            user4_addr.to_string(),
+            user5_addr.to_string(),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        // Verify that the users returned are indeed in our master list of pending users.
+        assert!(all_pending_users.contains(&page1.users[0]));
+        assert!(all_pending_users.contains(&page1.users[1]));
+        assert_ne!(
+            page1.users[0], page1.users[1],
+            "Returned users should be unique"
+        ); // Sanity check
+
+        // Dynamically get the last user from the *actual* response to use as the next cursor.
+        let last_user_from_page1 = page1.last_user.clone().unwrap();
+
+        // --- Act & Assert: SCENARIO 2 - Get the second page ---
+        println!("Testing second page...");
+        let query_msg_2 = QueryMsg::PendingDeposits {
+            start_after: Some(last_user_from_page1.clone()), // Use the dynamic cursor
+            limit: Some(2),
+        };
+        let res2 = query(deps.as_ref(), mock_env(), query_msg_2).unwrap();
+        let page2: PendingDepositsResponse = from_json(&res2).unwrap();
+
+        assert_eq!(
+            page2.users.len(),
+            2,
+            "Page 2 should return the remaining 2 users"
+        );
+        assert!(all_pending_users.contains(&page2.users[0]));
+        assert!(all_pending_users.contains(&page2.users[1]));
+
+        // Ensure page 2 users are different from page 1 users
+        assert!(!page1.users.contains(&page2.users[0]));
+        assert!(!page1.users.contains(&page2.users[1]));
+
+        let last_user_from_page2 = page2.last_user.clone().unwrap();
+
+        // --- Act & Assert: SCENARIO 3 - Get the (non-existent) third page ---
+        println!("Testing third (empty) page...");
+        let query_msg_3 = QueryMsg::PendingDeposits {
+            start_after: Some(last_user_from_page2),
+            limit: Some(2),
+        };
+        let res3 = query(deps.as_ref(), mock_env(), query_msg_3).unwrap();
+        let page3: PendingDepositsResponse = from_json(&res3).unwrap();
+
+        assert!(page3.users.is_empty(), "Page 3 should be empty");
+        assert!(
+            page3.last_user.is_none(),
+            "last_user should be None when the page is empty"
+        );
     }
 }

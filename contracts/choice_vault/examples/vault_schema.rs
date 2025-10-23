@@ -4,7 +4,9 @@ use std::fs::create_dir_all;
 use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 
 // Import all the messages, responses, and state structs from your vault contract
-use choice_vault::msg::{Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg, UserInfoResponse};
+use choice_vault::msg::{
+    Cw20HookMsg, ExecuteMsg, InstantiateMsg, PendingDepositsResponse, QueryMsg, UserInfoResponse,
+};
 use choice_vault::state::Config;
 
 fn main() {
@@ -29,6 +31,7 @@ fn main() {
     // Export schemas for important state and query response structs
     export_schema(&schema_for!(Config), &out_dir);
     export_schema(&schema_for!(UserInfoResponse), &out_dir);
+    export_schema(&schema_for!(PendingDepositsResponse), &out_dir);
 
     println!("JSON schemas generated to the directory: ./schema");
 }

@@ -65,6 +65,36 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "description": "Pending deposits for the keeper bot to query",
+      "type": "object",
+      "required": [
+        "pending_deposits"
+      ],
+      "properties": {
+        "pending_deposits": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }
