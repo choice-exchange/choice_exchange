@@ -95,6 +95,20 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "description": "Returns the total amount of LP tokens in pending deposits.",
+      "type": "object",
+      "required": [
+        "total_pending_deposits"
+      ],
+      "properties": {
+        "total_pending_deposits": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }

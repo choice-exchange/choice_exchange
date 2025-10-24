@@ -1,17 +1,17 @@
-#[cfg(not(feature = "library"))]
-use cosmwasm_std::entry_point;
-use cosmwasm_std::{
-    from_json, to_json_binary, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Order,
-    Reply, ReplyOn, Response, StdError, StdResult, SubMsg, Uint128, WasmMsg,
-};
-use cw2::set_contract_version;
-use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
-
 use choice::asset::{Asset, AssetInfo};
 use choice::pair::{Cw20HookMsg as PairCw20HookMsg, ExecuteMsg as PairExecuteMsg};
 use choice::querier::{query_balance, query_token_balance};
 use choice::staking::{ExecuteMsg as FarmExecuteMsg, QueryMsg as FarmQueryMsg, StakerInfoResponse};
+#[cfg(not(feature = "library"))]
+use cosmwasm_std::entry_point;
+use cosmwasm_std::{
+    from_json, to_json_binary, Addr, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo,
+    Order, Reply, ReplyOn, Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
+};
+use cw2::set_contract_version;
+use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use cw_storage_plus::Bound;
+use std::convert::TryInto;
 
 use crate::error::ContractError;
 use crate::msg::{
@@ -311,7 +311,7 @@ pub fn execute_withdraw(
     let config = CONFIG.load(deps.storage)?;
     let sender_addr = info.sender;
 
-    let user_info = USERS
+    let mut user_info = USERS
         .load(deps.storage, &sender_addr)
         .map_err(|_| ContractError::InsufficientShares {})?;
 
@@ -319,12 +319,11 @@ pub fn execute_withdraw(
         return Err(ContractError::InsufficientShares {});
     }
 
-    // 1. Get the current state of all necessary totals BEFORE any changes.
-    let total_shares_before_burn = TOTAL_SHARES.load(deps.storage)?;
+    // 1. Get current state of totals.
+    let total_shares_before = TOTAL_SHARES.load(deps.storage)?;
     let total_pending_deposits_before = TOTAL_PENDING_DEPOSITS.load(deps.storage)?;
-    let pending_to_withdraw = user_info.pending_deposit;
 
-    // 2. Query the farm for the vault's total current asset balance.
+    // 2. Query total value from the farm.
     let staker_info: StakerInfoResponse = deps.querier.query_wasm_smart(
         config.farm_contract.clone(),
         &FarmQueryMsg::StakerInfo {
@@ -334,48 +333,133 @@ pub fn execute_withdraw(
     )?;
     let total_lp_staked = staker_info.bond_amount;
 
-    // 3. Isolate the true value of all actively earning shares.
+    // 3. Isolate the value of all active shares.
     let lp_value_of_all_shares = total_lp_staked
         .checked_sub(total_pending_deposits_before)
         .map_err(StdError::from)?;
 
-    // 4. Calculate the LP value of the shares this user is withdrawing.
-    let lp_from_shares = if shares.is_zero() || total_shares_before_burn.is_zero() {
-        Uint128::zero()
-    } else {
-        shares.multiply_ratio(lp_value_of_all_shares, total_shares_before_burn)
-    };
+    // --- RESTRUCTURED LOGIC TO FIX THE PANIC ---
 
-    // 5. The total amount to give the user is the value of their shares PLUS their pending deposit.
-    let lp_to_withdraw = lp_from_shares + pending_to_withdraw;
+    // SCENARIO A: Pending-Only Withdrawal (user passes 0 shares)
+    if shares.is_zero() {
+        if user_info.pending_deposit.is_zero() {
+            return Err(ContractError::Std(StdError::generic_err(
+                "No pending deposit to withdraw and zero shares requested",
+            )));
+        }
+        let lp_to_withdraw = user_info.pending_deposit;
 
-    if lp_to_withdraw.is_zero() {
+        // Update state
+        user_info.pending_deposit = Uint128::zero();
+        if user_info.shares.is_zero() {
+            USERS.remove(deps.storage, &sender_addr);
+        } else {
+            USERS.save(deps.storage, &sender_addr, &user_info)?;
+        }
+        TOTAL_PENDING_DEPOSITS.save(
+            deps.storage,
+            &(total_pending_deposits_before - lp_to_withdraw),
+        )?;
+
+        return send_withdrawal_messages(
+            config,
+            sender_addr,
+            lp_to_withdraw,
+            Uint128::zero(),
+            lp_to_withdraw,
+        );
+    }
+
+    // SCENARIO B: Full Withdrawal (user passes all their non-zero shares)
+    if shares == user_info.shares {
+        let lp_from_shares = shares.multiply_ratio(lp_value_of_all_shares, total_shares_before);
+        let total_lp_to_withdraw = lp_from_shares + user_info.pending_deposit;
+
+        // Update state
+        USERS.remove(deps.storage, &sender_addr);
+        TOTAL_SHARES.save(deps.storage, &(total_shares_before - shares))?;
+        TOTAL_PENDING_DEPOSITS.save(
+            deps.storage,
+            &(total_pending_deposits_before - user_info.pending_deposit),
+        )?;
+
+        return send_withdrawal_messages(
+            config,
+            sender_addr,
+            total_lp_to_withdraw,
+            shares,
+            user_info.pending_deposit,
+        );
+    }
+
+    // SCENARIO C: Partial Withdrawal
+    let lp_request_value = shares.multiply_ratio(lp_value_of_all_shares, total_shares_before);
+    if lp_request_value.is_zero() {
         return Err(ContractError::Std(StdError::generic_err(
-            "Cannot withdraw zero LP tokens",
+            "Withdrawal request is too small, resulting in zero LP value",
         )));
     }
 
-    // All calculations are done. Now, we safely update the state.
-    let mut updated_user_info = user_info;
-    updated_user_info.shares -= shares;
-    updated_user_info.pending_deposit = Uint128::zero();
+    let lp_from_pending = lp_request_value.min(user_info.pending_deposit);
+    let lp_from_shares_needed = lp_request_value
+        .checked_sub(lp_from_pending)
+        .map_err(StdError::from)?;
 
-    if updated_user_info.shares.is_zero() {
-        USERS.remove(deps.storage, &sender_addr);
+    let shares_to_burn = if lp_from_shares_needed.is_zero() || lp_value_of_all_shares.is_zero() {
+        Uint128::zero()
     } else {
-        USERS.save(deps.storage, &sender_addr, &updated_user_info)?;
-    }
+        let numerator = Uint256::from(lp_from_shares_needed) * Uint256::from(total_shares_before)
+            + (Uint256::from(lp_value_of_all_shares) - Uint256::one());
+        let result_256 = numerator / Uint256::from(lp_value_of_all_shares);
+        result_256.try_into().map_err(StdError::from)?
+    };
 
-    TOTAL_SHARES.save(deps.storage, &(total_shares_before_burn - shares))?;
+    let calculation_256 = Uint256::from(shares_to_burn) * Uint256::from(lp_value_of_all_shares)
+        / Uint256::from(total_shares_before);
+
+    let final_lp_from_shares: Uint128 = calculation_256.try_into().map_err(StdError::from)?;
+
+    let final_total_lp_to_withdraw = final_lp_from_shares + lp_from_pending;
+
+    // Update state
+    user_info.shares -= shares_to_burn;
+    user_info.pending_deposit -= lp_from_pending;
+    USERS.save(deps.storage, &sender_addr, &user_info)?;
+    TOTAL_SHARES.save(deps.storage, &(total_shares_before - shares_to_burn))?;
     TOTAL_PENDING_DEPOSITS.save(
         deps.storage,
-        &(total_pending_deposits_before - pending_to_withdraw),
+        &(total_pending_deposits_before - lp_from_pending),
     )?;
+
+    send_withdrawal_messages(
+        config,
+        sender_addr,
+        final_total_lp_to_withdraw,
+        shares_to_burn,
+        lp_from_pending,
+    )
+}
+
+/// Helper function to create and wrap withdrawal messages and attributes.
+fn send_withdrawal_messages(
+    config: Config,
+    recipient: Addr,
+    total_lp_to_withdraw: Uint128,
+    shares_burnt: Uint128,
+    pending_lp_withdrawn: Uint128,
+) -> Result<Response, ContractError> {
+    if total_lp_to_withdraw.is_zero() {
+        // This case should ideally not be reached if checks are done before calling,
+        // but it's a good safeguard.
+        return Ok(Response::new()
+            .add_attribute("action", "withdraw")
+            .add_attribute("status", "no_amount_to_withdraw"));
+    }
 
     let unbond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: config.farm_contract.to_string(),
         msg: to_json_binary(&FarmExecuteMsg::Unbond {
-            amount: lp_to_withdraw,
+            amount: total_lp_to_withdraw,
         })?,
         funds: vec![],
     });
@@ -384,16 +468,16 @@ pub fn execute_withdraw(
         AssetInfo::Token { contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: contract_addr.to_string(),
             msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: sender_addr.to_string(),
-                amount: lp_to_withdraw,
+                recipient: recipient.to_string(),
+                amount: total_lp_to_withdraw,
             })?,
             funds: vec![],
         }),
         AssetInfo::NativeToken { denom } => CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
-            to_address: sender_addr.to_string(),
+            to_address: recipient.to_string(),
             amount: vec![cosmwasm_std::Coin {
                 denom,
-                amount: lp_to_withdraw,
+                amount: total_lp_to_withdraw,
             }],
         }),
     };
@@ -401,12 +485,11 @@ pub fn execute_withdraw(
     Ok(Response::new()
         .add_messages(vec![unbond_msg, transfer_lp_msg])
         .add_attribute("action", "withdraw")
-        .add_attribute("withdrawer", sender_addr.to_string())
-        .add_attribute("shares_burnt", shares.to_string())
-        .add_attribute("pending_lp_withdrawn", pending_to_withdraw.to_string())
-        .add_attribute("total_lp_withdrawn", lp_to_withdraw.to_string()))
+        .add_attribute("withdrawer", recipient.to_string())
+        .add_attribute("shares_burnt", shares_burnt.to_string())
+        .add_attribute("pending_lp_withdrawn", pending_lp_withdrawn.to_string())
+        .add_attribute("total_lp_withdrawn", total_lp_to_withdraw.to_string()))
 }
-
 pub fn execute_compound(
     deps: DepsMut,
     env: Env,
@@ -475,6 +558,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::PendingDeposits { start_after, limit } => {
             to_json_binary(&query_pending_deposits(deps, start_after, limit)?)
         }
+        QueryMsg::TotalPendingDeposits {} => to_json_binary(&query_total_pending_deposits(deps)?),
     }
 }
 
@@ -488,6 +572,10 @@ fn query_config(deps: Deps) -> StdResult<Config> {
 
 fn query_total_shares(deps: Deps) -> StdResult<Uint128> {
     TOTAL_SHARES.load(deps.storage)
+}
+
+fn query_total_pending_deposits(deps: Deps) -> StdResult<Uint128> {
+    TOTAL_PENDING_DEPOSITS.load(deps.storage)
 }
 
 fn query_user_info(deps: Deps, user: String) -> StdResult<UserInfoResponse> {
@@ -1053,6 +1141,10 @@ pub fn execute_activate_pending_deposits(
     let total_lp_staked = staker_info.bond_amount;
     let mut total_pending_deposits = TOTAL_PENDING_DEPOSITS.load(deps.storage)?;
 
+    let lp_value_of_all_shares = total_lp_staked
+        .checked_sub(total_pending_deposits)
+        .map_err(StdError::from)?;
+
     let mut activated_count = 0u32;
 
     for user_addr_str in users {
@@ -1072,7 +1164,7 @@ pub fn execute_activate_pending_deposits(
         let shares_to_mint = if total_shares.is_zero() || total_lp_staked.is_zero() {
             amount_to_activate
         } else {
-            amount_to_activate.multiply_ratio(total_shares, total_lp_staked)
+            amount_to_activate.multiply_ratio(total_shares, lp_value_of_all_shares)
         };
 
         if shares_to_mint.is_zero() {

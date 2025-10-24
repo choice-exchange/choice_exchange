@@ -101,6 +101,8 @@ pub enum QueryMsg {
         start_after: Option<String>,
         limit: Option<u32>,
     },
+    /// Returns the total amount of LP tokens in pending deposits.
+    TotalPendingDeposits {},
 }
 
 // We define a custom struct for each query response
