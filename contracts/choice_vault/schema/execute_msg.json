@@ -37,20 +37,52 @@
       "additionalProperties": false
     },
     {
-      "description": "Withdraws a user's funds by redeeming shares.",
+      "description": "Withdraws a user's pending LP tokens that have not yet been converted to shares.",
       "type": "object",
       "required": [
-        "withdraw"
+        "withdraw_pending"
       ],
       "properties": {
-        "withdraw": {
+        "withdraw_pending": {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "description": "The amount of LP tokens to withdraw from the pending balance. If None, it withdraws the entire pending balance.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Withdraws a user's funds by redeeming active, value-accruing shares.",
+      "type": "object",
+      "required": [
+        "withdraw_shares"
+      ],
+      "properties": {
+        "withdraw_shares": {
           "type": "object",
           "required": [
-            "shares"
+            "shares_to_burn"
           ],
           "properties": {
-            "shares": {
-              "$ref": "#/definitions/Uint128"
+            "shares_to_burn": {
+              "description": "The number of shares to burn in exchange for the underlying LP tokens.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                }
+              ]
             }
           },
           "additionalProperties": false

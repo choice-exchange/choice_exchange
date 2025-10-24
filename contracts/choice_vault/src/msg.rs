@@ -50,9 +50,17 @@ pub enum ExecuteMsg {
     /// Handles receiving native LP tokens. This is the new entry point for native deposits.
     Deposit {},
 
-    /// Withdraws a user's funds by redeeming shares.
-    Withdraw {
-        shares: Uint128,
+    /// Withdraws a user's pending LP tokens that have not yet been converted to shares.
+    WithdrawPending {
+        /// The amount of LP tokens to withdraw from the pending balance.
+        /// If None, it withdraws the entire pending balance.
+        amount: Option<Uint128>,
+    },
+
+    /// Withdraws a user's funds by redeeming active, value-accruing shares.
+    WithdrawShares {
+        /// The number of shares to burn in exchange for the underlying LP tokens.
+        shares_to_burn: Uint128,
     },
 
     /// Triggers the auto-compounding of rewards.

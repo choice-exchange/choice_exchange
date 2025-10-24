@@ -6,12 +6,11 @@ use choice::staking::{ExecuteMsg as FarmExecuteMsg, QueryMsg as FarmQueryMsg, St
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
     from_json, to_json_binary, Addr, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo,
-    Order, Reply, ReplyOn, Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
+    Order, Reply, ReplyOn, Response, StdError, StdResult, SubMsg, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use cw_storage_plus::Bound;
-use std::convert::TryInto;
 
 use crate::error::ContractError;
 use crate::msg::{
@@ -104,7 +103,10 @@ pub fn execute(
     match msg {
         ExecuteMsg::Receive(msg) => receive_cw20(deps, env, info, msg),
         ExecuteMsg::Deposit {} => execute_deposit_native(deps, env, info),
-        ExecuteMsg::Withdraw { shares } => execute_withdraw(deps, env, info, shares),
+        ExecuteMsg::WithdrawPending { amount } => execute_withdraw_pending(deps, env, info, amount),
+        ExecuteMsg::WithdrawShares { shares_to_burn } => {
+            execute_withdraw_shares(deps, env, info, shares_to_burn)
+        }
         ExecuteMsg::Compound {} => execute_compound(deps, env, info),
         ExecuteMsg::ActivatePendingDeposits { users } => {
             execute_activate_pending_deposits(deps, env, info, users)
@@ -302,11 +304,12 @@ pub fn execute_deposit(
         .add_attribute("lp_amount_pending", amount.to_string()))
 }
 
-pub fn execute_withdraw(
+/// Withdraws a user's pending LP tokens that have not yet been converted to shares.
+pub fn execute_withdraw_pending(
     deps: DepsMut,
-    env: Env,
+    _env: Env,
     info: MessageInfo,
-    shares: Uint128,
+    amount: Option<Uint128>,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     let sender_addr = info.sender;
@@ -315,13 +318,73 @@ pub fn execute_withdraw(
         .load(deps.storage, &sender_addr)
         .map_err(|_| ContractError::InsufficientShares {})?;
 
-    if user_info.shares < shares {
+    let amount_to_withdraw = amount.unwrap_or(user_info.pending_deposit);
+
+    if amount_to_withdraw.is_zero() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Withdrawal amount must be greater than zero.",
+        )));
+    }
+
+    if amount_to_withdraw > user_info.pending_deposit {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Insufficient pending deposit.",
+        )));
+    }
+
+    // Update user state
+    user_info.pending_deposit -= amount_to_withdraw;
+
+    // If user has no remaining assets, remove them from storage.
+    if user_info.shares.is_zero() && user_info.pending_deposit.is_zero() {
+        USERS.remove(deps.storage, &sender_addr);
+    } else {
+        USERS.save(deps.storage, &sender_addr, &user_info)?;
+    }
+
+    // Update total pending deposits
+    TOTAL_PENDING_DEPOSITS.update(deps.storage, |total| -> StdResult<_> {
+        total
+            .checked_sub(amount_to_withdraw)
+            .map_err(StdError::from)
+    })?;
+
+    send_withdrawal_messages(
+        config,
+        sender_addr,
+        amount_to_withdraw,
+        Uint128::zero(), // No shares are burnt
+        amount_to_withdraw,
+    )
+}
+
+/// Withdraws a user's funds by redeeming active, value-accruing shares.
+pub fn execute_withdraw_shares(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    shares_to_burn: Uint128,
+) -> Result<Response, ContractError> {
+    if shares_to_burn.is_zero() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Must withdraw a non-zero amount of shares.",
+        )));
+    }
+
+    let config = CONFIG.load(deps.storage)?;
+    let sender_addr = info.sender;
+
+    let mut user_info = USERS
+        .load(deps.storage, &sender_addr)
+        .map_err(|_| ContractError::InsufficientShares {})?;
+
+    if user_info.shares < shares_to_burn {
         return Err(ContractError::InsufficientShares {});
     }
 
     // 1. Get current state of totals.
-    let total_shares_before = TOTAL_SHARES.load(deps.storage)?;
-    let total_pending_deposits_before = TOTAL_PENDING_DEPOSITS.load(deps.storage)?;
+    let total_shares = TOTAL_SHARES.load(deps.storage)?;
+    let total_pending_deposits = TOTAL_PENDING_DEPOSITS.load(deps.storage)?;
 
     // 2. Query total value from the farm.
     let staker_info: StakerInfoResponse = deps.querier.query_wasm_smart(
@@ -335,108 +398,41 @@ pub fn execute_withdraw(
 
     // 3. Isolate the value of all active shares.
     let lp_value_of_all_shares = total_lp_staked
-        .checked_sub(total_pending_deposits_before)
+        .checked_sub(total_pending_deposits)
         .map_err(StdError::from)?;
 
-    // --- RESTRUCTURED LOGIC TO FIX THE PANIC ---
+    // 4. Calculate the LP value of the shares being burnt.
+    let lp_to_withdraw = if total_shares.is_zero() {
+        // This case should be unreachable if user has shares, but as a safeguard:
+        Uint128::zero()
+    } else {
+        shares_to_burn.multiply_ratio(lp_value_of_all_shares, total_shares)
+    };
 
-    // SCENARIO A: Pending-Only Withdrawal (user passes 0 shares)
-    if shares.is_zero() {
-        if user_info.pending_deposit.is_zero() {
-            return Err(ContractError::Std(StdError::generic_err(
-                "No pending deposit to withdraw and zero shares requested",
-            )));
-        }
-        let lp_to_withdraw = user_info.pending_deposit;
-
-        // Update state
-        user_info.pending_deposit = Uint128::zero();
-        if user_info.shares.is_zero() {
-            USERS.remove(deps.storage, &sender_addr);
-        } else {
-            USERS.save(deps.storage, &sender_addr, &user_info)?;
-        }
-        TOTAL_PENDING_DEPOSITS.save(
-            deps.storage,
-            &(total_pending_deposits_before - lp_to_withdraw),
-        )?;
-
-        return send_withdrawal_messages(
-            config,
-            sender_addr,
-            lp_to_withdraw,
-            Uint128::zero(),
-            lp_to_withdraw,
-        );
-    }
-
-    // SCENARIO B: Full Withdrawal (user passes all their non-zero shares)
-    if shares == user_info.shares {
-        let lp_from_shares = shares.multiply_ratio(lp_value_of_all_shares, total_shares_before);
-        let total_lp_to_withdraw = lp_from_shares + user_info.pending_deposit;
-
-        // Update state
-        USERS.remove(deps.storage, &sender_addr);
-        TOTAL_SHARES.save(deps.storage, &(total_shares_before - shares))?;
-        TOTAL_PENDING_DEPOSITS.save(
-            deps.storage,
-            &(total_pending_deposits_before - user_info.pending_deposit),
-        )?;
-
-        return send_withdrawal_messages(
-            config,
-            sender_addr,
-            total_lp_to_withdraw,
-            shares,
-            user_info.pending_deposit,
-        );
-    }
-
-    // SCENARIO C: Partial Withdrawal
-    let lp_request_value = shares.multiply_ratio(lp_value_of_all_shares, total_shares_before);
-    if lp_request_value.is_zero() {
+    if lp_to_withdraw.is_zero() {
         return Err(ContractError::Std(StdError::generic_err(
-            "Withdrawal request is too small, resulting in zero LP value",
+            "Withdrawal request is too small, resulting in zero LP value.",
         )));
     }
 
-    let lp_from_pending = lp_request_value.min(user_info.pending_deposit);
-    let lp_from_shares_needed = lp_request_value
-        .checked_sub(lp_from_pending)
-        .map_err(StdError::from)?;
-
-    let shares_to_burn = if lp_from_shares_needed.is_zero() || lp_value_of_all_shares.is_zero() {
-        Uint128::zero()
-    } else {
-        let numerator = Uint256::from(lp_from_shares_needed) * Uint256::from(total_shares_before)
-            + (Uint256::from(lp_value_of_all_shares) - Uint256::one());
-        let result_256 = numerator / Uint256::from(lp_value_of_all_shares);
-        result_256.try_into().map_err(StdError::from)?
-    };
-
-    let calculation_256 = Uint256::from(shares_to_burn) * Uint256::from(lp_value_of_all_shares)
-        / Uint256::from(total_shares_before);
-
-    let final_lp_from_shares: Uint128 = calculation_256.try_into().map_err(StdError::from)?;
-
-    let final_total_lp_to_withdraw = final_lp_from_shares + lp_from_pending;
-
-    // Update state
+    // 5. Update state
     user_info.shares -= shares_to_burn;
-    user_info.pending_deposit -= lp_from_pending;
-    USERS.save(deps.storage, &sender_addr, &user_info)?;
-    TOTAL_SHARES.save(deps.storage, &(total_shares_before - shares_to_burn))?;
-    TOTAL_PENDING_DEPOSITS.save(
-        deps.storage,
-        &(total_pending_deposits_before - lp_from_pending),
-    )?;
+
+    // If user has no remaining assets, remove them from storage.
+    if user_info.shares.is_zero() && user_info.pending_deposit.is_zero() {
+        USERS.remove(deps.storage, &sender_addr);
+    } else {
+        USERS.save(deps.storage, &sender_addr, &user_info)?;
+    }
+
+    TOTAL_SHARES.save(deps.storage, &(total_shares - shares_to_burn))?;
 
     send_withdrawal_messages(
         config,
         sender_addr,
-        final_total_lp_to_withdraw,
+        lp_to_withdraw,
         shares_to_burn,
-        lp_from_pending,
+        Uint128::zero(), // No pending LPs are withdrawn here
     )
 }
 
@@ -449,8 +445,6 @@ fn send_withdrawal_messages(
     pending_lp_withdrawn: Uint128,
 ) -> Result<Response, ContractError> {
     if total_lp_to_withdraw.is_zero() {
-        // This case should ideally not be reached if checks are done before calling,
-        // but it's a good safeguard.
         return Ok(Response::new()
             .add_attribute("action", "withdraw")
             .add_attribute("status", "no_amount_to_withdraw"));
@@ -490,6 +484,7 @@ fn send_withdrawal_messages(
         .add_attribute("pending_lp_withdrawn", pending_lp_withdrawn.to_string())
         .add_attribute("total_lp_withdrawn", total_lp_to_withdraw.to_string()))
 }
+
 pub fn execute_compound(
     deps: DepsMut,
     env: Env,

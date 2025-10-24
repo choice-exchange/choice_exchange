@@ -534,8 +534,8 @@ mod tests {
 
         // --- Act ---
         // 4. User1 withdraws their entire balance of 100 shares
-        let msg = ExecuteMsg::Withdraw {
-            shares: user1_shares,
+        let msg = ExecuteMsg::WithdrawShares {
+            shares_to_burn: user1_shares,
         };
         let info = message_info(&user1_addr, &[]); // The user themselves sends this message
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
@@ -671,8 +671,8 @@ mod tests {
 
         // --- Act ---
         // 4. User1 withdraws their entire balance of 100 shares
-        let msg = ExecuteMsg::Withdraw {
-            shares: user1_shares,
+        let msg = ExecuteMsg::WithdrawShares {
+            shares_to_burn: user1_shares,
         };
         let info = message_info(&user1_addr, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
@@ -789,8 +789,8 @@ mod tests {
         // --- Act ---
         // 4. User1 withdraws 40 of their 100 shares
         let shares_to_withdraw = Uint128::new(40);
-        let msg = ExecuteMsg::Withdraw {
-            shares: shares_to_withdraw,
+        let msg = ExecuteMsg::WithdrawShares {
+            shares_to_burn: shares_to_withdraw,
         };
         let info = message_info(&user1_addr, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
@@ -848,6 +848,7 @@ mod tests {
         }));
         assert_eq!(res.messages[1], expected_transfer_msg);
     }
+
     #[test]
     #[allow(deprecated)]
     fn test_compound_happy_path() {
@@ -1260,8 +1261,8 @@ mod tests {
         // --- Act ---
         // 3. User1 attempts to withdraw 101 shares, which is more than they have
         let shares_to_withdraw = Uint128::new(101);
-        let msg = ExecuteMsg::Withdraw {
-            shares: shares_to_withdraw,
+        let msg = ExecuteMsg::WithdrawShares {
+            shares_to_burn: shares_to_withdraw,
         };
         let info = message_info(&user1_addr, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg);
@@ -1988,7 +1989,6 @@ mod tests {
         assert_eq!(res.messages[0].msg, expected_bond_msg);
     }
 
-    // --- Test 2: Verify that the keeper can activate a pending native deposit ---
     #[test]
     fn test_activate_native_lp_deposit() {
         // --- Arrange ---
@@ -2084,7 +2084,6 @@ mod tests {
         assert_eq!(user_info.pending_deposit, Uint128::zero()); // Pending is cleared
     }
 
-    // --- Test 3: Verify that a user can withdraw their active native LP shares ---
     #[test]
     fn test_withdraw_native_lp_shares() {
         // --- Arrange ---
@@ -2158,8 +2157,8 @@ mod tests {
         );
 
         // --- Act ---
-        let msg = ExecuteMsg::Withdraw {
-            shares: shares_amount,
+        let msg = ExecuteMsg::WithdrawShares {
+            shares_to_burn: shares_amount,
         };
         let info = message_info(&user1_addr, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
@@ -2396,32 +2395,35 @@ mod tests {
     }
 
     #[test]
-    fn test_withdraw_clears_both_shares_and_pending_deposits_correctly() {
+    fn test_withdraw_shares_with_large_numbers() {
         // --- Arrange ---
-        // 1. Setup and instantiate the contract.
+        // This test verifies that withdrawing shares using very large numbers
+        // (to simulate high-decimal tokens) works correctly and does not affect
+        // the user's separate pending deposit.
+
         let mut deps = mock_dependencies();
         let owner_addr = deps.api.addr_make("owner");
         let farm_contract_addr = deps.api.addr_make("farm0000");
         let lp_token_addr = deps.api.addr_make("lp_token0000");
-        let pair_contract_addr = deps.api.addr_make("pair0000");
-        let creator_addr = deps.api.addr_make("creator");
+        let user1_addr = deps.api.addr_make("user1");
+        let creator = deps.api.addr_make("creator");
 
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
-            pair_contract: pair_contract_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
             lp_token: AssetInfo::Token {
                 contract_addr: lp_token_addr.to_string(),
             },
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "token_a".to_string(),
+                    denom: "a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "token_b".to_string(),
+                    denom: "b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -2434,43 +2436,45 @@ mod tests {
         instantiate(
             deps.as_mut(),
             mock_env(),
-            message_info(&creator_addr, &[]),
+            message_info(&creator, &[]),
             instantiate_msg,
         )
         .unwrap();
 
-        // 2. Set up a user with a mix of active shares and a new pending deposit.
-        let user1_addr = deps.api.addr_make("user1");
-        let user1_shares = Uint128::new(100);
-        let user1_pending = Uint128::new(50);
+        // Define a huge number that mimics a token with 18 decimals and a large supply.
+        const HUGE_NUMBER: u128 = 60_000_000_000_000_000_000_000_000_000;
 
-        // This user is the only one, so they own 100% of the shares.
-        TOTAL_SHARES.save(&mut deps.storage, &user1_shares).unwrap();
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &user1_pending)
-            .unwrap();
+        // 2. Set up state with these huge numbers.
+        let initial_user_shares = Uint128::new(HUGE_NUMBER * 2); // User has 2H shares
+        let initial_user_pending = Uint128::new(HUGE_NUMBER); // User has 1H pending
+        let total_shares_before = initial_user_shares;
+
         USERS
             .save(
                 &mut deps.storage,
                 &user1_addr,
                 &UserInfo {
-                    shares: user1_shares,
-                    pending_deposit: user1_pending,
+                    shares: initial_user_shares,
+                    pending_deposit: initial_user_pending,
                 },
             )
             .unwrap();
+        TOTAL_SHARES
+            .save(&mut deps.storage, &total_shares_before)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &initial_user_pending)
+            .unwrap();
 
-        // 3. Setup Mock Querier to define the vault's value.
-        // Let's say due to compounding, the 100 active shares have grown to be worth 120 LP tokens.
-        let value_of_active_shares = Uint128::new(120);
-        // The total amount of LP staked in the farm is the value of the active shares (120)
-        // plus the pending LPs that have also been staked (50).
-        let total_lp_staked = value_of_active_shares + user1_pending; // 120 + 50 = 170
-
+        // 3. Set up the mock querier.
+        // The value of the 2H active shares has grown to be worth 3H LP tokens.
+        let value_of_active_shares = Uint128::new(HUGE_NUMBER * 3);
+        // The total value in the farm is the value of shares (3H) + pending deposits (1H).
+        let total_lp_staked = value_of_active_shares + initial_user_pending;
         deps.querier.with_staker_info(
             farm_contract_addr.to_string(),
             StakerInfoResponse {
-                staker: owner_addr.to_string(),
+                staker: "any".to_string(),
                 reward_index: Decimal::one(),
                 bond_amount: total_lp_staked,
                 pending_reward: Uint128::zero(),
@@ -2478,51 +2482,15 @@ mod tests {
         );
 
         // --- Act ---
-        // 4. User withdraws all 100 of their shares. This action should also automatically
-        //    claim their 50 pending LP tokens.
-        let msg = ExecuteMsg::Withdraw {
-            shares: user1_shares,
-        };
+        // 4. The user decides to withdraw/burn half of their shares (1H shares).
+        let shares_to_burn = Uint128::new(HUGE_NUMBER);
+
+        let msg = ExecuteMsg::WithdrawShares { shares_to_burn };
         let info = message_info(&user1_addr, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
 
         // --- Assert ---
-        // 5. This section defines the CORRECT behavior the contract should have.
-
-        // The user should receive the current value of their shares PLUS their pending deposit.
-        // Value of Shares = 120 LP
-        // Pending Deposit = 50 LP
-        // Correct Total Withdrawal = 170 LP
-        let expected_lp_to_receive = value_of_active_shares + user1_pending;
-        assert_eq!(expected_lp_to_receive, Uint128::new(170));
-
-        // 6. Verify the messages sent by the contract.
-        assert_eq!(res.messages.len(), 2);
-
-        // The contract should unbond the CORRECT total amount from the farm.
-        let expected_unbond_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: farm_contract_addr.to_string(),
-            msg: to_json_binary(&FarmExecuteMsg::Unbond {
-                amount: expected_lp_to_receive,
-            })
-            .unwrap(),
-            funds: vec![],
-        }));
-        assert_eq!(res.messages[0], expected_unbond_msg);
-
-        // The contract should then transfer the CORRECT total amount to the user.
-        let expected_transfer_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: lp_token_addr.to_string(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: user1_addr.to_string(),
-                amount: expected_lp_to_receive,
-            })
-            .unwrap(),
-            funds: vec![],
-        }));
-        assert_eq!(res.messages[1], expected_transfer_msg);
-
-        // 7. Verify the user's state is completely cleared.
+        // 5. Verify the state changes are correct and isolated.
         let user_info: UserInfoResponse = from_json(
             &query(
                 deps.as_ref(),
@@ -2534,48 +2502,202 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(user_info.shares, Uint128::zero());
-        assert_eq!(user_info.pending_deposit, Uint128::zero());
 
-        // 8. Verify the total shares of the contract is now zero.
-        let total_shares: Uint128 =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
-                .unwrap();
-        assert_eq!(total_shares, Uint128::zero());
+        // ASSERT 1: The pending deposit MUST be unchanged.
+        assert_eq!(user_info.pending_deposit, initial_user_pending);
+
+        // ASSERT 2: The user's share balance should be correctly reduced.
+        let expected_remaining_shares = initial_user_shares - shares_to_burn;
+        assert_eq!(user_info.shares, expected_remaining_shares);
+        assert_eq!(expected_remaining_shares, Uint128::new(HUGE_NUMBER)); // Sanity check
+
+        // ASSERT 3: The correct proportional amount of LP tokens should be withdrawn.
+        // Share price = 3H LP / 2H shares = 1.5 LP/share.
+        // LP to receive = 1H shares * 1.5 = 1.5H LP.
+        let expected_lp_to_receive =
+            shares_to_burn.multiply_ratio(value_of_active_shares, total_shares_before);
+        assert_eq!(
+            expected_lp_to_receive,
+            Uint128::new(HUGE_NUMBER + HUGE_NUMBER / 2)
+        );
+
+        // ASSERT 4: Verify the messages sent for unbonding and transfer.
+        assert_eq!(res.messages.len(), 2);
+
+        let expected_unbond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: farm_contract_addr.to_string(),
+            msg: to_json_binary(&FarmExecuteMsg::Unbond {
+                amount: expected_lp_to_receive,
+            })
+            .unwrap(),
+            funds: vec![],
+        });
+        assert_eq!(res.messages[0].msg, expected_unbond_msg);
+
+        let expected_transfer_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: lp_token_addr.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: user1_addr.to_string(),
+                amount: expected_lp_to_receive,
+            })
+            .unwrap(),
+            funds: vec![],
+        });
+        assert_eq!(res.messages[1].msg, expected_transfer_msg);
     }
 
     #[test]
-    fn test_withdraw_pending_only() {
+    fn test_activate_pending_deposits_fair_pricing() {
         // --- Arrange ---
+        // This test verifies that the activation logic correctly subtracts ALL pending
+        // deposits to find the fair share price, ensuring no dilution for new depositors.
         let mut deps = mock_dependencies();
         let owner_addr = deps.api.addr_make("owner");
         let farm_contract_addr = deps.api.addr_make("farm0000");
-        let lp_token_addr = deps.api.addr_make("lp_token0000");
-        let pair_contract_addr = deps.api.addr_make("pair0000");
-        let creator_addr = deps.api.addr_make("creator");
+        let user1_addr = deps.api.addr_make("user1");
+        let creator = deps.api.addr_make("creator");
 
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
-            pair_contract: pair_contract_addr.to_string(),
+            compounder: owner_addr.to_string(),
             farm_contract: farm_contract_addr.to_string(),
             lp_token: AssetInfo::Token {
-                contract_addr: lp_token_addr.to_string(),
+                contract_addr: deps.api.addr_make("lp_token").to_string(),
             },
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "token_a".to_string(),
+                    denom: "a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "token_b".to_string(),
+                    denom: "b".to_string(),
                 },
             ],
             fee_recipient: None,
             fee_percentage: None,
             minimum_reward_to_compound: Uint128::zero(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        const HUGE_NUMBER: u128 = 60_000_000_000_000_000_000_000; // 6e22
+
+        // 2. Set up existing state
+        let total_shares_before = Uint128::new(HUGE_NUMBER * 10); // 10H
+        let value_of_existing_shares = Uint128::new(HUGE_NUMBER * 10); // 10H (Fair price is 1:1)
+
+        // 3. Set up TWO users with pending deposits
+        let user1_pending = Uint128::new(HUGE_NUMBER * 2); // 2H
+        let user2_pending = Uint128::new(HUGE_NUMBER * 3); // 3H
+        let total_pending = user1_pending + user2_pending; // 5H
+
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: user1_pending,
+                },
+            )
+            .unwrap();
+        let user2_addr = deps.api.addr_make("user2");
+        USERS
+            .save(
+                &mut deps.storage,
+                &user2_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: user2_pending,
+                },
+            )
+            .unwrap();
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &total_shares_before)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &total_pending)
+            .unwrap();
+
+        // 4. Farm has EVERYTHING staked (active + all pending) = 15H
+        let total_lp_staked = value_of_existing_shares + total_pending;
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: "any".to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: total_lp_staked,
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // --- Act ---
+        let msg = ExecuteMsg::ActivatePendingDeposits {
+            users: vec![user1_addr.to_string()],
+        };
+        let info = message_info(&owner_addr, &[]);
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // --- Assert ---
+        let user1_info: UserInfoResponse = from_json(
+            &query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user1_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let expected_shares = Uint128::new(HUGE_NUMBER * 2);
+        assert_eq!(user1_info.shares, expected_shares);
+        assert_eq!(user1_info.pending_deposit, Uint128::zero());
+    }
+
+    #[test]
+    fn test_activate_first_deposit_ever() {
+        // --- Arrange ---
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
             compounder: owner_addr.to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp_token".to_string(),
+            },
+            // ... other fields can be defaults
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
             slippage_tolerance: Decimal::percent(1),
             reward_to_lp_token_route: vec![],
         };
@@ -2587,82 +2709,59 @@ mod tests {
         )
         .unwrap();
 
-        // 2. Set up a user with ONLY a pending deposit.
+        // 2. Set up a user with a pending deposit, but TOTAL_SHARES is zero.
         let user1_addr = deps.api.addr_make("user1");
-        let user1_pending = Uint128::new(75);
-
-        // The user has no shares, so TOTAL_SHARES is zero.
-        // TOTAL_PENDING_DEPOSITS must reflect the user's pending amount.
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &user1_pending)
-            .unwrap();
+        let pending_amount = Uint128::new(150);
         USERS
             .save(
                 &mut deps.storage,
                 &user1_addr,
                 &UserInfo {
                     shares: Uint128::zero(),
-                    pending_deposit: user1_pending,
+                    pending_deposit: pending_amount,
                 },
             )
             .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &pending_amount)
+            .unwrap();
 
-        // 3. Setup Mock Querier.
-        // The total amount staked in the farm is only the pending LPs.
+        // 3. The farm has the 150 LP staked.
         deps.querier.with_staker_info(
             farm_contract_addr.to_string(),
             StakerInfoResponse {
-                staker: owner_addr.to_string(),
-                reward_index: Decimal::one(),
-                bond_amount: user1_pending,
+                staker: "any".to_string(),
+                reward_index: Decimal::zero(),
+                bond_amount: pending_amount,
                 pending_reward: Uint128::zero(),
             },
         );
 
         // --- Act ---
-        // 4. The user calls `withdraw` with 0 shares to claim their pending funds.
-        let msg = ExecuteMsg::Withdraw {
-            shares: Uint128::zero(),
+        let msg = ExecuteMsg::ActivatePendingDeposits {
+            users: vec![user1_addr.to_string()],
         };
-        let info = message_info(&user1_addr, &[]);
-        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+        let info = message_info(&owner_addr, &[]);
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
 
         // --- Assert ---
-        // 5. Calculate the expected LP amount.
-        // lp_from_shares should be 0.
-        // lp_to_withdraw should be 0 + pending_to_withdraw = 75.
-        let expected_lp_to_receive = user1_pending;
-
-        // 6. Verify the messages.
-        assert_eq!(res.messages.len(), 2);
-        let expected_unbond_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: farm_contract_addr.to_string(),
-            msg: to_json_binary(&FarmExecuteMsg::Unbond {
-                amount: expected_lp_to_receive,
-            })
+        let user_info: UserInfoResponse = from_json(
+            &query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user1_addr.to_string(),
+                },
+            )
             .unwrap(),
-            funds: vec![],
-        }));
-        assert_eq!(res.messages[0], expected_unbond_msg);
+        )
+        .unwrap();
+        // In the initial case, shares minted should be 1:1 with the deposit amount.
+        assert_eq!(user_info.shares, pending_amount);
+        assert_eq!(user_info.pending_deposit, Uint128::zero());
 
-        let expected_transfer_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: lp_token_addr.to_string(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: user1_addr.to_string(),
-                amount: expected_lp_to_receive,
-            })
-            .unwrap(),
-            funds: vec![],
-        }));
-        assert_eq!(res.messages[1], expected_transfer_msg);
-
-        // 7. Verify the user's state is completely removed from storage.
-        let user_info_raw = USERS.may_load(&deps.storage, &user1_addr).unwrap();
-        assert!(user_info_raw.is_none());
-
-        // 8. Verify the totals are now zero.
-        let total_pending = TOTAL_PENDING_DEPOSITS.load(&deps.storage).unwrap();
-        assert_eq!(total_pending, Uint128::zero());
+        let total_shares = TOTAL_SHARES.load(&deps.storage).unwrap();
+        assert_eq!(total_shares, pending_amount);
     }
 
     #[test]
@@ -2839,384 +2938,6 @@ mod tests {
     }
 
     #[test]
-    fn test_withdraw_from_pending_first() {
-        // --- Arrange ---
-        // 1. Setup and instantiate the contract.
-        let mut deps = mock_dependencies();
-        let owner_addr = deps.api.addr_make("owner");
-        let farm_contract_addr = deps.api.addr_make("farm0000");
-        let lp_token_addr = deps.api.addr_make("lp_token0000");
-        let pair_contract_addr = deps.api.addr_make("pair0000");
-        let creator_addr = deps.api.addr_make("creator");
-
-        let instantiate_msg = InstantiateMsg {
-            owner: owner_addr.to_string(),
-            pair_contract: pair_contract_addr.to_string(),
-            farm_contract: farm_contract_addr.to_string(),
-            lp_token: AssetInfo::Token {
-                contract_addr: lp_token_addr.to_string(),
-            },
-            reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
-            },
-            asset_infos: [
-                AssetInfo::NativeToken {
-                    denom: "token_a".to_string(),
-                },
-                AssetInfo::NativeToken {
-                    denom: "token_b".to_string(),
-                },
-            ],
-            fee_recipient: None,
-            fee_percentage: None,
-            minimum_reward_to_compound: Uint128::zero(),
-            compounder: owner_addr.to_string(),
-            slippage_tolerance: Decimal::percent(1),
-            reward_to_lp_token_route: vec![],
-        };
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator_addr, &[]),
-            instantiate_msg,
-        )
-        .unwrap();
-
-        // 2. Set up a user with both active shares and a pending deposit.
-        let user1_addr = deps.api.addr_make("user1");
-        let user1_shares = Uint128::new(100);
-        let user1_pending = Uint128::new(50);
-
-        TOTAL_SHARES.save(&mut deps.storage, &user1_shares).unwrap();
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &user1_pending)
-            .unwrap();
-        USERS
-            .save(
-                &mut deps.storage,
-                &user1_addr,
-                &UserInfo {
-                    shares: user1_shares,
-                    pending_deposit: user1_pending,
-                },
-            )
-            .unwrap();
-
-        // 3. Setup Mock Querier: The value of the 100 shares has grown to 120 LP.
-        // The total value in the farm is the value of shares (120) + pending deposits (50).
-        let value_of_active_shares = Uint128::new(120);
-        let total_lp_staked = value_of_active_shares + user1_pending; // 120 + 50 = 170
-
-        deps.querier.with_staker_info(
-            farm_contract_addr.to_string(),
-            StakerInfoResponse {
-                staker: owner_addr.to_string(),
-                reward_index: Decimal::one(),
-                bond_amount: total_lp_staked,
-                pending_reward: Uint128::zero(),
-            },
-        );
-
-        // --- Act ---
-        // 4. The user wants to withdraw an amount of LP (30) that is LESS than their
-        //    pending deposit (50). We must translate this LP amount into the equivalent
-        //    value in shares to pass to the `Withdraw` message.
-        //    Share Value = 120 LP / 100 shares = 1.2 LP/share.
-        //    LP to withdraw = 30.
-        //    Equivalent shares to request = 30 LP / 1.2 LP/share = 25 shares.
-        let lp_to_withdraw = Uint128::new(30);
-        let equivalent_shares_to_request =
-            lp_to_withdraw.multiply_ratio(user1_shares, value_of_active_shares);
-        assert_eq!(equivalent_shares_to_request, Uint128::new(25));
-
-        let msg = ExecuteMsg::Withdraw {
-            shares: equivalent_shares_to_request,
-        };
-        let info = message_info(&user1_addr, &[]);
-        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // --- Assert ---
-        // 5. The contract should withdraw the requested amount (30 LP) entirely from
-        //    the pending deposit, leaving the user's shares untouched.
-
-        // 6. Verify the state changes.
-        let user_info: UserInfoResponse = from_json(
-            &query(
-                deps.as_ref(),
-                mock_env(),
-                QueryMsg::UserInfo {
-                    user: user1_addr.to_string(),
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        // Shares should NOT have changed.
-        assert_eq!(user_info.shares, user1_shares);
-        // Pending deposit should be reduced by the withdrawn amount.
-        assert_eq!(user_info.pending_deposit, user1_pending - lp_to_withdraw);
-
-        // Verify global state totals.
-        let total_shares: Uint128 =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
-                .unwrap();
-        assert_eq!(total_shares, user1_shares); // Total shares are unchanged.
-
-        let total_pending: Uint128 = from_json(
-            &query(deps.as_ref(), mock_env(), QueryMsg::TotalPendingDeposits {}).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(total_pending, user1_pending - lp_to_withdraw); // Total pending is reduced.
-
-        // 7. Verify the returned messages for unbonding and transferring the correct LP amount.
-        assert_eq!(res.messages.len(), 2);
-        let expected_unbond_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: farm_contract_addr.to_string(),
-            msg: to_json_binary(&FarmExecuteMsg::Unbond {
-                amount: lp_to_withdraw,
-            })
-            .unwrap(),
-            funds: vec![],
-        }));
-        assert_eq!(res.messages[0], expected_unbond_msg);
-
-        let expected_transfer_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: lp_token_addr.to_string(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: user1_addr.to_string(),
-                amount: lp_to_withdraw,
-            })
-            .unwrap(),
-            funds: vec![],
-        }));
-        assert_eq!(res.messages[1], expected_transfer_msg);
-    }
-
-    #[test]
-    fn test_withdraw_partial_exceeding_pending() {
-        // --- Arrange ---
-        let mut deps = mock_dependencies();
-        let owner_addr = deps.api.addr_make("owner");
-        let farm_contract_addr = deps.api.addr_make("farm0000");
-        let lp_token_addr = deps.api.addr_make("lp_token0000");
-        let creator_addr = deps.api.addr_make("creator");
-
-        let instantiate_msg = InstantiateMsg {
-            owner: owner_addr.to_string(),
-            pair_contract: deps.api.addr_make("pair0000").to_string(),
-            farm_contract: farm_contract_addr.to_string(),
-            lp_token: AssetInfo::Token {
-                contract_addr: lp_token_addr.to_string(),
-            },
-            // ... other fields can be defaults
-            reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
-            },
-            asset_infos: [
-                AssetInfo::NativeToken {
-                    denom: "a".to_string(),
-                },
-                AssetInfo::NativeToken {
-                    denom: "b".to_string(),
-                },
-            ],
-            fee_recipient: None,
-            fee_percentage: None,
-            minimum_reward_to_compound: Uint128::zero(),
-            compounder: owner_addr.to_string(),
-            slippage_tolerance: Decimal::percent(1),
-            reward_to_lp_token_route: vec![],
-        };
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator_addr, &[]),
-            instantiate_msg,
-        )
-        .unwrap();
-
-        // 2. User has 100 shares and a 50 LP pending deposit.
-        let user1_addr = deps.api.addr_make("user1");
-        let user1_shares = Uint128::new(100);
-        let user1_pending = Uint128::new(50);
-
-        TOTAL_SHARES.save(&mut deps.storage, &user1_shares).unwrap();
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &user1_pending)
-            .unwrap();
-        USERS
-            .save(
-                &mut deps.storage,
-                &user1_addr,
-                &UserInfo {
-                    shares: user1_shares,
-                    pending_deposit: user1_pending,
-                },
-            )
-            .unwrap();
-
-        // 3. The 100 shares are worth 120 LP. Total value = 120 (shares) + 50 (pending) = 170.
-        let value_of_active_shares = Uint128::new(120);
-        let total_lp_staked = value_of_active_shares + user1_pending;
-        deps.querier.with_staker_info(
-            farm_contract_addr.to_string(),
-            StakerInfoResponse {
-                staker: owner_addr.to_string(),
-                reward_index: Decimal::one(),
-                bond_amount: total_lp_staked,
-                pending_reward: Uint128::zero(),
-            },
-        );
-
-        // --- Act ---
-        // 4. User wants to withdraw 80 LP. This is more than the 50 pending.
-        //    - 50 LP should come from the pending deposit.
-        //    - The remaining 30 LP must come from shares.
-        //    Share Value = 1.2 LP/share. 30 LP / 1.2 = 25 shares to burn.
-        //    Total equivalent shares to request = 80 LP / 1.2 LP/share = 66 shares.
-        let lp_to_withdraw = Uint128::new(80);
-        let equivalent_shares_to_request =
-            lp_to_withdraw.multiply_ratio(user1_shares, value_of_active_shares);
-        assert_eq!(equivalent_shares_to_request, Uint128::new(66));
-
-        let msg = ExecuteMsg::Withdraw {
-            shares: equivalent_shares_to_request,
-        };
-        let info = message_info(&user1_addr, &[]);
-        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // --- Assert ---
-        // 5. Verify the state changes.
-        let user_info: UserInfoResponse = from_json(
-            &query(
-                deps.as_ref(),
-                mock_env(),
-                QueryMsg::UserInfo {
-                    user: user1_addr.to_string(),
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        // Pending deposit should be completely gone.
-        assert_eq!(user_info.pending_deposit, Uint128::zero());
-        // The correct number of shares should have been burned (100 initial - 25 burned = 75 remaining).
-        assert_eq!(user_info.shares, Uint128::new(75));
-
-        // 6. Verify correct amount was unbonded and transferred.
-        assert_eq!(res.messages.len(), 2);
-        // Check that the unbond message is for the correct total LP amount (80)
-        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &res.messages[0].msg {
-            if let Ok(FarmExecuteMsg::Unbond { amount }) = from_json(msg) {
-                assert_eq!(amount, lp_to_withdraw);
-            } else {
-                panic!("Wrong message type");
-            }
-        } else {
-            panic!("Wrong message type");
-        }
-    }
-
-    #[test]
-    fn test_activate_first_deposit_ever() {
-        // --- Arrange ---
-        let mut deps = mock_dependencies();
-        let owner_addr = deps.api.addr_make("owner");
-        let farm_contract_addr = deps.api.addr_make("farm0000");
-        let creator_addr = deps.api.addr_make("creator");
-
-        let instantiate_msg = InstantiateMsg {
-            owner: owner_addr.to_string(),
-            compounder: owner_addr.to_string(),
-            farm_contract: farm_contract_addr.to_string(),
-            lp_token: AssetInfo::NativeToken {
-                denom: "lp_token".to_string(),
-            },
-            // ... other fields can be defaults
-            pair_contract: deps.api.addr_make("pair0000").to_string(),
-            reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
-            },
-            asset_infos: [
-                AssetInfo::NativeToken {
-                    denom: "a".to_string(),
-                },
-                AssetInfo::NativeToken {
-                    denom: "b".to_string(),
-                },
-            ],
-            fee_recipient: None,
-            fee_percentage: None,
-            minimum_reward_to_compound: Uint128::zero(),
-            slippage_tolerance: Decimal::percent(1),
-            reward_to_lp_token_route: vec![],
-        };
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator_addr, &[]),
-            instantiate_msg,
-        )
-        .unwrap();
-
-        // 2. Set up a user with a pending deposit, but TOTAL_SHARES is zero.
-        let user1_addr = deps.api.addr_make("user1");
-        let pending_amount = Uint128::new(150);
-        USERS
-            .save(
-                &mut deps.storage,
-                &user1_addr,
-                &UserInfo {
-                    shares: Uint128::zero(),
-                    pending_deposit: pending_amount,
-                },
-            )
-            .unwrap();
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &pending_amount)
-            .unwrap();
-
-        // 3. The farm has the 150 LP staked.
-        deps.querier.with_staker_info(
-            farm_contract_addr.to_string(),
-            StakerInfoResponse {
-                staker: "any".to_string(),
-                reward_index: Decimal::zero(),
-                bond_amount: pending_amount,
-                pending_reward: Uint128::zero(),
-            },
-        );
-
-        // --- Act ---
-        let msg = ExecuteMsg::ActivatePendingDeposits {
-            users: vec![user1_addr.to_string()],
-        };
-        let info = message_info(&owner_addr, &[]);
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // --- Assert ---
-        let user_info: UserInfoResponse = from_json(
-            &query(
-                deps.as_ref(),
-                mock_env(),
-                QueryMsg::UserInfo {
-                    user: user1_addr.to_string(),
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        // In the initial case, shares minted should be 1:1 with the deposit amount.
-        assert_eq!(user_info.shares, pending_amount);
-        assert_eq!(user_info.pending_deposit, Uint128::zero());
-
-        let total_shares = TOTAL_SHARES.load(&deps.storage).unwrap();
-        assert_eq!(total_shares, pending_amount);
-    }
-
-    #[test]
     fn test_multiple_pending_deposits_accumulate() {
         // --- Arrange ---
         let mut deps = mock_dependencies();
@@ -3304,123 +3025,31 @@ mod tests {
     }
 
     #[test]
-    fn test_withdraw_error_if_farm_value_less_than_pending() {
+    fn test_withdraw_pending_full_amount() {
         // --- Arrange ---
-        let mut deps = mock_dependencies();
-        let owner_addr = deps.api.addr_make("owner");
-        let farm_contract_addr = deps.api.addr_make("farm0000");
-        let user1_addr = deps.api.addr_make("user1");
-        let creator = deps.api.addr_make("creator");
-
-        let instantiate_msg = InstantiateMsg {
-            owner: owner_addr.to_string(),
-            farm_contract: farm_contract_addr.to_string(),
-            lp_token: AssetInfo::NativeToken {
-                denom: "lp_token".to_string(),
-            },
-            // ... other fields can be defaults
-            pair_contract: deps.api.addr_make("pair0000").to_string(),
-            reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
-            },
-            asset_infos: [
-                AssetInfo::NativeToken {
-                    denom: "a".to_string(),
-                },
-                AssetInfo::NativeToken {
-                    denom: "b".to_string(),
-                },
-            ],
-            fee_recipient: None,
-            fee_percentage: None,
-            minimum_reward_to_compound: Uint128::zero(),
-            compounder: owner_addr.to_string(),
-            slippage_tolerance: Decimal::percent(1),
-            reward_to_lp_token_route: vec![],
-        };
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            instantiate_msg,
-        )
-        .unwrap();
-
-        // User has 100 shares and 50 pending.
-        let user1_shares = Uint128::new(100);
-        let user1_pending = Uint128::new(50);
-        TOTAL_SHARES.save(&mut deps.storage, &user1_shares).unwrap();
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &user1_pending)
-            .unwrap();
-        USERS
-            .save(
-                &mut deps.storage,
-                &user1_addr,
-                &UserInfo {
-                    shares: user1_shares,
-                    pending_deposit: user1_pending,
-                },
-            )
-            .unwrap();
-
-        // CRITICAL: Mock the farm querier to report a value LESS than the pending deposits.
-        // This simulates an inconsistency or a loss of funds in the farm.
-        deps.querier.with_staker_info(
-            farm_contract_addr.to_string(),
-            StakerInfoResponse {
-                staker: "any".to_string(),
-                reward_index: Decimal::one(),
-                bond_amount: Uint128::new(40), // 40 is less than the 50 pending
-                pending_reward: Uint128::zero(),
-            },
-        );
-
-        // --- Act ---
-        let msg = ExecuteMsg::Withdraw {
-            shares: user1_shares,
-        };
-        let info = message_info(&user1_addr, &[]);
-        let res = execute(deps.as_mut(), mock_env(), info, msg);
-
-        // --- Assert ---
-        // The execution should fail gracefully, not panic. It should be a StdError from the checked_sub.
-        assert!(matches!(
-            res,
-            Err(ContractError::Std(StdError::Overflow { .. }))
-        ));
-    }
-
-    #[test]
-    fn test_no_overflow_on_partial_withdraw_with_large_numbers() {
-        // --- Arrange ---
-        // This test is specifically designed to fail with a panic on the current logic.
-        // It proves that the multiplication `lp_from_shares * total_shares` can
-        // exceed the u128::MAX limit with large token supplies.
-
+        // 1. Setup and instantiate the contract.
         let mut deps = mock_dependencies();
         let owner_addr = deps.api.addr_make("owner");
         let farm_contract_addr = deps.api.addr_make("farm0000");
         let lp_token_addr = deps.api.addr_make("lp_token0000");
-        let user1_addr = deps.api.addr_make("user1");
-        let creator = deps.api.addr_make("creator");
+        let creator_addr = deps.api.addr_make("creator");
 
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
             lp_token: AssetInfo::Token {
                 contract_addr: lp_token_addr.to_string(),
             },
-            pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -3433,65 +3062,188 @@ mod tests {
         instantiate(
             deps.as_mut(),
             mock_env(),
-            message_info(&creator, &[]),
+            message_info(&creator_addr, &[]),
             instantiate_msg,
         )
         .unwrap();
 
-        // Define a huge number that mimics a token with 18 decimals and a large supply.
-        const HUGE_NUMBER: u128 = 60_000_000_000_000_000_000_000_000_000;
+        // 2. Set up a user with ONLY a pending deposit and no active shares.
+        let user1_addr = deps.api.addr_make("user1");
+        let user1_pending = Uint128::new(75);
 
-        // 2. Set up state with these huge numbers.
-        // For simplicity, we assume a 1:1 ratio of shares to LP token value.
-        let user1_shares = Uint128::new(HUGE_NUMBER * 2);
-        let user1_pending = Uint128::new(HUGE_NUMBER);
-        let total_shares_before = user1_shares;
-
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &user1_pending)
+            .unwrap();
         USERS
             .save(
                 &mut deps.storage,
                 &user1_addr,
                 &UserInfo {
-                    shares: user1_shares,
+                    shares: Uint128::zero(),
                     pending_deposit: user1_pending,
                 },
             )
             .unwrap();
-        TOTAL_SHARES
-            .save(&mut deps.storage, &total_shares_before)
-            .unwrap();
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &user1_pending)
-            .unwrap();
 
-        // 3. Set up the mock querier.
-        // The total value is the value of active shares plus the pending deposits.
-        let value_of_active_shares = Uint128::new(HUGE_NUMBER * 3);
-        let total_lp_staked = value_of_active_shares + user1_pending; // 3 * HUGE_NUMBER
+        // 3. Setup Mock Querier. The farm's staked balance is equal to the pending deposit.
         deps.querier.with_staker_info(
             farm_contract_addr.to_string(),
             StakerInfoResponse {
-                staker: "any".to_string(),
+                staker: owner_addr.to_string(),
                 reward_index: Decimal::one(),
-                bond_amount: total_lp_staked,
+                bond_amount: user1_pending,
                 pending_reward: Uint128::zero(),
             },
         );
 
         // --- Act ---
-        // 4. We want to withdraw a total LP value of 1.5 * HUGE_NUMBER.
-        let total_lp_request_value = Uint128::new(HUGE_NUMBER + HUGE_NUMBER / 2);
-
-        let shares_to_request =
-            total_lp_request_value.multiply_ratio(total_shares_before, value_of_active_shares);
-
-        let msg = ExecuteMsg::Withdraw {
-            shares: shares_to_request,
-        };
+        // 4. The user calls `WithdrawPending` with `amount: None` to claim their entire pending balance.
+        let msg = ExecuteMsg::WithdrawPending { amount: None };
         let info = message_info(&user1_addr, &[]);
-        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
 
         // --- Assert ---
+        // 5. Verify the correct messages are sent.
+        assert_eq!(res.messages.len(), 2);
+
+        let expected_unbond_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: farm_contract_addr.to_string(),
+            msg: to_json_binary(&FarmExecuteMsg::Unbond {
+                amount: user1_pending,
+            })
+            .unwrap(),
+            funds: vec![],
+        });
+        assert_eq!(res.messages[0].msg, expected_unbond_msg);
+
+        let expected_transfer_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: lp_token_addr.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: user1_addr.to_string(),
+                amount: user1_pending,
+            })
+            .unwrap(),
+            funds: vec![],
+        });
+        assert_eq!(res.messages[1].msg, expected_transfer_msg);
+
+        // 6. Verify the user's state is completely removed from storage for gas efficiency.
+        let user_info_raw = USERS.may_load(&deps.storage, &user1_addr).unwrap();
+        assert!(
+            user_info_raw.is_none(),
+            "User info should be removed after full withdrawal with no other assets"
+        );
+
+        // 7. Verify the global pending deposit total is now zero.
+        let total_pending = TOTAL_PENDING_DEPOSITS.load(&deps.storage).unwrap();
+        assert_eq!(total_pending, Uint128::zero());
+
+        // 8. Verify attributes are correct
+        assert_eq!(
+            res.attributes[1],
+            cosmwasm_std::attr("withdrawer", user1_addr.to_string())
+        );
+        assert_eq!(res.attributes[2], cosmwasm_std::attr("shares_burnt", "0"));
+        assert_eq!(
+            res.attributes[3],
+            cosmwasm_std::attr("pending_lp_withdrawn", "75")
+        );
+        assert_eq!(
+            res.attributes[4],
+            cosmwasm_std::attr("total_lp_withdrawn", "75")
+        );
+    }
+
+    #[test]
+    fn test_withdraw_pending_partial_amount() {
+        // --- Arrange ---
+        // 1. Setup and instantiate the contract.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            // ... other fields are default for this test
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // 2. Set up a user with an existing share balance and a pending deposit.
+        let user1_addr = deps.api.addr_make("user1");
+        let initial_shares = Uint128::new(50);
+        let initial_pending = Uint128::new(100);
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &initial_shares)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &initial_pending)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: initial_shares,
+                    pending_deposit: initial_pending,
+                },
+            )
+            .unwrap();
+
+        // 3. Setup Mock Querier. Farm's value is shares + pending.
+        // Assuming 1:1 share price for simplicity.
+        let total_staked = initial_shares + initial_pending;
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: total_staked, // 50 + 100 = 150
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // --- Act ---
+        // 4. The user calls `WithdrawPending` to withdraw 40 of their 100 pending LP tokens.
+        let amount_to_withdraw = Uint128::new(40);
+        let msg = ExecuteMsg::WithdrawPending {
+            amount: Some(amount_to_withdraw),
+        };
+        let info = message_info(&user1_addr, &[]);
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // --- Assert ---
+        // 5. Verify the user's state has been updated correctly.
         let user_info: UserInfoResponse = from_json(
             &query(
                 deps.as_ref(),
@@ -3504,120 +3256,131 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(user_info.pending_deposit, Uint128::zero());
+        // Shares should be unchanged.
+        assert_eq!(user_info.shares, initial_shares);
+        // Pending deposit should be reduced.
+        assert_eq!(
+            user_info.pending_deposit,
+            initial_pending - amount_to_withdraw
+        );
+        assert_eq!(user_info.pending_deposit, Uint128::new(60));
 
-        let shares_burned = Uint128::new(20_000_000_000_000_000_000_000_000_000); // 2e28
+        // 6. Verify global state has been updated.
+        let total_pending = TOTAL_PENDING_DEPOSITS.load(&deps.storage).unwrap();
+        assert_eq!(total_pending, initial_pending - amount_to_withdraw);
 
-        let expected_remaining_shares = total_shares_before - shares_burned;
-
-        assert_eq!(user_info.shares, expected_remaining_shares);
+        // 7. Verify messages are correct.
+        assert_eq!(res.messages.len(), 2);
+        // Unbond message should be for the withdrawn amount.
+        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &res.messages[0].msg {
+            if let Ok(FarmExecuteMsg::Unbond { amount }) = from_json(msg) {
+                assert_eq!(amount, amount_to_withdraw);
+            } else {
+                panic!("Incorrect Wasm message type for unbond");
+            }
+        } else {
+            panic!("Expected Wasm message for unbond");
+        }
+        // Transfer message should also be for the withdrawn amount.
+        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &res.messages[1].msg {
+            if let Ok(Cw20ExecuteMsg::Transfer { amount, .. }) = from_json(msg) {
+                assert_eq!(amount, amount_to_withdraw);
+            } else {
+                panic!("Incorrect Wasm message type for transfer");
+            }
+        } else {
+            panic!("Expected Wasm message for transfer");
+        }
     }
 
     #[test]
-    fn test_activate_pending_deposits_fair_pricing() {
+    fn test_withdraw_pending_does_not_affect_shares() {
         // --- Arrange ---
-        // This test verifies that the activation logic correctly subtracts ALL pending
-        // deposits to find the fair share price, ensuring no dilution for new depositors.
+        // 1. Setup and instantiate the contract.
         let mut deps = mock_dependencies();
         let owner_addr = deps.api.addr_make("owner");
         let farm_contract_addr = deps.api.addr_make("farm0000");
-        let user1_addr = deps.api.addr_make("user1");
-        let creator = deps.api.addr_make("creator");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
 
         let instantiate_msg = InstantiateMsg {
             owner: owner_addr.to_string(),
-            compounder: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
             lp_token: AssetInfo::Token {
-                contract_addr: deps.api.addr_make("lp_token").to_string(),
+                contract_addr: lp_token_addr.to_string(),
             },
-            pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
                 denom: "reward".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
             fee_percentage: None,
             minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
             slippage_tolerance: Decimal::percent(1),
             reward_to_lp_token_route: vec![],
         };
         instantiate(
             deps.as_mut(),
             mock_env(),
-            message_info(&creator, &[]),
+            message_info(&creator_addr, &[]),
             instantiate_msg,
         )
         .unwrap();
 
-        const HUGE_NUMBER: u128 = 60_000_000_000_000_000_000_000; // 6e22
+        // 2. Set up a user with a significant balance of both active shares and pending deposits.
+        let user1_addr = deps.api.addr_make("user1");
+        let initial_shares = Uint128::new(100);
+        let initial_pending = Uint128::new(50);
 
-        // 2. Set up existing state
-        let total_shares_before = Uint128::new(HUGE_NUMBER * 10); // 10H
-        let value_of_existing_shares = Uint128::new(HUGE_NUMBER * 10); // 10H (Fair price is 1:1)
-
-        // 3. Set up TWO users with pending deposits
-        let user1_pending = Uint128::new(HUGE_NUMBER * 2); // 2H
-        let user2_pending = Uint128::new(HUGE_NUMBER * 3); // 3H
-        let total_pending = user1_pending + user2_pending; // 5H
-
+        TOTAL_SHARES
+            .save(&mut deps.storage, &initial_shares)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &initial_pending)
+            .unwrap();
         USERS
             .save(
                 &mut deps.storage,
                 &user1_addr,
                 &UserInfo {
-                    shares: Uint128::zero(),
-                    pending_deposit: user1_pending,
-                },
-            )
-            .unwrap();
-        let user2_addr = deps.api.addr_make("user2");
-        USERS
-            .save(
-                &mut deps.storage,
-                &user2_addr,
-                &UserInfo {
-                    shares: Uint128::zero(),
-                    pending_deposit: user2_pending,
+                    shares: initial_shares,
+                    pending_deposit: initial_pending,
                 },
             )
             .unwrap();
 
-        TOTAL_SHARES
-            .save(&mut deps.storage, &total_shares_before)
-            .unwrap();
-        TOTAL_PENDING_DEPOSITS
-            .save(&mut deps.storage, &total_pending)
-            .unwrap();
-
-        // 4. Farm has EVERYTHING staked (active + all pending) = 15H
-        let total_lp_staked = value_of_existing_shares + total_pending;
+        // 3. Setup Mock Querier. Farm's value is shares + pending.
+        let total_staked = Uint128::new(150); // For simplicity, assume 1:1 share value
         deps.querier.with_staker_info(
             farm_contract_addr.to_string(),
             StakerInfoResponse {
-                staker: "any".to_string(),
+                staker: owner_addr.to_string(),
                 reward_index: Decimal::one(),
-                bond_amount: total_lp_staked,
+                bond_amount: total_staked,
                 pending_reward: Uint128::zero(),
             },
         );
 
         // --- Act ---
-        let msg = ExecuteMsg::ActivatePendingDeposits {
-            users: vec![user1_addr.to_string()],
+        // 4. The user calls `WithdrawPending` to withdraw their ENTIRE pending balance.
+        let msg = ExecuteMsg::WithdrawPending {
+            amount: Some(initial_pending),
         };
-        let info = message_info(&owner_addr, &[]);
+        let info = message_info(&user1_addr, &[]);
         execute(deps.as_mut(), mock_env(), info, msg).unwrap();
 
         // --- Assert ---
-        let user1_info: UserInfoResponse = from_json(
+        // 5. Verify the user's state.
+        let user_info: UserInfoResponse = from_json(
             &query(
                 deps.as_ref(),
                 mock_env(),
@@ -3629,8 +3392,582 @@ mod tests {
         )
         .unwrap();
 
-        let expected_shares = Uint128::new(HUGE_NUMBER * 2);
-        assert_eq!(user1_info.shares, expected_shares);
-        assert_eq!(user1_info.pending_deposit, Uint128::zero());
+        // CRITICAL ASSERTION: The user's share balance must be completely unchanged.
+        assert_eq!(
+            user_info.shares, initial_shares,
+            "Shares should not be affected by withdrawing pending deposits"
+        );
+
+        // The pending deposit should now be zero.
+        assert_eq!(user_info.pending_deposit, Uint128::zero());
+
+        // 6. Verify global state.
+        let total_shares = TOTAL_SHARES.load(&deps.storage).unwrap();
+        let total_pending = TOTAL_PENDING_DEPOSITS.load(&deps.storage).unwrap();
+
+        // CRITICAL ASSERTION: Total shares in the contract must be unchanged.
+        assert_eq!(
+            total_shares, initial_shares,
+            "Total shares should not be affected"
+        );
+
+        // Total pending should now be zero.
+        assert_eq!(total_pending, Uint128::zero());
+    }
+
+    #[test]
+    fn test_withdraw_pending_error_insufficient_funds() {
+        // --- Arrange ---
+        // 1. Setup and instantiate the contract.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            // ... other fields are default for this test
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // 2. Set up a user with a pending deposit of 50 LP.
+        let user1_addr = deps.api.addr_make("user1");
+        let initial_pending = Uint128::new(50);
+
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &initial_pending)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: initial_pending,
+                },
+            )
+            .unwrap();
+
+        // --- Act ---
+        // 3. The user attempts to withdraw 51 LP, which is more than they have pending.
+        let amount_to_withdraw = Uint128::new(51);
+        let msg = ExecuteMsg::WithdrawPending {
+            amount: Some(amount_to_withdraw),
+        };
+        let info = message_info(&user1_addr, &[]);
+        let res = execute(deps.as_mut(), mock_env(), info, msg);
+
+        // --- Assert ---
+        // 4. Verify that the execution failed with the correct error.
+        match res {
+            Err(ContractError::Std(StdError::GenericErr { msg, .. })) => {
+                assert_eq!(msg, "Insufficient pending deposit.");
+            }
+            _ => panic!("Expected a generic StdError for insufficient pending deposit."),
+        }
+
+        // --- Verification ---
+        // 5. Verify that the user's state and global state were NOT changed.
+        let user_info: UserInfoResponse = from_json(
+            &query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user1_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            user_info.pending_deposit, initial_pending,
+            "Pending deposit should not have changed on failed withdrawal"
+        );
+
+        let total_pending = TOTAL_PENDING_DEPOSITS.load(&deps.storage).unwrap();
+        assert_eq!(
+            total_pending, initial_pending,
+            "Total pending deposits should not have changed"
+        );
+    }
+
+    #[test]
+    fn test_withdraw_shares_proportional_lp() {
+        // --- Arrange ---
+        // 1. Setup and instantiate the contract.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            // ... other fields are default
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // 2. Set up state.
+        // A user has 100 shares. Another user has a pending deposit of 30 LP.
+        let user1_addr = deps.api.addr_make("user1");
+        let initial_shares = Uint128::new(100);
+        let total_pending = Uint128::new(30);
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &initial_shares)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &total_pending)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: initial_shares,
+                    pending_deposit: Uint128::zero(), // This user has no pending funds
+                },
+            )
+            .unwrap();
+        // (We don't need to save the other user with a pending deposit for this test)
+
+        // 3. Setup Mock Querier: This is the key part of the test.
+        // Due to compounding, the 100 active shares have grown in value to be worth 120 LP tokens.
+        let value_of_active_shares = Uint128::new(120);
+        // The total amount in the farm is the value of active shares + all pending deposits.
+        let total_lp_staked = value_of_active_shares + total_pending; // 120 + 30 = 150
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: total_lp_staked,
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // --- Act ---
+        // 4. The user burns 50 of their 100 shares.
+        let shares_to_burn = Uint128::new(50);
+        let msg = ExecuteMsg::WithdrawShares { shares_to_burn };
+        let info = message_info(&user1_addr, &[]);
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // --- Assert ---
+        // 5. Calculate the expected LP to receive.
+        // The share price is 120 LP / 100 shares = 1.2 LP/share.
+        // Withdrawing 50 shares should yield 50 * 1.2 = 60 LP tokens.
+        let expected_lp_to_receive =
+            shares_to_burn.multiply_ratio(value_of_active_shares, initial_shares);
+        assert_eq!(expected_lp_to_receive, Uint128::new(60));
+
+        // 6. Verify state changes.
+        let user_info: UserInfoResponse = from_json(
+            &query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user1_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(user_info.shares, initial_shares - shares_to_burn); // 100 - 50 = 50
+        assert_eq!(user_info.pending_deposit, Uint128::zero()); // Unchanged
+
+        let total_shares = TOTAL_SHARES.load(&deps.storage).unwrap();
+        assert_eq!(total_shares, initial_shares - shares_to_burn);
+
+        // 7. Verify the correct LP amount was unbonded and transferred.
+        assert_eq!(res.messages.len(), 2);
+        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &res.messages[1].msg {
+            if let Ok(Cw20ExecuteMsg::Transfer { amount, .. }) = from_json(msg) {
+                assert_eq!(amount, expected_lp_to_receive);
+            } else {
+                panic!("Incorrect Wasm message type for transfer");
+            }
+        } else {
+            panic!("Expected Wasm message for transfer");
+        }
+    }
+
+    #[test]
+    fn test_withdraw_shares_does_not_affect_pending() {
+        // --- Arrange ---
+        // 1. Setup and instantiate the contract.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            // ... other fields are default
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // 2. Set up a user with both active shares and a pending deposit.
+        let user1_addr = deps.api.addr_make("user1");
+        let initial_shares = Uint128::new(100);
+        let initial_pending = Uint128::new(50);
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &initial_shares)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &initial_pending)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: initial_shares,
+                    pending_deposit: initial_pending,
+                },
+            )
+            .unwrap();
+
+        // 3. Setup Mock Querier. The value of active shares is 120 LP.
+        let value_of_active_shares = Uint128::new(120);
+        let total_lp_staked = value_of_active_shares + initial_pending; // 120 + 50 = 170
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: total_lp_staked,
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // --- Act ---
+        // 4. The user burns a portion of their active shares.
+        let shares_to_burn = Uint128::new(25);
+        let msg = ExecuteMsg::WithdrawShares { shares_to_burn };
+        let info = message_info(&user1_addr, &[]);
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // --- Assert ---
+        // 5. Verify the user's state.
+        let user_info: UserInfoResponse = from_json(
+            &query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user1_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // The user's share balance should be reduced.
+        assert_eq!(user_info.shares, initial_shares - shares_to_burn); // 100 - 25 = 75
+
+        // CRITICAL ASSERTION: The user's pending deposit must be completely unchanged.
+        assert_eq!(
+            user_info.pending_deposit, initial_pending,
+            "Pending deposit should not be affected by withdrawing shares"
+        );
+
+        // 6. Verify global state.
+        let total_shares = TOTAL_SHARES.load(&deps.storage).unwrap();
+        let total_pending = TOTAL_PENDING_DEPOSITS.load(&deps.storage).unwrap();
+
+        assert_eq!(
+            total_shares,
+            initial_shares - shares_to_burn,
+            "Total shares should be reduced"
+        );
+
+        // CRITICAL ASSERTION: Total pending deposits must be unchanged.
+        assert_eq!(
+            total_pending, initial_pending,
+            "Total pending deposits should not be affected"
+        );
+    }
+
+    #[test]
+    fn test_withdraw_shares_full_withdrawal_removes_user() {
+        // --- Arrange ---
+        // 1. Setup and instantiate the contract.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            // ... other fields are default
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // 2. Set up a user with active shares but NO pending deposit.
+        let user1_addr = deps.api.addr_make("user1");
+        let initial_shares = Uint128::new(100);
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &initial_shares)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: initial_shares,
+                    pending_deposit: Uint128::zero(), // No pending deposit
+                },
+            )
+            .unwrap();
+
+        // 3. Setup Mock Querier. Assume 1:1 share value for simplicity.
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: initial_shares,
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // --- Act ---
+        // 4. The user burns ALL of their active shares.
+        let msg = ExecuteMsg::WithdrawShares {
+            shares_to_burn: initial_shares,
+        };
+        let info = message_info(&user1_addr, &[]);
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // --- Assert ---
+        // 5. CRITICAL ASSERTION: The user's record should be completely gone from the USERS map.
+        let user_info_raw = USERS.may_load(&deps.storage, &user1_addr).unwrap();
+        assert!(
+            user_info_raw.is_none(),
+            "User info should be removed from storage after withdrawing all assets"
+        );
+
+        // 6. Verify global state is updated.
+        let total_shares = TOTAL_SHARES.load(&deps.storage).unwrap();
+        assert_eq!(total_shares, Uint128::zero());
+    }
+
+    #[test]
+    fn test_withdraw_shares_error_if_farm_value_less_than_pending() {
+        // --- Arrange ---
+        // 1. Setup and instantiate the contract.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            // ... other fields are default
+            reward_token: AssetInfo::NativeToken {
+                denom: "reward".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // 2. Set up a user with some active shares.
+        let user1_addr = deps.api.addr_make("user1");
+        let initial_shares = Uint128::new(100);
+        let total_pending = Uint128::new(500); // There is a large amount of pending deposits.
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &initial_shares)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &total_pending)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: initial_shares,
+                    pending_deposit: Uint128::zero(),
+                },
+            )
+            .unwrap();
+
+        // 3. CRITICAL: Mock the farm querier to report a total value (bond_amount)
+        // that is LESS than the total pending deposits. This simulates a loss of funds
+        // or a major state inconsistency.
+        let inconsistent_farm_balance = Uint128::new(400);
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: "any".to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: inconsistent_farm_balance, // 400 is less than the 500 pending
+                pending_reward: Uint128::zero(),
+            },
+        );
+
+        // --- Act ---
+        // 4. The user with active shares attempts to withdraw. The contract will try to calculate
+        // `lp_value_of_all_shares = 400 - 500`, which should trigger an overflow error.
+        let msg = ExecuteMsg::WithdrawShares {
+            shares_to_burn: Uint128::new(10),
+        };
+        let info = message_info(&user1_addr, &[]);
+        let res = execute(deps.as_mut(), mock_env(), info, msg);
+
+        // --- Assert ---
+        // 5. The execution must fail with a StdError::Overflow, not a panic.
+        // This proves the `checked_sub` is working as a safety rail.
+        assert!(matches!(
+            res,
+            Err(ContractError::Std(StdError::Overflow { .. }))
+        ));
     }
 }
