@@ -26,6 +26,8 @@ Choice Dev Multisig:
 | Factory      | 1693    |
 | Burn Manager | 1690    |
 | Router       | 1691    |
+| Farm         | 1896    |
+| Vault        | 1897    |
 
 ### Mainnet Contract Addresses
 
