@@ -2,8 +2,8 @@
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    coins, from_json, to_json_binary, Addr, BankMsg, Binary, CanonicalAddr, CosmosMsg,
-    Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128, WasmMsg,
+    coins, from_json, to_json_binary, Addr, BankMsg, Binary, CanonicalAddr, CosmosMsg, Decimal,
+    Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128, WasmMsg,
 };
 
 use choice::asset::AssetInfo;
@@ -60,7 +60,9 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
             // For native tokens, check that the funds sent match the staking token denom.
             if let AssetInfo::NativeToken { ref denom } = config.staking_token {
                 if info.funds.len() != 1 {
-                    return Err(StdError::generic_err("Only the staking token is accepted for bonding"));
+                    return Err(StdError::generic_err(
+                        "Only the staking token is accepted for bonding",
+                    ));
                 }
                 let received_coin = &info.funds[0];
                 if received_coin.denom != *denom || received_coin.amount != amount {

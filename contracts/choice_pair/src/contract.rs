@@ -299,11 +299,8 @@ pub fn provide_liquidity(
     }
 
     // the total lp token cannot exceed the max value of a Uint128
-    if total_share
-        .checked_add(share)
-        .is_err()                       
-    {
-        return Err(ContractError::LpSupplyOverflow{});  
+    if total_share.checked_add(share).is_err() {
+        return Err(ContractError::LpSupplyOverflow {});
     }
 
     // refund of remaining native token & desired of token
@@ -502,8 +499,13 @@ pub fn swap(
     }
 
     let offer_amount = offer_asset.amount;
-    let (return_amount, spread_amount, commission_amount) =
-        compute_swap(offer_pool.amount, ask_pool.amount, offer_amount, offer_decimal, ask_decimal)?;
+    let (return_amount, spread_amount, commission_amount) = compute_swap(
+        offer_pool.amount,
+        ask_pool.amount,
+        offer_amount,
+        offer_decimal,
+        ask_decimal,
+    )?;
 
     let return_asset = Asset {
         info: ask_pool.info.clone(),
@@ -583,7 +585,8 @@ pub fn swap(
 
     // new pool amounts
     let offer_pool_post = offer_pool.amount.checked_add(offer_amount)?;
-    let ask_pool_post = ask_pool.amount
+    let ask_pool_post = ask_pool
+        .amount
         .checked_sub(return_amount)?
         .checked_sub(fee_wallet_amount)?
         .checked_sub(burn_amount)?;
@@ -677,8 +680,13 @@ pub fn query_simulation(
         return Err(ContractError::AssetMismatch {});
     }
 
-    let (return_amount, spread_amount, commission_amount) =
-        compute_swap(offer_pool.amount, ask_pool.amount, offer_asset.amount, offer_decimal, ask_decimal)?;
+    let (return_amount, spread_amount, commission_amount) = compute_swap(
+        offer_pool.amount,
+        ask_pool.amount,
+        offer_asset.amount,
+        offer_decimal,
+        ask_decimal,
+    )?;
 
     Ok(SimulationResponse {
         return_amount,
@@ -718,7 +726,6 @@ pub fn query_reverse_simulation(
     })
 }
 
-
 pub fn compute_swap(
     offer_pool: Uint128,
     ask_pool: Uint128,
@@ -731,15 +738,15 @@ pub fn compute_swap(
     let up = |x: Uint128, from: u8| Uint256::from(x) * pow10(target_dec - from);
 
     // 1. upscale helper
-    let offer_pool_u   = up(offer_pool,   offer_dec);
-    let ask_pool_u     = up(ask_pool,     ask_dec);
+    let offer_pool_u = up(offer_pool, offer_dec);
+    let ask_pool_u = up(ask_pool, ask_dec);
     let offer_amount_u = up(offer_amount, offer_dec);
 
     // 2. raw math
     let (ret_u128, spread_u128, fee_u128) = compute_swap_raw(
-        offer_pool_u.try_into()?,   
-        ask_pool_u.try_into()?,     
-        offer_amount_u.try_into()?, 
+        offer_pool_u.try_into()?,
+        ask_pool_u.try_into()?,
+        offer_amount_u.try_into()?,
     )?;
 
     // 3. down-scale helper
@@ -753,7 +760,6 @@ pub fn compute_swap(
 
     Ok((down(ret_u128), down(spread_u128), down(fee_u128)))
 }
-
 
 fn compute_swap_raw(
     offer_pool: Uint128,
@@ -785,7 +791,6 @@ fn compute_swap_raw(
         commission_amount.try_into()?,
     ))
 }
-
 
 fn compute_offer_amount(
     offer_pool: Uint128,

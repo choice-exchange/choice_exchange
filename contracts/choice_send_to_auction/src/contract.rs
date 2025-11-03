@@ -107,15 +107,13 @@ fn receive_cw20(
         &mut messages,
     )?;
 
-    Ok(
-        Response::new()
+    Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "receive_cw20")
         .add_attribute("sender", msg.sender)
         .add_attribute("burn_action", "send_to_burn_auction")
         .add_attribute("burn_asset", contract_addr.to_string())
-        .add_attribute("burn_amount", burn_amount.to_string())
-    )
+        .add_attribute("burn_amount", burn_amount.to_string()))
 }
 
 pub fn send_native(
@@ -137,14 +135,12 @@ pub fn send_native(
 
     send_to_burn_auction(deps, env, info, asset, &mut messages)?;
 
-    Ok(
-        Response::new()
+    Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "send_native")
         .add_attribute("burn_action", "send_to_burn_auction")
         .add_attribute("burn_asset", asset_info_for_log.to_string())
-        .add_attribute("burn_amount", asset_amount_for_log.to_string())
-    )
+        .add_attribute("burn_amount", asset_amount_for_log.to_string()))
 }
 
 pub fn execute_propose_new_owner(

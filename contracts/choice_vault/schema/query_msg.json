@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "oneOf": [
+    {
+      "description": "Returns the contract's configuration.",
+      "type": "object",
+      "required": [
+        "config"
+      ],
+      "properties": {
+        "config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns the total number of shares issued.",
+      "type": "object",
+      "required": [
+        "total_shares"
+      ],
+      "properties": {
+        "total_shares": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns information for a specific user.",
+      "type": "object",
+      "required": [
+        "user_info"
+      ],
+      "properties": {
+        "user_info": {
+          "type": "object",
+          "required": [
+            "user"
+          ],
+          "properties": {
+            "user": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns information about the last compounding event for APR calculation.",
+      "type": "object",
+      "required": [
+        "compounding_info"
+      ],
+      "properties": {
+        "compounding_info": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Pending deposits for the keeper bot to query",
+      "type": "object",
+      "required": [
+        "pending_deposits"
+      ],
+      "properties": {
+        "pending_deposits": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns the total amount of LP tokens in pending deposits.",
+      "type": "object",
+      "required": [
+        "total_pending_deposits"
+      ],
+      "properties": {
+        "total_pending_deposits": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}
