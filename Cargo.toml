@@ -2,6 +2,10 @@
 members = ["packages/*", "contracts/*"]
 resolver = "2"
 
+[workspace.dependencies]
+choice-clmm-math = { path = "./packages/choice_clmm_math" }
+choice-clmm-common = { path = "./packages/choice_clmm_common" }
+
 [profile.release.package.choice]
 opt-level = 3
 debug = false

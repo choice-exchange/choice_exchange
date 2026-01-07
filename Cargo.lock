@@ -240,6 +240,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "choice-clmm-common"
+version = "1.1.2"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw2",
+ "cw20",
+ "injective-cosmwasm",
+ "injective-math",
+ "schemars",
+ "serde",
+]
+
+[[package]]
+name = "choice-clmm-math"
+version = "1.1.2"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw2",
+ "cw20",
+ "injective-cosmwasm",
+ "injective-math",
+ "schemars",
+ "serde",
+ "uint 0.10.0",
+]
+
+[[package]]
 name = "choice-factory"
 version = "1.1.2"
 dependencies = [
@@ -342,6 +371,52 @@ dependencies = [
  "cw-storage-plus",
  "cw2",
  "cw20",
+ "schemars",
+ "serde",
+ "thiserror 2.0.12",
+]
+
+[[package]]
+name = "choice_clmm_factory"
+version = "1.1.2"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw2",
+ "cw20",
+ "injective-cosmwasm",
+ "injective-math",
+ "schemars",
+ "serde",
+]
+
+[[package]]
+name = "choice_clmm_manager"
+version = "1.1.2"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw2",
+ "cw20",
+ "injective-cosmwasm",
+ "injective-math",
+ "schemars",
+ "serde",
+]
+
+[[package]]
+name = "choice_clmm_pool"
+version = "1.1.2"
+dependencies = [
+ "choice-clmm-common",
+ "choice-clmm-math",
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus",
+ "cw2",
+ "cw20",
+ "injective-cosmwasm",
+ "injective-math",
  "schemars",
  "serde",
  "thiserror 2.0.12",
@@ -1682,6 +1757,18 @@ name = "uint"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76f64bba2c53b04fcab63c01a7d7427eadc821e3bc48c34dc9ba29c501164b52"
+dependencies = [
+ "byteorder",
+ "crunchy",
+ "hex",
+ "static_assertions 1.1.0",
+]
+
+[[package]]
+name = "uint"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "909988d098b2f738727b161a106cfc7cab00c539c2687a8836f8e565976fb53e"
 dependencies = [
  "byteorder",
  "crunchy",

@@ -1,0 +1,60 @@
+use cosmwasm_schema::cw_serde;
+
+// Use U256 for high precision price math (Q64.96)
+// We use Uint256 from cosmwasm_std
+use cosmwasm_std::{Binary, Uint128, Uint256};
+
+#[cw_serde]
+pub struct FeeConfig {
+    pub base_fee_ppm: u32, // e.g., 3000 = 0.3%
+    pub max_fee_ppm: u32,  // e.g., 10000 = 1%
+    pub volatility_multiplier: u32,
+    pub ema_halflife_seconds: u64,
+}
+
+#[cw_serde]
+pub struct InstantiateMsg {
+    pub token0: String,
+    pub token1: String,
+    pub tick_spacing: u32,
+    pub fee_config: FeeConfig,
+    // Initial Price is mandatory in CLMM to determine the starting tick
+    pub initial_sqrt_price_x96: Uint256,
+}
+
+#[cw_serde]
+pub enum ExecuteMsg {
+    Mint {
+        recipient: String,
+        lower_tick: i32,
+        upper_tick: i32,
+        amount: Uint128, // Liquidity (L), not token amount
+        data: Option<Binary>,
+    },
+    Swap {
+        recipient: String,
+        zero_for_one: bool,
+        amount_specified: Uint128,
+        sqrt_price_limit_x96: Uint256,
+    },
+    Burn {
+        lower_tick: i32,
+        upper_tick: i32,
+        amount: Uint128, // Liquidity (L) to burn
+    },
+    // New: Claim Fees + Principal
+    Collect {
+        recipient: String,
+        lower_tick: i32,
+        upper_tick: i32,
+        amount0_requested: Uint128,
+        amount1_requested: Uint128,
+    },
+    Snapshot {},
+}
+
+#[cw_serde]
+pub enum QueryMsg {
+    GetConfig {},
+    GetSlot0 {},
+}
