@@ -4,6 +4,15 @@ use cosmwasm_schema::cw_serde;
 // We use Uint256 from cosmwasm_std
 use cosmwasm_std::{Binary, Uint128, Uint256};
 
+// Slot0 contains the frequently accessed "hot" variables
+// to save gas (only 1 read needed for price/tick)
+#[cw_serde]
+pub struct Slot0 {
+    pub sqrt_price_x96: Uint256,
+    pub tick: i32,
+    pub liquidity: Uint128, // Currently active liquidity (L)
+}
+
 #[cw_serde]
 pub struct FeeConfig {
     pub base_fee_ppm: u32, // e.g., 3000 = 0.3%

@@ -21,9 +21,21 @@ cw20                 = { version = "2.0.0" }
 cosmwasm-schema      = { version = "2.2.2" }
 cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
 
-injective-cosmwasm   = { version = "0.3.1" }
-injective-math       = { version = "0.3.0" }
+cw721 = "0.20.0"
+cw721-base = "0.20.0"
+cw721-metadata-onchain = "0.20.0"
+cw-utils = "2.0.0"
+
+injective-cosmwasm  = { version = "0.3.4-1" }
+injective-math      = { version = "0.3.4-1" }
 
 schemars = "0.8.22"
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 
+[dev-dependencies]
+injective-test-tube = { version = "1.16.3-1" }
+
+[[test]]
+name = "integration"
+path = "../../tests/integration.rs"
+harness = true

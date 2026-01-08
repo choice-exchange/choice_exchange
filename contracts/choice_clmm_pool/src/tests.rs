@@ -4,8 +4,8 @@ mod tests {
 
     use crate::contract::{execute, instantiate, query};
     use crate::error::ContractError;
-    use crate::state::{PoolConfig, Slot0};
-    use choice_clmm_common::pool::{ExecuteMsg, FeeConfig, InstantiateMsg, QueryMsg};
+    use crate::state::PoolConfig;
+    use choice_clmm_common::pool::{ExecuteMsg, FeeConfig, InstantiateMsg, QueryMsg, Slot0};
     use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
     use cosmwasm_std::{from_json, BankMsg, Coin, StdError, Uint128, Uint256};
 

@@ -11,8 +11,8 @@ use crate::actions::mint::execute_mint;
 use crate::actions::swap::execute_swap;
 use crate::core::oracle::initialize_oracle;
 use crate::error::ContractError;
-use crate::state::{PoolConfig, Slot0, CONFIG, SLOT0};
-use choice_clmm_common::pool::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::state::{PoolConfig, CONFIG, SLOT0};
+use choice_clmm_common::pool::{ExecuteMsg, InstantiateMsg, QueryMsg, Slot0};
 use choice_clmm_math::tick_math::{get_tick_at_sqrt_ratio, MAX_TICK, MIN_TICK};
 
 // Version info for migration info

@@ -3,12 +3,6 @@
 use cosmwasm_std::Uint256;
 use uint::construct_uint;
 
-// Temporary helper to allow compilation until full TickMath is ported
-pub fn mock_tick_to_price(_tick: i32) -> Uint256 {
-    // Return 1.0 (Q96) for now
-    Uint256::from_u128(1) << 96
-}
-
 // Construct a U256 type from the uint crate
 construct_uint! {
     pub struct U256(4);

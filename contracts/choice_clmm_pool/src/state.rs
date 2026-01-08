@@ -1,4 +1,4 @@
-use choice_clmm_common::pool::FeeConfig;
+use choice_clmm_common::pool::{FeeConfig, Slot0};
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Uint128, Uint256};
 use cw_storage_plus::{Item, Map};
@@ -10,15 +10,6 @@ pub struct PoolConfig {
     pub token1: String,
     pub tick_spacing: u32,
     pub fee_config: FeeConfig,
-}
-
-// Slot0 contains the frequently accessed "hot" variables
-// to save gas (only 1 read needed for price/tick)
-#[cw_serde]
-pub struct Slot0 {
-    pub sqrt_price_x96: Uint256,
-    pub tick: i32,
-    pub liquidity: Uint128, // Currently active liquidity (L)
 }
 
 #[cw_serde]
