@@ -15,7 +15,7 @@ pub fn flip_tick(storage: &mut dyn Storage, tick: i32, tick_spacing: i32) -> Std
     if tick % tick_spacing != 0 {
         return Err(cosmwasm_std::StdError::generic_err("Tick not spaced"));
     }
-    
+
     let compressed = if tick < 0 && tick % tick_spacing != 0 {
         (tick / tick_spacing) - 1
     } else {
@@ -23,13 +23,13 @@ pub fn flip_tick(storage: &mut dyn Storage, tick: i32, tick_spacing: i32) -> Std
     };
 
     let (word_pos, bit_pos) = position(compressed);
-    
+
     // Cast to u32 for shift safety
     let mask = U256::one() << (bit_pos as u32);
 
     let word_cw = TICK_BITMAP.may_load(storage, word_pos)?.unwrap_or_default();
     let word = to_u256(word_cw);
-    
+
     let next_word = word ^ mask;
 
     if next_word.is_zero() {
@@ -56,7 +56,7 @@ pub fn next_initialized_tick_within_one_word(
     if lte {
         // Search Down (<= tick)
         let (word_pos, bit_pos) = position(compressed);
-        
+
         // FIX: Handle overflow for bit_pos=255 and cast to u32
         // We want all bits <= bit_pos.
         // If bit_pos is 255, we want the full word (all ones).
@@ -66,10 +66,10 @@ pub fn next_initialized_tick_within_one_word(
         } else {
             (U256::one() << (bit_pos as u32 + 1)) - 1
         };
-        
+
         let word_cw = TICK_BITMAP.may_load(storage, word_pos)?.unwrap_or_default();
         let word = to_u256(word_cw);
-        
+
         let masked = word & mask;
 
         if !masked.is_zero() {
@@ -84,7 +84,7 @@ pub fn next_initialized_tick_within_one_word(
     } else {
         // Search Up (> tick)
         let (word_pos, bit_pos) = position(compressed);
-        
+
         // Mask: all bits strictly above bit_pos
         let mask = if bit_pos == 255 {
             U256::zero()
@@ -93,10 +93,10 @@ pub fn next_initialized_tick_within_one_word(
             // Zeros out the bottom (bit_pos + 1) bits.
             !U256::zero() << (bit_pos as u32 + 1)
         };
-        
+
         let word_cw = TICK_BITMAP.may_load(storage, word_pos)?.unwrap_or_default();
         let word = to_u256(word_cw);
-        
+
         let masked = word & mask;
 
         if !masked.is_zero() {

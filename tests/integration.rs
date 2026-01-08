@@ -590,12 +590,8 @@ fn test_range_crossing_and_activation() {
         deadline: 9999999999,
     };
 
-    wasm.execute(
-        &env.manager_addr,
-        &mint_msg,
-        &funds,
-        &env.user,
-    ).unwrap();
+    wasm.execute(&env.manager_addr, &mint_msg, &funds, &env.user)
+        .unwrap();
 
     // 3. Get initial state
     let slot0_start: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
@@ -615,7 +611,8 @@ fn test_range_crossing_and_activation() {
         },
         &[Coin::new(Uint128::new(1_000_000), ATOM)],
         trader,
-    ).unwrap();
+    )
+    .unwrap();
 
     let slot0_mid: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("Mid Tick: {}", slot0_mid.tick);
@@ -623,8 +620,15 @@ fn test_range_crossing_and_activation() {
 
     // Assertion: Liquidity should be the same as start (only User A is active)
     // If this fails (L=0), it means the swap logic incorrectly wiped global liquidity.
-    assert_ne!(slot0_mid.liquidity, Uint128::zero(), "Liquidity vanished after Swap 1!");
-    assert_eq!(slot0_mid.liquidity, slot0_start.liquidity, "Liquidity should not change within active range");
+    assert_ne!(
+        slot0_mid.liquidity,
+        Uint128::zero(),
+        "Liquidity vanished after Swap 1!"
+    );
+    assert_eq!(
+        slot0_mid.liquidity, slot0_start.liquidity,
+        "Liquidity should not change within active range"
+    );
 
     // 5. Swap 2: Push price HARD down to cross -1000
     // We need to sell enough ATOM to:
@@ -644,23 +648,33 @@ fn test_range_crossing_and_activation() {
         },
         &[Coin::new(swap_amount.u128(), ATOM)],
         trader,
-    ).unwrap();
+    )
+    .unwrap();
 
     let slot0_end: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("End Tick: {}", slot0_end.tick);
     println!("End L: {}", slot0_end.liquidity);
 
     // Assertion 1: We crossed the gap
-    assert!(slot0_end.tick < -1000, "Price should have crossed into the -1000 range");
+    assert!(
+        slot0_end.tick < -1000,
+        "Price should have crossed into the -1000 range"
+    );
 
     // Assertion 2: Active Liquidity is non-zero
     // (User A is now out of range (0), User B is now in range)
-    assert!(slot0_end.liquidity != Uint128::zero(), "Should have active liquidity from User B");
+    assert!(
+        slot0_end.liquidity != Uint128::zero(),
+        "Should have active liquidity from User B"
+    );
 
     // Optional: User B's liquidity calculation
     // Since B provided more tokens over a wider range, their L might be different from A.
     // We just verify it is NOT A's liquidity (since A is inactive).
-    assert_ne!(slot0_end.liquidity, slot0_start.liquidity, "Liquidity should reflect User B now");
+    assert_ne!(
+        slot0_end.liquidity, slot0_start.liquidity,
+        "Liquidity should reflect User B now"
+    );
 }
 
 #[test]
@@ -675,12 +689,19 @@ fn test_swap_one_for_zero_reverse() {
     let trader = &env.admin;
     // We want to Buy ATOM / Sell USDT.
     // 1000 USDT input.
-    let swap_amount = Uint128::new(100_000_000); 
+    let swap_amount = Uint128::new(100_000_000);
 
-    let start_atom = bank.query_balance(&QueryBalanceRequest {
-        address: trader.address(),
-        denom: ATOM.to_string(),
-    }).unwrap().balance.unwrap().amount.parse::<u128>().unwrap();
+    let start_atom = bank
+        .query_balance(&QueryBalanceRequest {
+            address: trader.address(),
+            denom: ATOM.to_string(),
+        })
+        .unwrap()
+        .balance
+        .unwrap()
+        .amount
+        .parse::<u128>()
+        .unwrap();
 
     // 2. Execute Swap (ZeroForOne = FALSE)
     // Price Limit: Max Sqrt Price - 1 (Price goes UP)
@@ -698,21 +719,33 @@ fn test_swap_one_for_zero_reverse() {
         },
         &[Coin::new(swap_amount.u128(), USDT)], // Sending USDT
         trader,
-    ).unwrap();
+    )
+    .unwrap();
 
     // 3. Verify Balance
-    let end_atom = bank.query_balance(&QueryBalanceRequest {
-        address: trader.address(),
-        denom: ATOM.to_string(),
-    }).unwrap().balance.unwrap().amount.parse::<u128>().unwrap();
+    let end_atom = bank
+        .query_balance(&QueryBalanceRequest {
+            address: trader.address(),
+            denom: ATOM.to_string(),
+        })
+        .unwrap()
+        .balance
+        .unwrap()
+        .amount
+        .parse::<u128>()
+        .unwrap();
 
-    println!("Reverse Swap: Input {} USDT -> Output {} ATOM", swap_amount, end_atom - start_atom);
+    println!(
+        "Reverse Swap: Input {} USDT -> Output {} ATOM",
+        swap_amount,
+        end_atom - start_atom
+    );
     assert!(end_atom > start_atom, "Trader should receive ATOM");
 
     // 4. Verify Tick Movement
     let slot0: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("New Tick (Up): {}", slot0.tick);
-    
+
     // Price should move UP (Positive Tick)
     assert!(slot0.tick > 0, "Tick should increase when buying Token0");
 }
@@ -721,24 +754,27 @@ fn test_swap_one_for_zero_reverse() {
 fn test_overlapping_liquidity_math() {
     let env = setup();
     let wasm = Wasm::new(&env.app);
-    
+
     // 1. User A creates Pool + Liquidity in [-100, 100]
-    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm); 
-    
+    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
+
     // Get baseline L
     let slot0_a: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     let liq_a = slot0_a.liquidity;
 
     // 2. User B Mints in [0, 200]
-    // Current tick is 0. 
+    // Current tick is 0.
     // Overlap region: [0, 100].
     // User A is active in [0, 100].
     // User B is active in [0, 100].
     // Therefore, in the current tick 0, Liquidity should sum up (L_A + L_B).
-    
+
     let amount = Uint128::new(1_000_000_000);
-    let funds = vec![Coin::new(amount.u128(), ATOM), Coin::new(amount.u128(), USDT)];
-    
+    let funds = vec![
+        Coin::new(amount.u128(), ATOM),
+        Coin::new(amount.u128(), USDT),
+    ];
+
     let mint_msg = ManagerExecuteMsg::MintPosition {
         token0: ATOM.to_string(),
         token1: USDT.to_string(),
@@ -753,7 +789,8 @@ fn test_overlapping_liquidity_math() {
         deadline: 9999999999,
     };
 
-    wasm.execute(&env.manager_addr, &mint_msg, &funds, &env.user).unwrap();
+    wasm.execute(&env.manager_addr, &mint_msg, &funds, &env.user)
+        .unwrap();
 
     // 3. Verify Active Liquidity
     let slot0_b: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
@@ -764,7 +801,7 @@ fn test_overlapping_liquidity_math() {
 
     // It should be strictly greater than A
     assert!(liq_total > liq_a);
-    
+
     // 4. Swap UP past 100
     // At tick 100, User A exits. Only User B remains.
     // L should drop.
@@ -775,13 +812,14 @@ fn test_overlapping_liquidity_math() {
         &pool_addr,
         &PoolExecuteMsg::Swap {
             recipient: trader.address(),
-            zero_for_one: false, // Buy ATOM (Price UP)
+            zero_for_one: false,                           // Buy ATOM (Price UP)
             amount_specified: Uint128::new(2_000_000_000), // Large swap to exit overlap
             sqrt_price_limit_x96: limit_up,
         },
-        &[Coin::new( Uint128::new(2_000_000_000), USDT)], 
+        &[Coin::new(Uint128::new(2_000_000_000), USDT)],
         trader,
-    ).unwrap();
+    )
+    .unwrap();
 
     let slot0_end: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("End Tick: {}", slot0_end.tick);
@@ -789,8 +827,14 @@ fn test_overlapping_liquidity_math() {
 
     // We must have crossed 100
     assert!(slot0_end.tick > 100);
-    
+
     // Liquidity should drop because User A is no longer active
-    assert!(slot0_end.liquidity < liq_total, "Liquidity should drop after exiting User A range");
-    assert!(slot0_end.liquidity > Uint128::zero(), "Liquidity should not be zero (User B still active)");
+    assert!(
+        slot0_end.liquidity < liq_total,
+        "Liquidity should drop after exiting User A range"
+    );
+    assert!(
+        slot0_end.liquidity > Uint128::zero(),
+        "Liquidity should not be zero (User B still active)"
+    );
 }
