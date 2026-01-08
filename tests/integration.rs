@@ -558,107 +558,107 @@ fn test_partial_swap_price_limit() {
     assert!(amount_used < swap_amount.u128());
 }
 
-// #[test]
-// fn test_range_crossing_and_activation() {
-//     let env = setup();
-//     let wasm = Wasm::new(&env.app);
+#[test]
+fn test_range_crossing_and_activation() {
+    let env = setup();
+    let wasm = Wasm::new(&env.app);
 
-//     // 1. Setup Pool
-//     // User A provides liquidity in [-100, 100].
-//     // They provide ~1000 USDT and ~1000 ATOM.
-//     // Price starts at 1.0 (Tick 0).
-//     let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
+    // 1. Setup Pool
+    // User A provides liquidity in [-100, 100].
+    // They provide ~1000 USDT and ~1000 ATOM.
+    // Price starts at 1.0 (Tick 0).
+    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
 
-//     // 2. User B mints a "Limit Order" position far below current price
-//     // Range: [-2000, -1000].
-//     // Since this range is entirely below the current price (Tick 0),
-//     // User B only needs to provide Token1 (USDT). They are essentially placing a bid for ATOM.
-//     let limit_amount = Uint128::new(5_000_000_000); // 5000 USDT
-//     let funds = vec![Coin::new(limit_amount.u128(), USDT)];
+    // 2. User B mints a "Limit Order" position far below current price
+    // Range: [-2000, -1000].
+    // Since this range is entirely below the current price (Tick 0),
+    // User B only needs to provide Token1 (USDT). They are essentially placing a bid for ATOM.
+    let limit_amount = Uint128::new(5_000_000_000); // 5000 USDT
+    let funds = vec![Coin::new(limit_amount.u128(), USDT)];
 
-//     let mint_msg = ManagerExecuteMsg::MintPosition {
-//         token0: ATOM.to_string(),
-//         token1: USDT.to_string(),
-//         fee: 500,
-//         tick_lower: -2000,
-//         tick_upper: -1000,
-//         amount0_desired: Uint128::zero(),
-//         amount1_desired: limit_amount,
-//         amount0_min: Uint128::zero(),
-//         amount1_min: Uint128::zero(),
-//         recipient: None,
-//         deadline: 9999999999,
-//     };
+    let mint_msg = ManagerExecuteMsg::MintPosition {
+        token0: ATOM.to_string(),
+        token1: USDT.to_string(),
+        fee: 500,
+        tick_lower: -2000,
+        tick_upper: -1000,
+        amount0_desired: Uint128::zero(),
+        amount1_desired: limit_amount,
+        amount0_min: Uint128::zero(),
+        amount1_min: Uint128::zero(),
+        recipient: None,
+        deadline: 9999999999,
+    };
 
-//     wasm.execute(
-//         &env.manager_addr,
-//         &mint_msg,
-//         &funds,
-//         &env.user,
-//     ).unwrap();
+    wasm.execute(
+        &env.manager_addr,
+        &mint_msg,
+        &funds,
+        &env.user,
+    ).unwrap();
 
-//     // 3. Get initial state
-//     let slot0_start: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
-//     println!("Start Tick: {}", slot0_start.tick);
-//     println!("Start L: {}", slot0_start.liquidity);
+    // 3. Get initial state
+    let slot0_start: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    println!("Start Tick: {}", slot0_start.tick);
+    println!("Start L: {}", slot0_start.liquidity);
 
-//     // 4. Swap 1: Push price down slightly, but stay within User A's range (0 -> -50ish)
-//     // We are selling ATOM (ZeroForOne = true), buying USDT.
-//     let trader = &env.admin;
-//     wasm.execute(
-//         &pool_addr,
-//         &PoolExecuteMsg::Swap {
-//             recipient: trader.address(),
-//             zero_for_one: true,
-//             amount_specified: Uint128::new(1_000_000), // Small amount
-//             sqrt_price_limit_x96: Uint256::from(4295128739u128), // Min price
-//         },
-//         &[Coin::new(Uint128::new(1_000_000), ATOM)],
-//         trader,
-//     ).unwrap();
+    // 4. Swap 1: Push price down slightly, but stay within User A's range (0 -> -50ish)
+    // We are selling ATOM (ZeroForOne = true), buying USDT.
+    let trader = &env.admin;
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Swap {
+            recipient: trader.address(),
+            zero_for_one: true,
+            amount_specified: Uint128::new(1_000_000), // Small amount
+            sqrt_price_limit_x96: Uint256::from(4295128739u128), // Min price
+        },
+        &[Coin::new(Uint128::new(1_000_000), ATOM)],
+        trader,
+    ).unwrap();
 
-//     let slot0_mid: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
-//     println!("Mid Tick: {}", slot0_mid.tick);
-//     println!("Mid L: {}", slot0_mid.liquidity);
+    let slot0_mid: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    println!("Mid Tick: {}", slot0_mid.tick);
+    println!("Mid L: {}", slot0_mid.liquidity);
 
-//     // Assertion: Liquidity should be the same as start (only User A is active)
-//     // If this fails (L=0), it means the swap logic incorrectly wiped global liquidity.
-//     assert_ne!(slot0_mid.liquidity, Uint128::zero(), "Liquidity vanished after Swap 1!");
-//     assert_eq!(slot0_mid.liquidity, slot0_start.liquidity, "Liquidity should not change within active range");
+    // Assertion: Liquidity should be the same as start (only User A is active)
+    // If this fails (L=0), it means the swap logic incorrectly wiped global liquidity.
+    assert_ne!(slot0_mid.liquidity, Uint128::zero(), "Liquidity vanished after Swap 1!");
+    assert_eq!(slot0_mid.liquidity, slot0_start.liquidity, "Liquidity should not change within active range");
 
-//     // 5. Swap 2: Push price HARD down to cross -1000
-//     // We need to sell enough ATOM to:
-//     // a. Buy all of User A's remaining USDT (down to tick -100)
-//     // b. Traverse the "gap" between -100 and -1000 (where L=0, price moves instantly)
-//     // c. Enter User B's range and start buying their USDT.
-//     // 2000 ATOM is > 1000 provided by User A, so this should suffice.
-//     let swap_amount = Uint128::new(2_000_000_000);
+    // 5. Swap 2: Push price HARD down to cross -1000
+    // We need to sell enough ATOM to:
+    // a. Buy all of User A's remaining USDT (down to tick -100)
+    // b. Traverse the "gap" between -100 and -1000 (where L=0, price moves instantly)
+    // c. Enter User B's range and start buying their USDT.
+    // 2000 ATOM is > 1000 provided by User A, so this should suffice.
+    let swap_amount = Uint128::new(2_000_000_000);
 
-//     wasm.execute(
-//         &pool_addr,
-//         &PoolExecuteMsg::Swap {
-//             recipient: trader.address(),
-//             zero_for_one: true,
-//             amount_specified: swap_amount,
-//             sqrt_price_limit_x96: Uint256::from(4295128739u128),
-//         },
-//         &[Coin::new(swap_amount.u128(), ATOM)],
-//         trader,
-//     ).unwrap();
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Swap {
+            recipient: trader.address(),
+            zero_for_one: true,
+            amount_specified: swap_amount,
+            sqrt_price_limit_x96: Uint256::from(4295128739u128),
+        },
+        &[Coin::new(swap_amount.u128(), ATOM)],
+        trader,
+    ).unwrap();
 
-//     let slot0_end: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
-//     println!("End Tick: {}", slot0_end.tick);
-//     println!("End L: {}", slot0_end.liquidity);
+    let slot0_end: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    println!("End Tick: {}", slot0_end.tick);
+    println!("End L: {}", slot0_end.liquidity);
 
-//     // Assertion 1: We crossed the gap
-//     assert!(slot0_end.tick < -1000, "Price should have crossed into the -1000 range");
+    // Assertion 1: We crossed the gap
+    assert!(slot0_end.tick < -1000, "Price should have crossed into the -1000 range");
 
-//     // Assertion 2: Active Liquidity is non-zero
-//     // (User A is now out of range (0), User B is now in range)
-//     assert!(slot0_end.liquidity != Uint128::zero(), "Should have active liquidity from User B");
+    // Assertion 2: Active Liquidity is non-zero
+    // (User A is now out of range (0), User B is now in range)
+    assert!(slot0_end.liquidity != Uint128::zero(), "Should have active liquidity from User B");
 
-//     // Optional: User B's liquidity calculation
-//     // Since B provided more tokens over a wider range, their L might be different from A.
-//     // We just verify it is NOT A's liquidity (since A is inactive).
-//     assert_ne!(slot0_end.liquidity, slot0_start.liquidity, "Liquidity should reflect User B now");
-// }
+    // Optional: User B's liquidity calculation
+    // Since B provided more tokens over a wider range, their L might be different from A.
+    // We just verify it is NOT A's liquidity (since A is inactive).
+    assert_ne!(slot0_end.liquidity, slot0_start.liquidity, "Liquidity should reflect User B now");
+}
