@@ -662,3 +662,135 @@ fn test_range_crossing_and_activation() {
     // We just verify it is NOT A's liquidity (since A is inactive).
     assert_ne!(slot0_end.liquidity, slot0_start.liquidity, "Liquidity should reflect User B now");
 }
+
+#[test]
+fn test_swap_one_for_zero_reverse() {
+    let env = setup();
+    let wasm = Wasm::new(&env.app);
+    let bank = Bank::new(&env.app);
+
+    // 1. Setup Pool (Price 1.0, Tick 0)
+    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
+
+    let trader = &env.admin;
+    // We want to Buy ATOM / Sell USDT.
+    // 1000 USDT input.
+    let swap_amount = Uint128::new(100_000_000); 
+
+    let start_atom = bank.query_balance(&QueryBalanceRequest {
+        address: trader.address(),
+        denom: ATOM.to_string(),
+    }).unwrap().balance.unwrap().amount.parse::<u128>().unwrap();
+
+    // 2. Execute Swap (ZeroForOne = FALSE)
+    // Price Limit: Max Sqrt Price - 1 (Price goes UP)
+    // 146144... is MAX. We pick a safe high number.
+    // 79228... is 1.0. Let's pick 2.0 (~112045...)
+    let limit_up = Uint256::from(112045541949572279837463876454u128);
+
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Swap {
+            recipient: trader.address(),
+            zero_for_one: false, // <--- CRITICAL: Reverse Direction
+            amount_specified: swap_amount,
+            sqrt_price_limit_x96: limit_up,
+        },
+        &[Coin::new(swap_amount.u128(), USDT)], // Sending USDT
+        trader,
+    ).unwrap();
+
+    // 3. Verify Balance
+    let end_atom = bank.query_balance(&QueryBalanceRequest {
+        address: trader.address(),
+        denom: ATOM.to_string(),
+    }).unwrap().balance.unwrap().amount.parse::<u128>().unwrap();
+
+    println!("Reverse Swap: Input {} USDT -> Output {} ATOM", swap_amount, end_atom - start_atom);
+    assert!(end_atom > start_atom, "Trader should receive ATOM");
+
+    // 4. Verify Tick Movement
+    let slot0: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    println!("New Tick (Up): {}", slot0.tick);
+    
+    // Price should move UP (Positive Tick)
+    assert!(slot0.tick > 0, "Tick should increase when buying Token0");
+}
+
+#[test]
+fn test_overlapping_liquidity_math() {
+    let env = setup();
+    let wasm = Wasm::new(&env.app);
+    
+    // 1. User A creates Pool + Liquidity in [-100, 100]
+    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm); 
+    
+    // Get baseline L
+    let slot0_a: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let liq_a = slot0_a.liquidity;
+
+    // 2. User B Mints in [0, 200]
+    // Current tick is 0. 
+    // Overlap region: [0, 100].
+    // User A is active in [0, 100].
+    // User B is active in [0, 100].
+    // Therefore, in the current tick 0, Liquidity should sum up (L_A + L_B).
+    
+    let amount = Uint128::new(1_000_000_000);
+    let funds = vec![Coin::new(amount.u128(), ATOM), Coin::new(amount.u128(), USDT)];
+    
+    let mint_msg = ManagerExecuteMsg::MintPosition {
+        token0: ATOM.to_string(),
+        token1: USDT.to_string(),
+        fee: 500,
+        tick_lower: 0,
+        tick_upper: 200,
+        amount0_desired: amount,
+        amount1_desired: amount,
+        amount0_min: Uint128::zero(),
+        amount1_min: Uint128::zero(),
+        recipient: None,
+        deadline: 9999999999,
+    };
+
+    wasm.execute(&env.manager_addr, &mint_msg, &funds, &env.user).unwrap();
+
+    // 3. Verify Active Liquidity
+    let slot0_b: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let liq_total = slot0_b.liquidity;
+
+    println!("L(A): {}", liq_a);
+    println!("L(Total): {}", liq_total);
+
+    // It should be strictly greater than A
+    assert!(liq_total > liq_a);
+    
+    // 4. Swap UP past 100
+    // At tick 100, User A exits. Only User B remains.
+    // L should drop.
+    let trader = &env.admin;
+    let limit_up = Uint256::from(112045541949572279837463876454u128); // Price ~2.0
+
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Swap {
+            recipient: trader.address(),
+            zero_for_one: false, // Buy ATOM (Price UP)
+            amount_specified: Uint128::new(2_000_000_000), // Large swap to exit overlap
+            sqrt_price_limit_x96: limit_up,
+        },
+        &[Coin::new( Uint128::new(2_000_000_000), USDT)], 
+        trader,
+    ).unwrap();
+
+    let slot0_end: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    println!("End Tick: {}", slot0_end.tick);
+    println!("End L: {}", slot0_end.liquidity);
+
+    // We must have crossed 100
+    assert!(slot0_end.tick > 100);
+    
+    // Liquidity should drop because User A is no longer active
+    assert!(slot0_end.liquidity < liq_total, "Liquidity should drop after exiting User A range");
+    assert!(slot0_end.liquidity > Uint128::zero(), "Liquidity should not be zero (User B still active)");
+}
