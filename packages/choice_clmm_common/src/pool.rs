@@ -7,8 +7,8 @@ use cosmwasm_std::{Binary, Uint128, Uint256};
 // Slot0 contains the frequently accessed "hot" variables
 // to save gas (only 1 read needed for price/tick)
 #[cw_serde]
-pub struct Slot0 {
-    pub sqrt_price_x96: Uint256,
+pub struct PoolState {
+    pub sqrt_price: Uint256,
     pub tick: i32,
     pub liquidity: Uint128, // Currently active liquidity (L)
 }
@@ -28,14 +28,14 @@ pub struct InstantiateMsg {
     pub tick_spacing: u32,
     pub fee_config: FeeConfig,
     // Initial Price is mandatory in CLMM to determine the starting tick
-    pub initial_sqrt_price_x96: Uint256,
+    pub initial_sqrt_price: Uint256,
 }
 
 #[cw_serde]
 #[derive(Default)]
 pub struct TickInfo {
-    pub liquidity_gross: u128,         // Total liquidity referencing this tick
-    pub liquidity_net: i128,           // Amount of L added/subtracted when crossing
+    pub active_positions_count: u128, // Total liquidity referencing this tick
+    pub liquidity_delta: i128,        // Amount of L added/subtracted when crossing
     pub fee_growth_outside_0: Uint256, // Fee accumulator
     pub fee_growth_outside_1: Uint256,
     pub initialized: bool, // Is it in the bitmap?

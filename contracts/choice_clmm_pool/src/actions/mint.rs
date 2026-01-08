@@ -3,7 +3,9 @@ use std::convert::TryFrom;
 use crate::core::bitmap::flip_tick;
 use crate::core::positions::update_position;
 use crate::error::ContractError;
-use crate::state::{PoolConfig, CONFIG, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, SLOT0, TICKS};
+use crate::state::{
+    PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, TICKS,
+};
 use choice_clmm_math::sqrt_price_math::{get_amount0_delta, get_amount1_delta};
 use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
 use cosmwasm_std::{ensure, DepsMut, Env, MessageInfo, Response, StdError, Uint128, Uint256};
@@ -17,8 +19,8 @@ pub fn execute_mint(
     upper_tick: i32,
     amount_liquidity: u128,
 ) -> Result<Response, ContractError> {
-    let config: PoolConfig = CONFIG.load(deps.storage)?;
-    let mut slot0 = SLOT0.load(deps.storage)?;
+    let config: PoolConfig = POOL_CONFIG.load(deps.storage)?;
+    let mut slot0 = POOL_STATE.load(deps.storage)?;
 
     // 1. Validation
     if lower_tick >= upper_tick {
@@ -37,7 +39,7 @@ pub fn execute_mint(
     // 2. Calculate SqrtPrices
     let sqrt_price_lower = get_sqrt_ratio_at_tick(lower_tick)?;
     let sqrt_price_upper = get_sqrt_ratio_at_tick(upper_tick)?;
-    let sqrt_price_current = slot0.sqrt_price_x96;
+    let sqrt_price_current = slot0.sqrt_price;
 
     // 3. Update Ticks FIRST (Initialize if needed)
     // We must initialize ticks before updating position, because position calculates fees based on ticks.
@@ -76,9 +78,9 @@ pub fn execute_mint(
         // Update bitmap
         flip_tick(deps.storage, lower_tick, spacing)?;
     }
-    tick_lower.liquidity_gross += amount_liquidity;
-    tick_lower.liquidity_net = tick_lower
-        .liquidity_net
+    tick_lower.active_positions_count += amount_liquidity;
+    tick_lower.liquidity_delta = tick_lower
+        .liquidity_delta
         .checked_add(amount_liquidity as i128)
         .unwrap();
     TICKS.save(deps.storage, lower_tick, &tick_lower)?;
@@ -95,10 +97,10 @@ pub fn execute_mint(
         }
         flip_tick(deps.storage, upper_tick, spacing)?;
     }
-    tick_upper.liquidity_gross += amount_liquidity;
+    tick_upper.active_positions_count += amount_liquidity;
     // Upper tick crossing subtracts liquidity
-    tick_upper.liquidity_net = tick_upper
-        .liquidity_net
+    tick_upper.liquidity_delta = tick_upper
+        .liquidity_delta
         .checked_sub(amount_liquidity as i128)
         .unwrap();
     TICKS.save(deps.storage, upper_tick, &tick_upper)?;
@@ -117,7 +119,7 @@ pub fn execute_mint(
     // 5. Update Global Liquidity
     if slot0.tick >= lower_tick && slot0.tick < upper_tick {
         slot0.liquidity += Uint128::from(amount_liquidity);
-        SLOT0.save(deps.storage, &slot0)?;
+        POOL_STATE.save(deps.storage, &slot0)?;
     }
 
     // 6. Calculate Token Amounts Needed (No changes here)

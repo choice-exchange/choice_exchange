@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 
 use crate::core::positions::update_position;
 use crate::error::ContractError;
-use crate::state::{SLOT0, TICKS};
+use crate::state::{POOL_STATE, TICKS};
 use choice_clmm_math::sqrt_price_math::{get_amount0_delta, get_amount1_delta};
 use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
 use cosmwasm_std::{DepsMut, Env, MessageInfo, Response, StdError, Uint128};
@@ -15,7 +15,7 @@ pub fn execute_burn(
     upper_tick: i32,
     amount: Uint128, // Amount of Liquidity (L) to burn
 ) -> Result<Response, ContractError> {
-    let mut slot0 = SLOT0.load(deps.storage)?;
+    let mut slot0 = POOL_STATE.load(deps.storage)?;
     let liquidity_burned = amount.u128();
 
     if liquidity_burned == 0 {
@@ -53,18 +53,8 @@ pub fn execute_burn(
         amount1 = Uint128::try_from(a1).unwrap();
     } else {
         // In range (Mixed)
-        let a0 = get_amount0_delta(
-            slot0.sqrt_price_x96,
-            sqrt_price_upper,
-            liquidity_burned,
-            false,
-        );
-        let a1 = get_amount1_delta(
-            sqrt_price_lower,
-            slot0.sqrt_price_x96,
-            liquidity_burned,
-            false,
-        );
+        let a0 = get_amount0_delta(slot0.sqrt_price, sqrt_price_upper, liquidity_burned, false);
+        let a1 = get_amount1_delta(sqrt_price_lower, slot0.sqrt_price, liquidity_burned, false);
         amount0 = Uint128::try_from(a0).unwrap();
         amount1 = Uint128::try_from(a1).unwrap();
 
@@ -73,7 +63,7 @@ pub fn execute_burn(
             .liquidity
             .checked_sub(amount)
             .map_err(|_| StdError::generic_err("Global liquidity underflow"))?;
-        SLOT0.save(deps.storage, &slot0)?;
+        POOL_STATE.save(deps.storage, &slot0)?;
     }
 
     // 3. Update Ticks (Decrement Liquidity Gross/Net)
@@ -81,11 +71,11 @@ pub fn execute_burn(
     let mut tick_lower = TICKS.load(deps.storage, lower_tick)?;
     let mut tick_upper = TICKS.load(deps.storage, upper_tick)?;
 
-    tick_lower.liquidity_gross -= liquidity_burned;
-    tick_lower.liquidity_net -= liquidity_burned as i128; // Lower tick crossing reduces net L
+    tick_lower.active_positions_count -= liquidity_burned;
+    tick_lower.liquidity_delta -= liquidity_burned as i128; // Lower tick crossing reduces net L
 
-    tick_upper.liquidity_gross -= liquidity_burned;
-    tick_upper.liquidity_net += liquidity_burned as i128; // Upper tick crossing increases net L (inverted)
+    tick_upper.active_positions_count -= liquidity_burned;
+    tick_upper.liquidity_delta += liquidity_burned as i128; // Upper tick crossing increases net L (inverted)
 
     // Clear tick if empty to save gas/storage? (Optional optimization)
     // For now just save.

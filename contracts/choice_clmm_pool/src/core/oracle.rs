@@ -1,6 +1,6 @@
 use std::convert::TryFrom;
 
-use crate::state::{OracleData, CONFIG, ORACLE};
+use crate::state::{OracleData, ORACLE, POOL_CONFIG};
 use choice_clmm_math::full_math::mul_div;
 use cosmwasm_std::{Env, StdResult, Storage, Uint128, Uint256};
 
@@ -21,7 +21,7 @@ pub fn update_oracle(
     current_price: Uint256,
 ) -> StdResult<()> {
     let mut oracle = ORACLE.load(storage)?;
-    let config = CONFIG.load(storage)?;
+    let config = POOL_CONFIG.load(storage)?;
 
     let now = env.block.time.seconds();
     // If multiple txs in same block, delta is 0. No update needed.
@@ -70,7 +70,7 @@ pub fn get_dynamic_fee(
     current_price: Uint256,
 ) -> StdResult<u32> {
     let oracle = ORACLE.load(storage)?;
-    let config = CONFIG.load(storage)?;
+    let config = POOL_CONFIG.load(storage)?;
 
     let ema = oracle.price_ema_x96;
 

@@ -4,7 +4,7 @@ mod tests {
     use crate::state::POSITIONS;
     use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
     use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, QueryMsg};
-    use choice_clmm_common::pool::{QueryMsg as PoolQueryMsg, Slot0};
+    use choice_clmm_common::pool::{PoolState, QueryMsg as PoolQueryMsg};
     use cosmwasm_std::testing::{
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
     };
@@ -59,10 +59,8 @@ mod tests {
                         let q: PoolQueryMsg = from_json(&msg).unwrap();
                         match q {
                             PoolQueryMsg::GetSlot0 {} => {
-                                let slot0 = Slot0 {
-                                    sqrt_price_x96: Uint256::from(
-                                        79228162514264337593543950336u128,
-                                    ), // 2^96 (Price = 1.0)
+                                let slot0 = PoolState {
+                                    sqrt_price: Uint256::from(79228162514264337593543950336u128), // 2^96 (Price = 1.0)
                                     tick: 0,
                                     liquidity: Uint128::zero(),
                                 };

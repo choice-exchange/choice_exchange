@@ -1,5 +1,5 @@
 use crate::error::ContractError;
-use crate::state::{CONFIG, POSITIONS};
+use crate::state::{POOL_CONFIG, POSITIONS};
 use cosmwasm_std::{BankMsg, Coin, DepsMut, MessageInfo, Response, Uint128};
 // We define MaxUint128 to represent "Collect All"
 const MAX_UINT128: Uint128 = Uint128::new(u128::MAX);
@@ -13,7 +13,7 @@ pub fn execute_collect(
     amount0_requested: Uint128, // Set to MAX_UINT128 to collect all
     amount1_requested: Uint128,
 ) -> Result<Response, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
+    let config = POOL_CONFIG.load(deps.storage)?;
     let key = (info.sender.as_str(), lower_tick, upper_tick);
     let mut position = POSITIONS
         .load(deps.storage, key)

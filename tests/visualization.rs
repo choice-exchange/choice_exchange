@@ -207,7 +207,7 @@ fn export_svg(env: &VizEnv, pool: &str, ticks: Vec<i32>, filename: &str) {
         let info: TickInfo = wasm
             .query(pool, &PoolQueryMsg::GetTickInfo { tick: t_curr })
             .unwrap_or_default();
-        current_l += info.liquidity_net;
+        current_l += info.liquidity_delta;
 
         bins.push(LiquidityBin {
             lower_tick: t_curr,

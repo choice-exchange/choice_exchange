@@ -115,7 +115,7 @@ fn execute_create_pool(
         token1: token1.clone(),
         tick_spacing,
         fee_config,
-        initial_sqrt_price_x96: init_sqrt_price,
+        initial_sqrt_price: init_sqrt_price,
     };
 
     // 6. Create WasmMsg with Instantiate2

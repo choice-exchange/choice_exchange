@@ -105,14 +105,14 @@ fn mul_shift_128(a: Uint256, b: u128) -> Uint256 {
     mul_div(a, Uint256::from(b), shift)
 }
 
-pub fn get_tick_at_sqrt_ratio(sqrt_price_x96: Uint256) -> StdResult<i32> {
+pub fn get_tick_at_sqrt_ratio(sqrt_price: Uint256) -> StdResult<i32> {
     // 1. Validation
-    if sqrt_price_x96 < Uint256::from(MIN_SQRT_RATIO) || sqrt_price_x96 >= max_sqrt_ratio() {
+    if sqrt_price < Uint256::from(MIN_SQRT_RATIO) || sqrt_price >= max_sqrt_ratio() {
         return Err(StdError::generic_err("Price out of bounds"));
     }
 
     // 2. Binary Search
-    // We want to find the largest tick T such that Price(T) <= sqrt_price_x96
+    // We want to find the largest tick T such that Price(T) <= sqrt_price
 
     let mut low = MIN_TICK;
     let mut high = MAX_TICK;
@@ -125,7 +125,7 @@ pub fn get_tick_at_sqrt_ratio(sqrt_price_x96: Uint256) -> StdResult<i32> {
         // This call is safe because mid is always within MIN/MAX bounds
         let mid_price = get_sqrt_ratio_at_tick(mid)?;
 
-        if mid_price <= sqrt_price_x96 {
+        if mid_price <= sqrt_price {
             // mid is a valid floor candidate, so we move the lower bound up to mid.
             // We don't exclude mid because it might be the exact answer.
             low = mid;

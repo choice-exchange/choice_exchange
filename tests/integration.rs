@@ -14,7 +14,7 @@ use choice_clmm_common::manager::{
     ExecuteMsg as ManagerExecuteMsg, InstantiateMsg as ManagerInstantiateMsg, Position,
     QueryMsg as ManagerQueryMsg,
 };
-use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, QueryMsg as PoolQueryMsg, Slot0};
+use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, PoolState, QueryMsg as PoolQueryMsg};
 
 use cw721::msg::OwnerOfResponse;
 
@@ -383,7 +383,7 @@ fn test_swap_exact_input() {
     assert!(end_usdt > start_usdt, "Trader should receive USDT");
 
     // 5. Verify Price Movement
-    let slot0: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("New Tick: {}", slot0.tick);
 
     // Price should have moved down (selling Token0)
@@ -594,7 +594,7 @@ fn test_range_crossing_and_activation() {
         .unwrap();
 
     // 3. Get initial state
-    let slot0_start: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0_start: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("Start Tick: {}", slot0_start.tick);
     println!("Start L: {}", slot0_start.liquidity);
 
@@ -614,7 +614,7 @@ fn test_range_crossing_and_activation() {
     )
     .unwrap();
 
-    let slot0_mid: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0_mid: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("Mid Tick: {}", slot0_mid.tick);
     println!("Mid L: {}", slot0_mid.liquidity);
 
@@ -651,7 +651,7 @@ fn test_range_crossing_and_activation() {
     )
     .unwrap();
 
-    let slot0_end: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0_end: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("End Tick: {}", slot0_end.tick);
     println!("End L: {}", slot0_end.liquidity);
 
@@ -743,7 +743,7 @@ fn test_swap_one_for_zero_reverse() {
     assert!(end_atom > start_atom, "Trader should receive ATOM");
 
     // 4. Verify Tick Movement
-    let slot0: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("New Tick (Up): {}", slot0.tick);
 
     // Price should move UP (Positive Tick)
@@ -759,7 +759,7 @@ fn test_overlapping_liquidity_math() {
     let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
 
     // Get baseline L
-    let slot0_a: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0_a: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     let liq_a = slot0_a.liquidity;
 
     // 2. User B Mints in [0, 200]
@@ -793,7 +793,7 @@ fn test_overlapping_liquidity_math() {
         .unwrap();
 
     // 3. Verify Active Liquidity
-    let slot0_b: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0_b: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     let liq_total = slot0_b.liquidity;
 
     println!("L(A): {}", liq_a);
@@ -821,7 +821,7 @@ fn test_overlapping_liquidity_math() {
     )
     .unwrap();
 
-    let slot0_end: Slot0 = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
+    let slot0_end: PoolState = wasm.query(&pool_addr, &PoolQueryMsg::GetSlot0 {}).unwrap();
     println!("End Tick: {}", slot0_end.tick);
     println!("End L: {}", slot0_end.liquidity);
 

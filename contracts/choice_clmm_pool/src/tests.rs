@@ -5,7 +5,7 @@ mod tests {
     use crate::contract::{execute, instantiate, query};
     use crate::error::ContractError;
     use crate::state::PoolConfig;
-    use choice_clmm_common::pool::{ExecuteMsg, FeeConfig, InstantiateMsg, QueryMsg, Slot0};
+    use choice_clmm_common::pool::{ExecuteMsg, FeeConfig, InstantiateMsg, PoolState, QueryMsg};
     use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
     use cosmwasm_std::{from_json, BankMsg, Coin, StdError, Uint128, Uint256};
 
@@ -29,7 +29,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
 
         let info = message_info(&deps.api.addr_make("factory_addr"), &[]);
@@ -44,8 +44,8 @@ mod tests {
 
         // 2. Test Slot0 Query
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res).unwrap();
-        assert_eq!(slot0.sqrt_price_x96, get_price_one());
+        let slot0: PoolState = from_json(&res).unwrap();
+        assert_eq!(slot0.sqrt_price, get_price_one());
         assert_eq!(slot0.liquidity, cosmwasm_std::Uint128::zero());
     }
 
@@ -63,7 +63,7 @@ mod tests {
                 volatility_multiplier: 0,
                 ema_halflife_seconds: 0,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
 
         let info = message_info(&deps.api.addr_make("factory"), &[]);
@@ -90,7 +90,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -128,7 +128,7 @@ mod tests {
 
         // 3. Verify Slot0 Liquidity
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res).unwrap();
+        let slot0: PoolState = from_json(&res).unwrap();
         assert_eq!(slot0.liquidity, Uint128::from(1000u128));
     }
 
@@ -147,7 +147,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -207,7 +207,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -279,10 +279,10 @@ mod tests {
 
         // B. Check Price/Tick Movement
         let res_query = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res_query).unwrap();
+        let slot0: PoolState = from_json(&res_query).unwrap();
 
         // Price should be LESS than 1.0 (79228...) because we sold Token 0
-        assert!(slot0.sqrt_price_x96 < get_price_one());
+        assert!(slot0.sqrt_price < get_price_one());
 
         // Tick should be negative
         assert!(slot0.tick < 0);
@@ -316,7 +316,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -373,10 +373,10 @@ mod tests {
         assert!(amount_out > 0);
 
         let res_query = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res_query).unwrap();
+        let slot0: PoolState = from_json(&res_query).unwrap();
 
         // Price should be > 1.0
-        assert!(slot0.sqrt_price_x96 > get_price_one());
+        assert!(slot0.sqrt_price > get_price_one());
         // Tick should be >= 0
         assert!(slot0.tick >= 0);
     }
@@ -396,7 +396,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -437,13 +437,13 @@ mod tests {
 
         // Verify state
         let res_query = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res_query).unwrap();
+        let slot0: PoolState = from_json(&res_query).unwrap();
 
         // FIX: The tick should move to -1 because Price < 1.0
         assert_eq!(slot0.tick, -1);
 
         // Price should be less than 1.0 (2^96)
-        assert!(slot0.sqrt_price_x96 < get_price_one());
+        assert!(slot0.sqrt_price < get_price_one());
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -503,9 +503,9 @@ mod tests {
 
         // Verify we stopped at the limit
         let res_query = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res_query).unwrap();
+        let slot0: PoolState = from_json(&res_query).unwrap();
 
-        assert_eq!(slot0.sqrt_price_x96, close_limit);
+        assert_eq!(slot0.sqrt_price, close_limit);
 
         // Verify we didn't use all input
         let amount_in_used = res
@@ -544,7 +544,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -675,7 +675,7 @@ mod tests {
                     volatility_multiplier: multiplier, // Variable
                     ema_halflife_seconds: 100,
                 },
-                initial_sqrt_price_x96: get_price_one(),
+                initial_sqrt_price: get_price_one(),
             };
             let creator = message_info(&deps.api.addr_make("factory"), &[]);
             // reset storage for clean run
@@ -796,7 +796,7 @@ mod tests {
                 volatility_multiplier: 0,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(), // Tick 0
+            initial_sqrt_price: get_price_one(), // Tick 0
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -832,7 +832,7 @@ mod tests {
 
         // 3. Verify Current State (L should be 0 because Tick 0 is in the gap)
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res).unwrap();
+        let slot0: PoolState = from_json(&res).unwrap();
         assert_eq!(slot0.liquidity, Uint128::zero());
         assert_eq!(slot0.tick, 0);
 
@@ -860,7 +860,7 @@ mod tests {
         // 5. Verify
         // The final tick should be > 100.
         let res_query = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res_query).unwrap();
+        let slot0: PoolState = from_json(&res_query).unwrap();
 
         println!("Gap Test Final Tick: {}", slot0.tick);
         assert!(
@@ -887,7 +887,7 @@ mod tests {
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let creator = message_info(&deps.api.addr_make("factory"), &[]);
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
@@ -946,7 +946,7 @@ mod tests {
                 volatility_multiplier: 0,
                 ema_halflife_seconds: 600,
             },
-            initial_sqrt_price_x96: get_price_one(),
+            initial_sqrt_price: get_price_one(),
         };
         let factory = deps.api.addr_make("factory");
         instantiate(deps.as_mut(), mock_env(), message_info(&factory, &[]), msg).unwrap();
@@ -994,7 +994,7 @@ mod tests {
         // Current Tick is 0. Both ranges active.
         // Total L should be 15,000,000
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res).unwrap();
+        let slot0: PoolState = from_json(&res).unwrap();
         assert_eq!(slot0.liquidity, Uint128::from(15_000_000u128));
 
         // 4. Swap UP
@@ -1025,7 +1025,7 @@ mod tests {
 
         // 5. Verify Final Liquidity
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetSlot0 {}).unwrap();
-        let slot0: Slot0 = from_json(&res).unwrap();
+        let slot0: PoolState = from_json(&res).unwrap();
 
         println!("Final Tick: {}", slot0.tick);
 

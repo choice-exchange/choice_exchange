@@ -13,7 +13,7 @@ use cw721_metadata_onchain::Cw721MetadataContract;
 
 use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
 use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, Position, QueryMsg};
-use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, QueryMsg as PoolQueryMsg, Slot0};
+use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, PoolState, QueryMsg as PoolQueryMsg};
 
 use choice_clmm_math::liquidity_math::get_liquidity_for_amounts;
 use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
@@ -261,7 +261,7 @@ fn execute_mint_position(
     }
 
     // Get Slot0
-    let slot0: Slot0 = deps
+    let slot0: PoolState = deps
         .querier
         .query_wasm_smart(pool_addr.clone(), &PoolQueryMsg::GetSlot0 {})?;
 
@@ -270,7 +270,7 @@ fn execute_mint_position(
     let sqrt_price_upper = get_sqrt_ratio_at_tick(params.tick_upper)?;
 
     let liquidity = get_liquidity_for_amounts(
-        slot0.sqrt_price_x96,
+        slot0.sqrt_price,
         sqrt_price_lower,
         sqrt_price_upper,
         params.amount0_desired,
@@ -367,7 +367,7 @@ fn execute_increase_liquidity(
         );
     }
 
-    let slot0: Slot0 = deps
+    let slot0: PoolState = deps
         .querier
         .query_wasm_smart(position.pool_address.clone(), &PoolQueryMsg::GetSlot0 {})?;
 
@@ -375,7 +375,7 @@ fn execute_increase_liquidity(
     let sqrt_price_upper = get_sqrt_ratio_at_tick(position.tick_upper)?;
 
     let liquidity = get_liquidity_for_amounts(
-        slot0.sqrt_price_x96,
+        slot0.sqrt_price,
         sqrt_price_lower,
         sqrt_price_upper,
         params.amount0_desired,

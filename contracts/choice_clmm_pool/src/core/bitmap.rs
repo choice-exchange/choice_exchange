@@ -41,7 +41,7 @@ pub fn flip_tick(storage: &mut dyn Storage, tick: i32, tick_spacing: i32) -> Std
 }
 
 /// Finds the next initialized tick in the same word (or adjacent)
-pub fn next_initialized_tick_within_one_word(
+pub fn next_initialized_tick_in_chunk(
     storage: &dyn Storage,
     tick: i32,
     tick_spacing: i32,

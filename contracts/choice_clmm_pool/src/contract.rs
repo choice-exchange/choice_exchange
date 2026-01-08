@@ -11,8 +11,8 @@ use crate::actions::mint::execute_mint;
 use crate::actions::swap::execute_swap;
 use crate::core::oracle::initialize_oracle;
 use crate::error::ContractError;
-use crate::state::{PoolConfig, CONFIG, SLOT0, TICKS};
-use choice_clmm_common::pool::{ExecuteMsg, InstantiateMsg, QueryMsg, Slot0};
+use crate::state::{PoolConfig, POOL_CONFIG, POOL_STATE, TICKS};
+use choice_clmm_common::pool::{ExecuteMsg, InstantiateMsg, PoolState, QueryMsg};
 use choice_clmm_math::tick_math::{get_tick_at_sqrt_ratio, MAX_TICK, MIN_TICK};
 
 // Version info for migration info
@@ -41,12 +41,12 @@ pub fn instantiate(
         tick_spacing: msg.tick_spacing,
         fee_config: msg.fee_config,
     };
-    CONFIG.save(deps.storage, &config)?;
+    POOL_CONFIG.save(deps.storage, &config)?;
 
     // 3. Initialize Slot0 (The Global State)
 
     // Calculate the initial tick from the provided square root price
-    let current_tick = get_tick_at_sqrt_ratio(msg.initial_sqrt_price_x96)
+    let current_tick = get_tick_at_sqrt_ratio(msg.initial_sqrt_price)
         .map_err(|_| ContractError::Std(StdError::generic_err("Invalid initial price")))?;
 
     // Validate the calculated tick is within protocol bounds
@@ -56,17 +56,17 @@ pub fn instantiate(
         )));
     }
 
-    let slot0 = Slot0 {
-        sqrt_price_x96: msg.initial_sqrt_price_x96,
+    let slot0 = PoolState {
+        sqrt_price: msg.initial_sqrt_price,
         tick: current_tick,
         liquidity: Uint128::zero(),
     };
-    SLOT0.save(deps.storage, &slot0)?;
+    POOL_STATE.save(deps.storage, &slot0)?;
 
     initialize_oracle(
         deps.storage,
         _env.block.time.seconds(),
-        msg.initial_sqrt_price_x96,
+        msg.initial_sqrt_price,
     )?;
 
     Ok(Response::new()
@@ -141,8 +141,8 @@ pub fn execute(
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::GetConfig {} => to_json_binary(&CONFIG.load(deps.storage)?),
-        QueryMsg::GetSlot0 {} => to_json_binary(&SLOT0.load(deps.storage)?),
+        QueryMsg::GetConfig {} => to_json_binary(&POOL_CONFIG.load(deps.storage)?),
+        QueryMsg::GetSlot0 {} => to_json_binary(&POOL_STATE.load(deps.storage)?),
         QueryMsg::GetTickInfo { tick } => {
             let info = TICKS.may_load(deps.storage, tick)?.unwrap_or_default();
             to_json_binary(&info)

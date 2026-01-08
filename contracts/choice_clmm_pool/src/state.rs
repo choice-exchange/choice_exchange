@@ -1,4 +1,4 @@
-use choice_clmm_common::pool::{FeeConfig, Slot0, TickInfo};
+use choice_clmm_common::pool::{FeeConfig, PoolState, TickInfo};
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Uint128, Uint256};
 use cw_storage_plus::{Item, Map};
@@ -29,8 +29,8 @@ pub struct OracleData {
 }
 
 // Define Storage Keys
-pub const CONFIG: Item<PoolConfig> = Item::new("config");
-pub const SLOT0: Item<Slot0> = Item::new("slot0");
+pub const POOL_CONFIG: Item<PoolConfig> = Item::new("pool_config");
+pub const POOL_STATE: Item<PoolState> = Item::new("pool_state");
 
 // Maps Tick Index (i32) -> Info
 pub const TICKS: Map<i32, TickInfo> = Map::new("ticks");
