@@ -39,3 +39,8 @@ injective-test-tube = { version = "1.16.3-1" }
 name = "integration"
 path = "../../tests/integration.rs"
 harness = true
+
+[[test]] 
+name = "visualization"
+path = "../../tests/visualization.rs"
+harness = true

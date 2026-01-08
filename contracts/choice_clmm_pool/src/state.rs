@@ -1,4 +1,4 @@
-use choice_clmm_common::pool::{FeeConfig, Slot0};
+use choice_clmm_common::pool::{FeeConfig, Slot0, TickInfo};
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Uint128, Uint256};
 use cw_storage_plus::{Item, Map};
@@ -10,16 +10,6 @@ pub struct PoolConfig {
     pub token1: String,
     pub tick_spacing: u32,
     pub fee_config: FeeConfig,
-}
-
-#[cw_serde]
-#[derive(Default)]
-pub struct TickInfo {
-    pub liquidity_gross: u128,         // Total liquidity referencing this tick
-    pub liquidity_net: i128,           // Amount of L added/subtracted when crossing
-    pub fee_growth_outside_0: Uint256, // Fee accumulator
-    pub fee_growth_outside_1: Uint256,
-    pub initialized: bool, // Is it in the bitmap?
 }
 
 #[cw_serde]

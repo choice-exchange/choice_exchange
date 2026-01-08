@@ -32,6 +32,16 @@ pub struct InstantiateMsg {
 }
 
 #[cw_serde]
+#[derive(Default)]
+pub struct TickInfo {
+    pub liquidity_gross: u128,         // Total liquidity referencing this tick
+    pub liquidity_net: i128,           // Amount of L added/subtracted when crossing
+    pub fee_growth_outside_0: Uint256, // Fee accumulator
+    pub fee_growth_outside_1: Uint256,
+    pub initialized: bool, // Is it in the bitmap?
+}
+
+#[cw_serde]
 pub enum ExecuteMsg {
     Mint {
         recipient: String,
@@ -66,4 +76,5 @@ pub enum ExecuteMsg {
 pub enum QueryMsg {
     GetConfig {},
     GetSlot0 {},
+    GetTickInfo { tick: i32 },
 }

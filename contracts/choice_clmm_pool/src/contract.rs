@@ -11,7 +11,7 @@ use crate::actions::mint::execute_mint;
 use crate::actions::swap::execute_swap;
 use crate::core::oracle::initialize_oracle;
 use crate::error::ContractError;
-use crate::state::{PoolConfig, CONFIG, SLOT0};
+use crate::state::{PoolConfig, CONFIG, SLOT0, TICKS};
 use choice_clmm_common::pool::{ExecuteMsg, InstantiateMsg, QueryMsg, Slot0};
 use choice_clmm_math::tick_math::{get_tick_at_sqrt_ratio, MAX_TICK, MIN_TICK};
 
@@ -143,5 +143,9 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetConfig {} => to_json_binary(&CONFIG.load(deps.storage)?),
         QueryMsg::GetSlot0 {} => to_json_binary(&SLOT0.load(deps.storage)?),
+        QueryMsg::GetTickInfo { tick } => {
+            let info = TICKS.may_load(deps.storage, tick)?.unwrap_or_default();
+            to_json_binary(&info)
+        }
     }
 }
