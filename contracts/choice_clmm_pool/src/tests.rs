@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use std::str::FromStr;
 
@@ -6,8 +7,15 @@ mod tests {
     use crate::error::ContractError;
     use crate::state::PoolConfig;
     use choice_clmm_common::pool::{ExecuteMsg, FeeConfig, InstantiateMsg, PoolState, QueryMsg};
+    use choice_clmm_common::types::AssetInfo;
     use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
     use cosmwasm_std::{from_json, BankMsg, Coin, StdError, Uint128, Uint256};
+
+    fn native(denom: &str) -> AssetInfo {
+        AssetInfo::NativeToken {
+            denom: denom.to_string(),
+        }
+    }
 
     // Helper to mock Q64.96 representation of "1.0"
     // 2^96 = 79228162514264337593543950336
@@ -20,8 +28,8 @@ mod tests {
         let mut deps = mock_dependencies();
 
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "peggy0xdac".to_string(), // USDT
+            token0: native("inj"),
+            token1: native("peggy0xdac"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -39,7 +47,7 @@ mod tests {
         // 1. Test Config Query
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetConfig {}).unwrap();
         let config: PoolConfig = from_json(&res).unwrap();
-        assert_eq!(config.token0, "inj");
+        assert_eq!(config.token0, native("inj"));
         assert_eq!(config.factory, deps.api.addr_make("factory_addr"));
 
         // 2. Test Slot0 Query
@@ -54,8 +62,8 @@ mod tests {
         let mut deps = mock_dependencies();
 
         let msg = InstantiateMsg {
-            token0: "usdt".to_string(), // Alphabetically after "inj"
-            token1: "inj".to_string(),
+            token0: native("usdt"), // Alphabetically after "inj"
+            token1: native("inj"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -81,8 +89,8 @@ mod tests {
 
         // 1. Instantiate
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "peggy0xdac".to_string(),
+            token0: native("inj"),
+            token1: native("peggy0xdac"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -138,8 +146,8 @@ mod tests {
 
         // --- FIX: Actually Instantiate the contract ---
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "peggy0xdac".to_string(),
+            token0: native("inj"),
+            token1: native("peggy0xdac"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -198,8 +206,8 @@ mod tests {
 
         // 1. Instantiate (Price = 1.0)
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000, // 0.3%
@@ -307,8 +315,8 @@ mod tests {
         // 1. Setup Pool & Liquidity
         // Price = 1.0. Range [-200, 200]
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -387,8 +395,8 @@ mod tests {
         let mut deps = mock_dependencies();
         // ... (Instantiate & Mint same as above) ...
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -451,8 +459,8 @@ mod tests {
         let mut deps = mock_dependencies();
         // ... (Instantiate & Mint same as above) ...
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -535,8 +543,8 @@ mod tests {
 
         // 1. Setup Pool
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -666,8 +674,8 @@ mod tests {
         let mut run_scenario = |multiplier: u32| -> u128 {
             // 1. Instantiate
             let msg = InstantiateMsg {
-                token0: "inj".to_string(),
-                token1: "usdt".to_string(),
+                token0: native("inj"),
+                token1: native("usdt"),
                 tick_spacing: 10,
                 fee_config: FeeConfig {
                     base_fee_ppm: 0, // 0% Base fee to isolate dynamic effects
@@ -787,8 +795,8 @@ mod tests {
         // Swap should immediately jump to -100 (if selling) or 100 (if buying).
 
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -878,8 +886,8 @@ mod tests {
         let mut deps = mock_dependencies();
         // Setup ...
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
@@ -937,8 +945,8 @@ mod tests {
     fn test_overlapping_liquidity_math() {
         let mut deps = mock_dependencies();
         let msg = InstantiateMsg {
-            token0: "inj".to_string(),
-            token1: "usdt".to_string(),
+            token0: native("inj"),
+            token1: native("usdt"),
             tick_spacing: 10,
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,

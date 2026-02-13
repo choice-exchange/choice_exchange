@@ -1,8 +1,8 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    ensure, to_json_binary, Binary, Coin, Deps, DepsMut, Env, MessageInfo, Response, StdError,
-    Uint128, WasmMsg,
+    ensure, to_json_binary, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Response,
+    StdError, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 
@@ -12,10 +12,12 @@ use cw721_base::traits::Cw721Execute;
 use cw721_metadata_onchain::Cw721MetadataContract;
 
 use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
-use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, Position, QueryMsg};
+use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, MigrateMsg, Position, QueryMsg};
 use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, PoolState, QueryMsg as PoolQueryMsg};
+use choice_clmm_common::types::AssetInfo;
 
 use choice_clmm_math::liquidity_math::get_liquidity_for_amounts;
+use choice_clmm_math::sqrt_price_math::{get_amount0_delta, get_amount1_delta};
 use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::error::ContractError;
@@ -26,8 +28,8 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Helper structs to fix clippy::too_many_arguments
 pub struct MintParams {
-    pub token0: String,
-    pub token1: String,
+    pub token0: AssetInfo,
+    pub token1: AssetInfo,
     pub fee: u32,
     pub tick_lower: i32,
     pub tick_upper: i32,
@@ -56,6 +58,83 @@ pub struct DecreaseParams {
     pub deadline: u64,
 }
 
+fn validate_deadline(env: &Env, deadline: u64) -> Result<(), ContractError> {
+    if deadline > 0 && env.block.time.seconds() > deadline {
+        return Err(ContractError::DeadlineExceeded {});
+    }
+    Ok(())
+}
+
+/// Check if caller is the NFT owner or an approved operator.
+fn assert_owner_or_approved(
+    deps: Deps,
+    env: &Env,
+    info: &MessageInfo,
+    token_id: &str,
+) -> Result<(), ContractError> {
+    let base = Cw721MetadataContract::default();
+    let owner_res = base.query_owner_of(deps, env, token_id.to_string(), true)?;
+    if info.sender.to_string() == owner_res.owner {
+        return Ok(());
+    }
+    // Check if caller is approved for this specific token or is an operator
+    for approval in &owner_res.approvals {
+        if approval.spender == info.sender {
+            return Ok(());
+        }
+    }
+    Err(ContractError::Unauthorized {})
+}
+
+/// Build messages to transfer a token from user to pool.
+/// For native tokens: add to funds_to_pool vec and verify info.funds.
+/// For CW20 tokens: add TransferFrom(user->manager) + IncreaseAllowance(pool) messages.
+fn prepare_token_transfer(
+    token: &AssetInfo,
+    amount: Uint128,
+    info: &MessageInfo,
+    pool_addr: &str,
+    env_addr: &str,
+    funds_to_pool: &mut Vec<Coin>,
+    pre_messages: &mut Vec<CosmosMsg>,
+) -> Result<(), ContractError> {
+    if amount.is_zero() {
+        return Ok(());
+    }
+
+    match token {
+        AssetInfo::NativeToken { denom } => {
+            funds_to_pool.push(Coin {
+                denom: denom.clone(),
+                amount,
+            });
+            let sent = info
+                .funds
+                .iter()
+                .find(|c| c.denom == *denom)
+                .map(|c| c.amount)
+                .unwrap_or_default();
+            ensure!(
+                sent >= amount,
+                ContractError::Std(StdError::generic_err("Insufficient funds sent"))
+            );
+        }
+        AssetInfo::Token { .. } => {
+            // Pull CW20 from user to manager
+            if let Some(msg) =
+                token.transfer_from_msg(info.sender.as_ref(), env_addr, amount)?
+            {
+                pre_messages.push(msg);
+            }
+            // Approve pool to pull from manager
+            if let Some(msg) = token.increase_allowance_msg(pool_addr, amount)? {
+                pre_messages.push(msg);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
@@ -74,13 +153,12 @@ pub fn instantiate(
     let cw721_msg = cw721_base::msg::InstantiateMsg {
         name: msg.name,
         symbol: msg.symbol,
-        minter: Some(env.contract.address.to_string()), // Manager controls minting
+        minter: Some(env.contract.address.to_string()),
         withdraw_address: None,
         collection_info_extension: None,
         creator: None,
     };
 
-    // Use the simple default contract
     Cw721MetadataContract::default().instantiate(deps, &env, &info, cw721_msg)?;
 
     Ok(Response::new().add_attribute("action", "instantiate"))
@@ -93,7 +171,6 @@ pub fn execute(
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
-    // Helper like in your example
     let base_contract = Cw721MetadataContract::default();
 
     match msg {
@@ -175,15 +252,11 @@ pub fn execute(
         } => execute_collect(deps, env, info, token_id, recipient),
 
         ExecuteMsg::Burn { token_id } => {
-            // TODO: Ensure liquidity is zero
-            // Remove from our sidecar map
             POSITIONS.remove(deps.storage, &token_id);
-            // Delegate burn to NFT contract
             Ok(base_contract.burn_nft(deps, &env, &info, token_id)?)
         }
 
         // --- STANDARD DELEGATION ---
-        // Just forward these to the base contract
         ExecuteMsg::TransferNft {
             recipient,
             token_id,
@@ -214,15 +287,17 @@ fn execute_mint_position(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    params: MintParams, // Changed
+    params: MintParams,
 ) -> Result<Response, ContractError> {
+    validate_deadline(&env, params.deadline)?;
+
     let config = CONFIG.load(deps.storage)?;
 
     // Resolve Pool
     let pool_addr: String = deps.querier.query_wasm_smart(
         config.factory,
         &FactoryQueryMsg::GetPool {
-            token_a: params.token0.clone(), // Use params.field
+            token_a: params.token0.clone(),
             token_b: params.token1.clone(),
             fee: params.fee,
         },
@@ -233,32 +308,28 @@ fn execute_mint_position(
     TOKEN_ID_COUNTER.save(deps.storage, &(token_id_int + 1))?;
     let token_id = token_id_int.to_string();
 
-    // Funds Check
-    let mut funds_to_pool = vec![];
-    if !params.amount0_desired.is_zero() {
-        funds_to_pool.push(Coin {
-            denom: params.token0.clone(),
-            amount: params.amount0_desired,
-        });
-    }
-    if !params.amount1_desired.is_zero() {
-        funds_to_pool.push(Coin {
-            denom: params.token1.clone(),
-            amount: params.amount1_desired,
-        });
-    }
-    for req in &funds_to_pool {
-        let sent = info
-            .funds
-            .iter()
-            .find(|c| c.denom == req.denom)
-            .map(|c| c.amount)
-            .unwrap_or_default();
-        ensure!(
-            sent >= req.amount,
-            ContractError::Std(StdError::generic_err("Insufficient funds sent"))
-        );
-    }
+    // Prepare fund transfers
+    let mut funds_to_pool: Vec<Coin> = vec![];
+    let mut pre_messages: Vec<CosmosMsg> = vec![];
+
+    prepare_token_transfer(
+        &params.token0,
+        params.amount0_desired,
+        &info,
+        &pool_addr,
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
+    prepare_token_transfer(
+        &params.token1,
+        params.amount1_desired,
+        &info,
+        &pool_addr,
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
 
     // Get Slot0
     let slot0: PoolState = deps
@@ -276,6 +347,33 @@ fn execute_mint_position(
         params.amount0_desired,
         params.amount1_desired,
     )?;
+
+    // Slippage check: verify actual token amounts meet minimums
+    let (amount0_actual, amount1_actual) = compute_token_amounts(
+        slot0.sqrt_price,
+        sqrt_price_lower,
+        sqrt_price_upper,
+        liquidity.u128(),
+        slot0.tick,
+        params.tick_lower,
+        params.tick_upper,
+    );
+    if amount0_actual < params.amount0_min {
+        return Err(ContractError::Slippage {
+            reason: format!(
+                "amount0 {} below minimum {}",
+                amount0_actual, params.amount0_min
+            ),
+        });
+    }
+    if amount1_actual < params.amount1_min {
+        return Err(ContractError::Slippage {
+            reason: format!(
+                "amount1 {} below minimum {}",
+                amount1_actual, params.amount1_min
+            ),
+        });
+    }
 
     // Call Pool Mint
     let pool_mint_msg = PoolExecuteMsg::Mint {
@@ -320,8 +418,12 @@ fn execute_mint_position(
         Some(metadata),
     )?;
 
+    // Order: CW20 transfers first, then pool mint last
+    let mut all_messages: Vec<CosmosMsg> = pre_messages;
+    all_messages.push(CosmosMsg::Wasm(wasm_msg));
+
     Ok(Response::new()
-        .add_message(wasm_msg)
+        .add_messages(all_messages)
         .add_attribute("action", "mint_position")
         .add_attribute("token_id", token_id)
         .add_attribute("liquidity", liquidity))
@@ -331,41 +433,37 @@ fn execute_increase_liquidity(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    params: IncreaseParams, // Changed
+    params: IncreaseParams,
 ) -> Result<Response, ContractError> {
+    validate_deadline(&env, params.deadline)?;
+    assert_owner_or_approved(deps.as_ref(), &env, &info, &params.token_id)?;
+
     let position = POSITIONS
         .load(deps.storage, &params.token_id)
         .map_err(|_| ContractError::Std(StdError::generic_err("Position not found")))?;
 
-    // Funds Check
-    let mut funds_to_pool = vec![];
-    if !params.amount0_desired.is_zero() {
-        funds_to_pool.push(Coin {
-            denom: position.token0.clone(),
-            amount: params.amount0_desired,
-        });
-    }
-    if !params.amount1_desired.is_zero() {
-        funds_to_pool.push(Coin {
-            denom: position.token1.clone(),
-            amount: params.amount1_desired,
-        });
-    }
+    // Prepare fund transfers
+    let mut funds_to_pool: Vec<Coin> = vec![];
+    let mut pre_messages: Vec<CosmosMsg> = vec![];
 
-    for req in &funds_to_pool {
-        let sent = info
-            .funds
-            .iter()
-            .find(|c| c.denom == req.denom)
-            .map(|c| c.amount)
-            .unwrap_or_default();
-        ensure!(
-            sent >= req.amount,
-            ContractError::Std(StdError::generic_err(
-                "Insufficient funds sent for increase"
-            ))
-        );
-    }
+    prepare_token_transfer(
+        &position.token0,
+        params.amount0_desired,
+        &info,
+        &position.pool_address,
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
+    prepare_token_transfer(
+        &position.token1,
+        params.amount1_desired,
+        &info,
+        &position.pool_address,
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
 
     let slot0: PoolState = deps
         .querier
@@ -382,6 +480,33 @@ fn execute_increase_liquidity(
         params.amount1_desired,
     )?;
 
+    // Slippage check
+    let (amount0_actual, amount1_actual) = compute_token_amounts(
+        slot0.sqrt_price,
+        sqrt_price_lower,
+        sqrt_price_upper,
+        liquidity.u128(),
+        slot0.tick,
+        position.tick_lower,
+        position.tick_upper,
+    );
+    if amount0_actual < params.amount0_min {
+        return Err(ContractError::Slippage {
+            reason: format!(
+                "amount0 {} below minimum {}",
+                amount0_actual, params.amount0_min
+            ),
+        });
+    }
+    if amount1_actual < params.amount1_min {
+        return Err(ContractError::Slippage {
+            reason: format!(
+                "amount1 {} below minimum {}",
+                amount1_actual, params.amount1_min
+            ),
+        });
+    }
+
     let pool_mint_msg = PoolExecuteMsg::Mint {
         recipient: env.contract.address.to_string(),
         lower_tick: position.tick_lower,
@@ -396,8 +521,12 @@ fn execute_increase_liquidity(
         funds: funds_to_pool,
     };
 
+    // Order: CW20 transfers first, then pool mint last
+    let mut all_messages: Vec<CosmosMsg> = pre_messages;
+    all_messages.push(CosmosMsg::Wasm(wasm_msg));
+
     Ok(Response::new()
-        .add_message(wasm_msg)
+        .add_messages(all_messages)
         .add_attribute("action", "increase_liquidity")
         .add_attribute("token_id", params.token_id))
 }
@@ -406,22 +535,17 @@ fn execute_decrease_liquidity(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    params: DecreaseParams, // Changed
+    params: DecreaseParams,
 ) -> Result<Response, ContractError> {
-    let base = Cw721MetadataContract::default();
-
-    let owner_res =
-        base.query_owner_of(deps.as_ref(), &env.clone(), params.token_id.clone(), false)?;
-    if info.sender.to_string() != owner_res.owner {
-        return Err(ContractError::Std(StdError::generic_err("Unauthorized")));
-    }
+    validate_deadline(&env, params.deadline)?;
+    assert_owner_or_approved(deps.as_ref(), &env, &info, &params.token_id)?;
 
     let position = POSITIONS.load(deps.storage, &params.token_id)?;
 
     let burn_msg = PoolExecuteMsg::Burn {
         lower_tick: position.tick_lower,
         upper_tick: position.tick_upper,
-        amount: params.liquidity, // Use params.liquidity
+        amount: params.liquidity,
     };
 
     let wasm_msg = WasmMsg::Execute {
@@ -442,17 +566,12 @@ fn execute_collect(
     token_id: String,
     recipient: Option<String>,
 ) -> Result<Response, ContractError> {
+    assert_owner_or_approved(deps.as_ref(), &env, &info, &token_id)?;
+
     let base = Cw721MetadataContract::default();
+    let owner_res = base.query_owner_of(deps.as_ref(), &env, token_id.clone(), false)?;
+    let dest = recipient.unwrap_or(owner_res.owner);
 
-    let owner_res = base.query_owner_of(deps.as_ref(), &env.clone(), token_id.clone(), false)?;
-    let owner = owner_res.owner;
-
-    let dest = recipient.unwrap_or(owner.clone());
-    if dest != owner && info.sender.to_string() != owner {
-        return Err(ContractError::Std(StdError::generic_err("Unauthorized")));
-    }
-
-    // Load from sidecar
     let position = POSITIONS.load(deps.storage, &token_id)?;
 
     let collect_msg = PoolExecuteMsg::Collect {
@@ -472,6 +591,56 @@ fn execute_collect(
     Ok(Response::new()
         .add_message(wasm_msg)
         .add_attribute("action", "collect"))
+}
+
+/// Compute the actual token amounts for a given liquidity, matching the pool's mint logic.
+fn compute_token_amounts(
+    sqrt_price_current: cosmwasm_std::Uint256,
+    sqrt_price_lower: cosmwasm_std::Uint256,
+    sqrt_price_upper: cosmwasm_std::Uint256,
+    liquidity: u128,
+    current_tick: i32,
+    tick_lower: i32,
+    tick_upper: i32,
+) -> (Uint128, Uint128) {
+    use std::convert::TryFrom;
+
+    let (amount0, amount1) = if current_tick < tick_lower {
+        (
+            get_amount0_delta(sqrt_price_lower, sqrt_price_upper, liquidity, true),
+            cosmwasm_std::Uint256::zero(),
+        )
+    } else if current_tick >= tick_upper {
+        (
+            cosmwasm_std::Uint256::zero(),
+            get_amount1_delta(sqrt_price_lower, sqrt_price_upper, liquidity, true),
+        )
+    } else {
+        (
+            get_amount0_delta(sqrt_price_current, sqrt_price_upper, liquidity, true),
+            get_amount1_delta(sqrt_price_lower, sqrt_price_current, liquidity, true),
+        )
+    };
+
+    (
+        Uint128::try_from(amount0).unwrap_or(Uint128::MAX),
+        Uint128::try_from(amount1).unwrap_or(Uint128::MAX),
+    )
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    let version = cw2::get_contract_version(deps.storage)?;
+    if version.contract != CONTRACT_NAME {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Cannot migrate from different contract",
+        )));
+    }
+    cw2::set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new()
+        .add_attribute("action", "migrate")
+        .add_attribute("from_version", version.version)
+        .add_attribute("to_version", CONTRACT_VERSION))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]

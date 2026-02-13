@@ -1,4 +1,5 @@
 use choice_clmm_common::pool::{FeeConfig, PoolState, TickInfo};
+use choice_clmm_common::types::AssetInfo;
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Uint128, Uint256};
 use cw_storage_plus::{Item, Map};
@@ -6,8 +7,8 @@ use cw_storage_plus::{Item, Map};
 #[cw_serde]
 pub struct PoolConfig {
     pub factory: Addr,
-    pub token0: String,
-    pub token1: String,
+    pub token0: AssetInfo,
+    pub token1: AssetInfo,
     pub tick_spacing: u32,
     pub fee_config: FeeConfig,
 }

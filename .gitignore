@@ -18,3 +18,5 @@ target/
 artifacts
 
 mainnet_deploy
+
+.claude/

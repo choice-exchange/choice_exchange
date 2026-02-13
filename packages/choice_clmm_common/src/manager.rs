@@ -2,11 +2,13 @@ use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{CustomMsg, Uint128};
 use cw721::{msg::NftExtensionMsg, state::Trait};
 
+use crate::types::AssetInfo;
+
 // The data stored on the NFT
 #[cw_serde]
 pub struct Position {
-    pub token0: String,
-    pub token1: String,
+    pub token0: AssetInfo,
+    pub token1: AssetInfo,
     pub fee: u32,
     pub tick_lower: i32,
     pub tick_upper: i32,
@@ -22,12 +24,12 @@ impl From<Position> for Vec<Trait> {
             Trait {
                 display_type: None,
                 trait_type: "Token 0".to_string(),
-                value: p.token0,
+                value: p.token0.to_string(),
             },
             Trait {
                 display_type: None,
                 trait_type: "Token 1".to_string(),
-                value: p.token1,
+                value: p.token1.to_string(),
             },
             Trait {
                 display_type: None,
@@ -57,16 +59,16 @@ impl From<Position> for Vec<Trait> {
 // This is what marketplaces actually read when they query `NftInfo`.
 impl From<Position> for NftExtensionMsg {
     fn from(p: Position) -> Self {
-        // You can even generate an SVG here like Uniswap V3 does!
-        // For now, we just output the attributes.
+        let name = format!("CLMM Position: {}/{}", p.token0, p.token1);
+        let description = format!(
+            "Liquidity Position for {}/{} (Fee: {}). Range: [{}, {}]",
+            p.token0, p.token1, p.fee, p.tick_lower, p.tick_upper
+        );
         NftExtensionMsg {
-            name: Some(format!("CLMM Position: {}/{}", p.token0, p.token1)),
-            description: Some(format!(
-                "Liquidity Position for {}/{} (Fee: {}). Range: [{}, {}]",
-                p.token0, p.token1, p.fee, p.tick_lower, p.tick_upper
-            )),
-            image: None,                // TODO: Generate SVG
-            attributes: Some(p.into()), // Uses the vec![] impl above
+            name: Some(name),
+            description: Some(description),
+            image: None,
+            attributes: Some(p.into()),
 
             // Standard defaults
             animation_url: None,
@@ -89,10 +91,10 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
     // --- CLMM Specific Logic ---
     /// Create a new Position (Mint NFT + Add Liquidity)
-    /// Funds for the pool must be sent with this message
+    /// Native funds must be sent with this message. CW20 tokens require prior approval of this contract.
     MintPosition {
-        token0: String,
-        token1: String,
+        token0: AssetInfo,
+        token1: AssetInfo,
         fee: u32,
         tick_lower: i32,
         tick_upper: i32,
@@ -204,3 +206,6 @@ pub enum QueryMsg {
         limit: Option<u32>,
     },
 }
+
+#[cw_serde]
+pub struct MigrateMsg {}

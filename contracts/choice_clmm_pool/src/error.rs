@@ -14,4 +14,19 @@ pub enum ContractError {
 
     #[error("Unauthorized")]
     Unauthorized {},
+
+    #[error("Insufficient output: expected at least {minimum}, got {actual}")]
+    InsufficientOutput { minimum: String, actual: String },
+
+    #[error("Deadline exceeded")]
+    DeadlineExceeded {},
+
+    #[error("Invalid funds: {reason}")]
+    InvalidFunds { reason: String },
+
+    #[error("Zero amount specified")]
+    ZeroAmount {},
+
+    #[error("Invalid config: {reason}")]
+    InvalidConfig { reason: String },
 }

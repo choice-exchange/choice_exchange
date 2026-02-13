@@ -184,7 +184,7 @@ mod tests {
         // --- Assert ---
         // 5. Verify the state changes
         let user_info_res: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -200,7 +200,7 @@ mod tests {
 
         // Total shares should still be zero
         let total_shares: Uint128 =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
                 .unwrap();
         assert_eq!(total_shares, Uint128::zero());
 
@@ -296,7 +296,7 @@ mod tests {
         // --- Assert ---
         // The assertions are now completely different. We check for pending deposits, not shares.
         let user2_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -314,7 +314,7 @@ mod tests {
 
         // Verify that total shares has NOT changed.
         let total_shares: Uint128 =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
                 .unwrap();
         assert_eq!(total_shares, initial_shares); // Still 100
     }
@@ -436,7 +436,7 @@ mod tests {
 
         // 6. Query User2's state to confirm the changes.
         let user2_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -453,7 +453,7 @@ mod tests {
         // 7. Verify the contract's total shares have been updated correctly.
         // New total shares = 100 (from user1) + 50 (from user2) = 150
         let total_shares: Uint128 =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
                 .unwrap();
         assert_eq!(total_shares, initial_total_shares + expected_new_shares);
     }
@@ -543,7 +543,7 @@ mod tests {
         // --- Assert ---
         // 5. Verify state changes
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -560,7 +560,7 @@ mod tests {
 
         // Total shares in the contract should be zero
         let total_shares: Uint128 =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
                 .unwrap();
         assert_eq!(total_shares, Uint128::zero());
 
@@ -800,7 +800,7 @@ mod tests {
         let expected_remaining_shares = Uint128::new(60);
 
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -817,7 +817,7 @@ mod tests {
 
         // Total shares should now be 60
         let total_shares: Uint128 =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
                 .unwrap();
         assert_eq!(total_shares, expected_remaining_shares);
 
@@ -927,13 +927,13 @@ mod tests {
         // This is the balance of the CW20 asset after the swap
         let cw20_balance_after_swap = Uint128::new(8);
         deps.querier.with_token_balance(
-            &token_a_addr.to_string(),
-            &vault_addr.to_string(),
+            token_a_addr.as_ref(),
+            vault_addr.as_ref(),
             cw20_balance_after_swap,
         );
         deps.querier.with_token_balance(
-            &lp_token_addr.to_string(),
-            &vault_addr.to_string(),
+            lp_token_addr.as_ref(),
+            vault_addr.as_ref(),
             Uint128::new(9),
         );
 
@@ -1035,7 +1035,7 @@ mod tests {
             .contains(&cosmwasm_std::attr("lp_tokens_staked", "9")));
 
         let compounding_info: CompoundingInfo =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::CompoundingInfo {}).unwrap())
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::CompoundingInfo {}).unwrap())
                 .unwrap();
         assert_eq!(
             compounding_info.last_reward_amount_compounded,
@@ -1132,8 +1132,8 @@ mod tests {
 
         // We only need to mock the LP token balance, as it's a CW20
         deps.querier.with_token_balance(
-            &lp_token_addr.to_string(),
-            &vault_addr.to_string(),
+            lp_token_addr.as_ref(),
+            vault_addr.as_ref(),
             Uint128::new(9),
         );
 
@@ -1499,7 +1499,7 @@ mod tests {
 
         // 1. Verify the Fee Message
         let expected_fee_amount = Uint128::new(100); // 10% of 1000
-        let fee_message = res.messages.get(0).unwrap().clone().msg;
+        let fee_message = res.messages.first().unwrap().clone().msg;
         let expected_fee_message = CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
             to_address: fee_recipient_addr.to_string(),
             amount: vec![cosmwasm_std::Coin {
@@ -1667,7 +1667,7 @@ mod tests {
 
         // --- Assert 1: Proposal is stored correctly ---
         let config: Config =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
         assert_eq!(config.owner, owner_addr); // Owner has not changed yet
         assert_eq!(config.proposed_owner, Some(new_owner_addr.clone()));
 
@@ -1678,7 +1678,7 @@ mod tests {
 
         // --- Assert 2: Ownership has been transferred ---
         let config: Config =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
         assert_eq!(config.owner, new_owner_addr); // Owner is now the new owner
         assert_eq!(config.proposed_owner, None); // Proposal has been cleared
 
@@ -1831,7 +1831,7 @@ mod tests {
 
         // --- Assert 2: Proposal is cleared ---
         let config: Config =
-            from_json(&query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
         assert_eq!(config.proposed_owner, None);
 
         // --- Act 3: Proposed owner can no longer accept ---
@@ -1962,7 +1962,7 @@ mod tests {
         // --- Assert ---
         // 1a. Check state: User should have a pending deposit, but no shares.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -2070,7 +2070,7 @@ mod tests {
 
         // --- Assert ---
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -2166,7 +2166,7 @@ mod tests {
         // --- Assert ---
         // 2a. Check state: User's shares should be gone.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -2277,20 +2277,20 @@ mod tests {
         );
         // 2. After harvest, vault has 1000 SAI
         deps.querier.with_token_balance(
-            &reward_token_sai.to_string(),
-            &vault_addr.to_string(),
+            reward_token_sai.as_ref(),
+            vault_addr.as_ref(),
             Uint128::new(1000),
         );
         // 3. After first swap (SAI->SHROOM), vault has 500 SHROOM
         deps.querier.with_token_balance(
-            &intermediate_token_shroom.to_string(),
-            &vault_addr.to_string(),
+            intermediate_token_shroom.as_ref(),
+            vault_addr.as_ref(),
             Uint128::new(500),
         );
         // 4. After second swap (50% of SHROOM -> INJ), vault has 250 SHROOM and 100 INJ
         deps.querier.with_token_balance(
-            &intermediate_token_shroom.to_string(),
-            &vault_addr.to_string(),
+            intermediate_token_shroom.as_ref(),
+            vault_addr.as_ref(),
             Uint128::new(250),
         );
         deps.querier.with_balance(&[(
@@ -2299,8 +2299,8 @@ mod tests {
         )]);
         // 5. After providing liquidity, vault receives 150 new LP tokens
         deps.querier.with_token_balance(
-            &final_lp_token.to_string(),
-            &vault_addr.to_string(),
+            final_lp_token.as_ref(),
+            vault_addr.as_ref(),
             Uint128::new(150),
         );
 
@@ -2492,7 +2492,7 @@ mod tests {
         // --- Assert ---
         // 5. Verify the state changes are correct and isolated.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -2651,7 +2651,7 @@ mod tests {
 
         // --- Assert ---
         let user1_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -2746,7 +2746,7 @@ mod tests {
 
         // --- Assert ---
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -3002,7 +3002,7 @@ mod tests {
 
         // --- Assert ---
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -3018,7 +3018,7 @@ mod tests {
         assert_eq!(user_info.pending_deposit, Uint128::new(150));
 
         let total_pending: Uint128 = from_json(
-            &query(deps.as_ref(), mock_env(), QueryMsg::TotalPendingDeposits {}).unwrap(),
+            query(deps.as_ref(), mock_env(), QueryMsg::TotalPendingDeposits {}).unwrap(),
         )
         .unwrap();
         assert_eq!(total_pending, Uint128::new(150));
@@ -3245,7 +3245,7 @@ mod tests {
         // --- Assert ---
         // 5. Verify the user's state has been updated correctly.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -3381,7 +3381,7 @@ mod tests {
         // --- Assert ---
         // 5. Verify the user's state.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -3498,7 +3498,7 @@ mod tests {
         // --- Verification ---
         // 5. Verify that the user's state and global state were NOT changed.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -3622,7 +3622,7 @@ mod tests {
 
         // 6. Verify state changes.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {
@@ -3742,7 +3742,7 @@ mod tests {
         // --- Assert ---
         // 5. Verify the user's state.
         let user_info: UserInfoResponse = from_json(
-            &query(
+            query(
                 deps.as_ref(),
                 mock_env(),
                 QueryMsg::UserInfo {

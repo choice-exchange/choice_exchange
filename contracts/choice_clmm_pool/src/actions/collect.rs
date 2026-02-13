@@ -1,6 +1,6 @@
 use crate::error::ContractError;
 use crate::state::{POOL_CONFIG, POSITIONS};
-use cosmwasm_std::{BankMsg, Coin, DepsMut, MessageInfo, Response, Uint128};
+use cosmwasm_std::{CosmosMsg, DepsMut, MessageInfo, Response, Uint128};
 // We define MaxUint128 to represent "Collect All"
 const MAX_UINT128: Uint128 = Uint128::new(u128::MAX);
 
@@ -45,25 +45,13 @@ pub fn execute_collect(
     position.tokens_owed_1 -= amount1;
     POSITIONS.save(deps.storage, key, &position)?;
 
-    // 3. Send Tokens
-    let mut messages = vec![];
+    // 3. Send Tokens (handles both native and CW20)
+    let mut messages: Vec<CosmosMsg> = vec![];
     if !amount0.is_zero() {
-        messages.push(BankMsg::Send {
-            to_address: recipient.clone(),
-            amount: vec![Coin {
-                denom: config.token0,
-                amount: amount0,
-            }],
-        });
+        messages.push(config.token0.transfer_msg(&recipient, amount0)?);
     }
     if !amount1.is_zero() {
-        messages.push(BankMsg::Send {
-            to_address: recipient,
-            amount: vec![Coin {
-                denom: config.token1,
-                amount: amount1,
-            }],
-        });
+        messages.push(config.token1.transfer_msg(&recipient, amount1)?);
     }
 
     Ok(Response::new()

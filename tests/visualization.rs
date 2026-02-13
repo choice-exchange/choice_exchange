@@ -13,10 +13,17 @@ use choice_clmm_common::manager::{
     ExecuteMsg as ManagerExecuteMsg, InstantiateMsg as ManagerInstantiateMsg,
 };
 use choice_clmm_common::pool::{QueryMsg as PoolQueryMsg, TickInfo};
+use choice_clmm_common::types::AssetInfo;
 
 // --- CONSTANTS & TYPES ---
 const ATOM: &str = "atom";
 const USDT: &str = "usdt";
+
+fn native(denom: &str) -> AssetInfo {
+    AssetInfo::NativeToken {
+        denom: denom.to_string(),
+    }
+}
 
 struct LiquidityBin {
     lower_tick: i32,
@@ -28,7 +35,7 @@ struct LiquidityBin {
 
 fn get_wasm_byte_code(filename: &str) -> Vec<u8> {
     let path = format!("../../artifacts/{}", filename);
-    std::fs::read(&path).expect(&format!("Could not read wasm file at {}", path))
+    std::fs::read(&path).unwrap_or_else(|_| panic!("Could not read wasm file at {}", path))
 }
 
 struct VizEnv {
@@ -128,8 +135,8 @@ fn create_pool(env: &VizEnv, fee: u32) -> String {
     wasm.execute(
         &env.factory,
         &FactoryExecuteMsg::CreatePool {
-            token_a: ATOM.to_string(),
-            token_b: USDT.to_string(),
+            token_a: native(ATOM),
+            token_b: native(USDT),
             fee,
             init_sqrt_price: init_price,
         },
@@ -141,8 +148,8 @@ fn create_pool(env: &VizEnv, fee: u32) -> String {
     wasm.query(
         &env.factory,
         &FactoryQueryMsg::GetPool {
-            token_a: ATOM.to_string(),
-            token_b: USDT.to_string(),
+            token_a: native(ATOM),
+            token_b: native(USDT),
             fee,
         },
     )
@@ -175,8 +182,8 @@ fn mint(env: &VizEnv, lower: i32, upper: i32, amount: u128) {
     wasm.execute(
         &env.manager,
         &ManagerExecuteMsg::MintPosition {
-            token0: ATOM.to_string(),
-            token1: USDT.to_string(),
+            token0: native(ATOM),
+            token1: native(USDT),
             fee: 500,
             tick_lower: lower,
             tick_upper: upper,

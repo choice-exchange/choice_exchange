@@ -3,6 +3,9 @@ use cosmwasm_schema::cw_serde;
 // Use U256 for high precision price math (Q64.96)
 // We use Uint256 from cosmwasm_std
 use cosmwasm_std::{Binary, Uint128, Uint256};
+use cw20::Cw20ReceiveMsg;
+
+use crate::types::AssetInfo;
 
 // Slot0 contains the frequently accessed "hot" variables
 // to save gas (only 1 read needed for price/tick)
@@ -23,8 +26,8 @@ pub struct FeeConfig {
 
 #[cw_serde]
 pub struct InstantiateMsg {
-    pub token0: String,
-    pub token1: String,
+    pub token0: AssetInfo,
+    pub token1: AssetInfo,
     pub tick_spacing: u32,
     pub fee_config: FeeConfig,
     // Initial Price is mandatory in CLMM to determine the starting tick
@@ -56,12 +59,18 @@ pub enum ExecuteMsg {
         amount_specified: Uint128,
         sqrt_price_limit_x96: Uint256,
     },
+    /// User-friendly swap: send one pool token, receive the other.
+    /// Direction is inferred from attached funds (native) or Receive hook (CW20).
+    SwapExactInput {
+        minimum_amount_out: Uint128,
+        recipient: Option<String>,
+        deadline: Option<u64>,
+    },
     Burn {
         lower_tick: i32,
         upper_tick: i32,
         amount: Uint128, // Liquidity (L) to burn
     },
-    // New: Claim Fees + Principal
     Collect {
         recipient: String,
         lower_tick: i32,
@@ -69,12 +78,41 @@ pub enum ExecuteMsg {
         amount0_requested: Uint128,
         amount1_requested: Uint128,
     },
-    Snapshot {},
+    /// CW20 hook entry point for SwapExactInput via CW20 Send
+    Receive(Cw20ReceiveMsg),
 }
+
+/// CW20 hook messages for the pool contract
+#[cw_serde]
+pub enum Cw20HookMsg {
+    /// Swap via CW20 Send hook
+    SwapExactInput {
+        minimum_amount_out: Uint128,
+        recipient: Option<String>,
+        deadline: Option<u64>,
+    },
+}
+
+#[cw_serde]
+pub struct MigrateMsg {}
 
 #[cw_serde]
 pub enum QueryMsg {
     GetConfig {},
     GetSlot0 {},
-    GetTickInfo { tick: i32 },
+    GetTickInfo {
+        tick: i32,
+    },
+    /// Simulate a swap and return expected output without executing.
+    Quote {
+        token_in: AssetInfo,
+        amount_in: Uint128,
+    },
+}
+
+#[cw_serde]
+pub struct QuoteResponse {
+    pub amount_out: Uint128,
+    pub amount_in_consumed: Uint128,
+    pub fee_amount: Uint128,
 }

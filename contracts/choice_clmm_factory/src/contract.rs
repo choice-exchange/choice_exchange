@@ -5,14 +5,16 @@ use cosmwasm_std::{
     SubMsg, Uint256, WasmMsg,
 };
 use cw_storage_plus::Item;
-use sha2::{Digest, Sha256}; // Import sha2 for hashing
+use sha2::{Digest, Sha256};
 
 use crate::state::{Config, CONFIG, FEE_TIERS, POOLS};
 
-// Import the Pool Message definitions
-// NOTE: Make sure these imports match your actual package structure
-use choice_clmm_common::factory::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use choice_clmm_common::factory::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
 use choice_clmm_common::pool::{FeeConfig, InstantiateMsg as PoolInstantiateMsg};
+use choice_clmm_common::types::AssetInfo;
+
+const CONTRACT_NAME: &str = "crates.io:choice-clmm-factory";
+const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -21,6 +23,8 @@ pub fn instantiate(
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> StdResult<Response> {
+    cw2::set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
     let config = Config {
         owner: info.sender.clone(),
         pool_code_id: msg.pool_code_id,
@@ -46,7 +50,6 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> Result<Response, StdError> {
     match msg {
-        // Updated signature to include init_sqrt_price
         ExecuteMsg::CreatePool {
             token_a,
             token_b,
@@ -58,18 +61,40 @@ pub fn execute(
             if info.sender != config.owner {
                 return Err(StdError::generic_err("Unauthorized"));
             }
+            if fee == 0 || fee >= 1_000_000 {
+                return Err(StdError::generic_err("Fee must be > 0 and < 1_000_000"));
+            }
+            if tick_spacing == 0 {
+                return Err(StdError::generic_err("Tick spacing must be > 0"));
+            }
             FEE_TIERS.save(deps.storage, fee, &tick_spacing)?;
             Ok(Response::new().add_attribute("action", "enable_fee_amount"))
         }
-        ExecuteMsg::UpdateConfig { .. } => unimplemented!(),
+        ExecuteMsg::UpdateConfig {
+            owner,
+            pool_code_id,
+        } => {
+            let mut config = CONFIG.load(deps.storage)?;
+            if info.sender != config.owner {
+                return Err(StdError::generic_err("Unauthorized"));
+            }
+            if let Some(new_owner) = owner {
+                config.owner = deps.api.addr_validate(&new_owner)?;
+            }
+            if let Some(new_code_id) = pool_code_id {
+                config.pool_code_id = new_code_id;
+            }
+            CONFIG.save(deps.storage, &config)?;
+            Ok(Response::new().add_attribute("action", "update_config"))
+        }
     }
 }
 
 fn execute_create_pool(
     deps: DepsMut,
     _env: Env,
-    token_a: String,
-    token_b: String,
+    token_a: AssetInfo,
+    token_b: AssetInfo,
     fee: u32,
     init_sqrt_price: Uint256,
 ) -> Result<Response, StdError> {
@@ -77,15 +102,27 @@ fn execute_create_pool(
     if token_a == token_b {
         return Err(StdError::generic_err("Same tokens"));
     }
+
+    // Validate CW20 addresses
+    if let AssetInfo::Token { contract_addr } = &token_a {
+        deps.api.addr_validate(contract_addr)?;
+    }
+    if let AssetInfo::Token { contract_addr } = &token_b {
+        deps.api.addr_validate(contract_addr)?;
+    }
+
     let (token0, token1) = if token_a < token_b {
-        (token_a.clone(), token_b.clone())
+        (token_a, token_b)
     } else {
-        (token_b.clone(), token_a.clone())
+        (token_b, token_a)
     };
+
+    let key0 = token0.key().to_string();
+    let key1 = token1.key().to_string();
 
     // 2. Check existence
     let config = CONFIG.load(deps.storage)?;
-    if POOLS.has(deps.storage, (&token0, &token1, fee)) {
+    if POOLS.has(deps.storage, (&key0, &key1, fee)) {
         return Err(StdError::generic_err("Pool already exists"));
     }
 
@@ -93,23 +130,22 @@ fn execute_create_pool(
         .load(deps.storage, fee)
         .map_err(|_| StdError::generic_err("Fee tier not supported"))?;
 
-    // 3. Generate Salt (FIXED: Using Sha256 crate)
+    // 3. Generate Salt
     let mut hasher = Sha256::new();
-    hasher.update(token0.as_bytes());
-    hasher.update(token1.as_bytes());
-    hasher.update(fee.to_le_bytes()); // fee is u32
+    hasher.update(key0.as_bytes());
+    hasher.update(key1.as_bytes());
+    hasher.update(fee.to_le_bytes());
     let salt = Binary::from(hasher.finalize().to_vec());
 
     // 4. Create FeeConfig
-    // We Map the simple fee (u32) to the complex FeeConfig required by the pool
     let fee_config = FeeConfig {
         base_fee_ppm: fee,
-        max_fee_ppm: fee * 2,       // Default logic: max is double base
-        volatility_multiplier: 100, // Default: 1.0x (no boost initially)
-        ema_halflife_seconds: 600,  // Default: 10 minutes
+        max_fee_ppm: fee * 2,
+        volatility_multiplier: 100,
+        ema_halflife_seconds: 600,
     };
 
-    // 5. Prepare Instantiate Msg (FIXED: Matching your struct definition)
+    // 5. Prepare Instantiate Msg
     let pool_instantiate_msg = PoolInstantiateMsg {
         token0: token0.clone(),
         token1: token1.clone(),
@@ -130,13 +166,13 @@ fn execute_create_pool(
 
     let sub_msg = SubMsg::reply_on_success(wasm_msg, 1);
 
-    TMP_POOL_INFO.save(deps.storage, &(token0.clone(), token1.clone(), fee))?;
+    TMP_POOL_INFO.save(deps.storage, &(key0.clone(), key1.clone(), fee))?;
 
     Ok(Response::new()
         .add_submessage(sub_msg)
         .add_attribute("action", "create_pool")
-        .add_attribute("token0", token0)
-        .add_attribute("token1", token1)
+        .add_attribute("token0", token0.to_string())
+        .add_attribute("token1", token1.to_string())
         .add_attribute("fee", fee.to_string()))
 }
 
@@ -147,7 +183,6 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> StdResult<Response> {
     if msg.id == 1 {
         let res = msg.result.into_result().map_err(StdError::generic_err)?;
 
-        // Find the address. In Wasmd 0.29+, standard event is "instantiate" -> "_contract_address"
         let address_str = res
             .events
             .iter()
@@ -170,6 +205,21 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> StdResult<Response> {
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response> {
+    let version = cw2::get_contract_version(deps.storage)?;
+    if version.contract != CONTRACT_NAME {
+        return Err(StdError::generic_err(
+            "Cannot migrate from different contract",
+        ));
+    }
+    cw2::set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new()
+        .add_attribute("action", "migrate")
+        .add_attribute("from_version", version.version)
+        .add_attribute("to_version", CONTRACT_VERSION))
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetPool {
@@ -183,7 +233,9 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 (token_b, token_a)
             };
 
-            let pool_address = POOLS.load(deps.storage, (&token0, &token1, fee))?;
+            let key0 = token0.key().to_string();
+            let key1 = token1.key().to_string();
+            let pool_address = POOLS.load(deps.storage, (&key0, &key1, fee))?;
 
             to_json_binary(&pool_address)
         }

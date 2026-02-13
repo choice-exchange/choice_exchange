@@ -15,4 +15,10 @@ pub enum ContractError {
 
     #[error("Invalid trait: {trait_name}")]
     InvalidTrait { trait_name: String },
+
+    #[error("Deadline exceeded")]
+    DeadlineExceeded {},
+
+    #[error("Slippage: {reason}")]
+    Slippage { reason: String },
 }

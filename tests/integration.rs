@@ -15,15 +15,22 @@ use choice_clmm_common::manager::{
     QueryMsg as ManagerQueryMsg,
 };
 use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, PoolState, QueryMsg as PoolQueryMsg};
+use choice_clmm_common::types::AssetInfo;
 
 use cw721::msg::OwnerOfResponse;
 
 const ATOM: &str = "atom";
 const USDT: &str = "usdt";
 
+fn native(denom: &str) -> AssetInfo {
+    AssetInfo::NativeToken {
+        denom: denom.to_string(),
+    }
+}
+
 fn get_wasm_byte_code(filename: &str) -> Vec<u8> {
     let path = format!("../../artifacts/{}", filename);
-    std::fs::read(&path).expect(&format!("Could not read wasm file at {}", path))
+    std::fs::read(&path).unwrap_or_else(|_| panic!("Could not read wasm file at {}", path))
 }
 
 pub struct TestEnv {
@@ -136,8 +143,8 @@ fn setup_pool_with_liquidity(env: &TestEnv, wasm: &Wasm<InjectiveTestApp>) -> (S
     // 1. Create Pool
     let init_price = Uint256::from(79228162514264337593543950336u128); // Price = 1.0
     let create_pool_msg = FactoryExecuteMsg::CreatePool {
-        token_a: ATOM.to_string(),
-        token_b: USDT.to_string(),
+        token_a: native(ATOM),
+        token_b: native(USDT),
         fee: 500,
         init_sqrt_price: init_price,
     };
@@ -148,8 +155,8 @@ fn setup_pool_with_liquidity(env: &TestEnv, wasm: &Wasm<InjectiveTestApp>) -> (S
         .query(
             &env.factory_addr,
             &FactoryQueryMsg::GetPool {
-                token_a: ATOM.to_string(),
-                token_b: USDT.to_string(),
+                token_a: native(ATOM),
+                token_b: native(USDT),
                 fee: 500,
             },
         )
@@ -158,8 +165,8 @@ fn setup_pool_with_liquidity(env: &TestEnv, wasm: &Wasm<InjectiveTestApp>) -> (S
     // 2. Mint Position (Range -100 to 100)
     let amount = Uint128::new(1_000_000_000); // 1000 Tokens
     let mint_msg = ManagerExecuteMsg::MintPosition {
-        token0: ATOM.to_string(),
-        token1: USDT.to_string(),
+        token0: native(ATOM),
+        token1: native(USDT),
         fee: 500,
         tick_lower: -100,
         tick_upper: 100,
@@ -200,8 +207,8 @@ fn test_e2e_create_pool_and_mint_position() {
     let init_price = Uint256::from(79228162514264337593543950336u128);
 
     let create_pool_msg = FactoryExecuteMsg::CreatePool {
-        token_a: ATOM.to_string(),
-        token_b: USDT.to_string(),
+        token_a: native(ATOM),
+        token_b: native(USDT),
         fee: 500, // 0.05%
         init_sqrt_price: init_price,
     };
@@ -214,8 +221,8 @@ fn test_e2e_create_pool_and_mint_position() {
         .query(
             &env.factory_addr,
             &FactoryQueryMsg::GetPool {
-                token_a: ATOM.to_string(),
-                token_b: USDT.to_string(),
+                token_a: native(ATOM),
+                token_b: native(USDT),
                 fee: 500,
             },
         )
@@ -229,8 +236,8 @@ fn test_e2e_create_pool_and_mint_position() {
     let amount_desired = Uint128::new(1_000_000);
 
     let mint_msg = ManagerExecuteMsg::MintPosition {
-        token0: ATOM.to_string(),
-        token1: USDT.to_string(),
+        token0: native(ATOM),
+        token1: native(USDT),
         fee: 500,
         tick_lower: -100,
         tick_upper: 100,
@@ -239,7 +246,7 @@ fn test_e2e_create_pool_and_mint_position() {
         amount0_min: Uint128::zero(),
         amount1_min: Uint128::zero(),
         recipient: None,
-        deadline: 1234567890,
+        deadline: 9999999999,
     };
 
     let funds = vec![
@@ -577,8 +584,8 @@ fn test_range_crossing_and_activation() {
     let funds = vec![Coin::new(limit_amount.u128(), USDT)];
 
     let mint_msg = ManagerExecuteMsg::MintPosition {
-        token0: ATOM.to_string(),
-        token1: USDT.to_string(),
+        token0: native(ATOM),
+        token1: native(USDT),
         fee: 500,
         tick_lower: -2000,
         tick_upper: -1000,
@@ -776,8 +783,8 @@ fn test_overlapping_liquidity_math() {
     ];
 
     let mint_msg = ManagerExecuteMsg::MintPosition {
-        token0: ATOM.to_string(),
-        token1: USDT.to_string(),
+        token0: native(ATOM),
+        token1: native(USDT),
         fee: 500,
         tick_lower: 0,
         tick_upper: 200,

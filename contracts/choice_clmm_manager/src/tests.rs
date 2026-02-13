@@ -1,10 +1,12 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::contract::{execute, instantiate, query};
     use crate::state::POSITIONS;
     use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
     use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, QueryMsg};
     use choice_clmm_common::pool::{PoolState, QueryMsg as PoolQueryMsg};
+    use choice_clmm_common::types::AssetInfo;
     use cosmwasm_std::testing::{
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
     };
@@ -13,6 +15,12 @@ mod tests {
         QueryRequest, SystemError, SystemResult, Uint128, Uint256, WasmQuery,
     };
     use cw721::msg::OwnerOfResponse;
+
+    fn native(denom: &str) -> AssetInfo {
+        AssetInfo::NativeToken {
+            denom: denom.to_string(),
+        }
+    }
 
     // --- 1. MOCK QUERIER SETUP ---
 
@@ -140,8 +148,8 @@ mod tests {
 
         // 2. Mint Position
         let mint_msg = ExecuteMsg::MintPosition {
-            token0: "ATOM".to_string(),
-            token1: "OSMO".to_string(),
+            token0: native("ATOM"),
+            token1: native("OSMO"),
             fee: 500,
             tick_lower: -100,
             tick_upper: 100,
@@ -150,7 +158,7 @@ mod tests {
             amount0_min: Uint128::zero(),
             amount1_min: Uint128::zero(),
             recipient: None,
-            deadline: 1234567890,
+            deadline: 9999999999,
         };
 
         // Style: Explicit Coins with Uint128
@@ -212,8 +220,8 @@ mod tests {
 
         // Mint ID #1 to "user"
         let mint_msg = ExecuteMsg::MintPosition {
-            token0: "ATOM".to_string(),
-            token1: "OSMO".to_string(),
+            token0: native("ATOM"),
+            token1: native("OSMO"),
             fee: 500,
             tick_lower: -100,
             tick_upper: 100,
@@ -252,7 +260,7 @@ mod tests {
 
         let hack_info = message_info(&hacker, &[]);
         let err = execute(deps.as_mut(), mock_env(), hack_info, hack_msg.clone()).unwrap_err();
-        assert_eq!(err.to_string(), "Generic error: Unauthorized");
+        assert_eq!(err.to_string(), "Unauthorized");
 
         // Test 2: Owner succeeds
         let owner_info = message_info(&user, &[]);
@@ -299,8 +307,8 @@ mod tests {
             mock_env(),
             mint_info,
             ExecuteMsg::MintPosition {
-                token0: "ATOM".to_string(),
-                token1: "OSMO".to_string(),
+                token0: native("ATOM"),
+                token1: native("OSMO"),
                 fee: 500,
                 tick_lower: -100,
                 tick_upper: 100,

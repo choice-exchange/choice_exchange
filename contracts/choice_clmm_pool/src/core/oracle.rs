@@ -62,8 +62,13 @@ pub fn update_oracle(
     ORACLE.save(storage, &oracle)
 }
 
+/// If oracle data is older than this, fall back to base fee only.
+/// Prevents stale EMA from producing unreliable dynamic fees.
+const MAX_ORACLE_AGE_SECONDS: u64 = 3600; // 1 hour
+
 /// Calculates the fee based on volatility (Deviation from EMA).
 /// Fee = Base + ( |Price - EMA| / EMA ) * Multiplier
+/// Falls back to base_fee_ppm if oracle data is stale.
 pub fn get_dynamic_fee(
     storage: &dyn Storage,
     _env: &Env,
@@ -71,6 +76,12 @@ pub fn get_dynamic_fee(
 ) -> StdResult<u32> {
     let oracle = ORACLE.load(storage)?;
     let config = POOL_CONFIG.load(storage)?;
+
+    // Staleness guard: if oracle hasn't been updated recently, use base fee only
+    let now = _env.block.time.seconds();
+    if now > oracle.last_block_time + MAX_ORACLE_AGE_SECONDS {
+        return Ok(config.fee_config.base_fee_ppm);
+    }
 
     let ema = oracle.price_ema_x96;
 

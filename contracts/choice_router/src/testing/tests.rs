@@ -30,7 +30,7 @@ fn proper_initialization() {
 
     // it worked, let's query the state
     let config: ConfigResponse =
-        from_json(&query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
     assert_eq!(
         deps.api.addr_make("choicefactory").to_string(),
         config.choice_factory.as_str()
@@ -537,7 +537,7 @@ fn query_buy_with_routes() {
     );
 
     let res: SimulateSwapOperationsResponse =
-        from_json(&query(deps.as_ref(), mock_env(), msg).unwrap()).unwrap();
+        from_json(query(deps.as_ref(), mock_env(), msg).unwrap()).unwrap();
     assert_eq!(
         res,
         SimulateSwapOperationsResponse {
@@ -630,7 +630,7 @@ fn query_reverse_routes_with_from_native() {
     );
 
     let res: SimulateSwapOperationsResponse =
-        from_json(&query(deps.as_ref(), mock_env(), msg).unwrap()).unwrap();
+        from_json(query(deps.as_ref(), mock_env(), msg).unwrap()).unwrap();
 
     assert_eq!(
         res,
@@ -772,7 +772,7 @@ fn query_reverse_routes_with_to_native() {
     );
 
     let res: SimulateSwapOperationsResponse =
-        from_json(&query(deps.as_ref(), mock_env(), msg).unwrap()).unwrap();
+        from_json(query(deps.as_ref(), mock_env(), msg).unwrap()).unwrap();
 
     assert_eq!(
         res,

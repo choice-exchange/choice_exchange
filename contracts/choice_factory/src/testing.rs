@@ -139,7 +139,7 @@ fn create_pair() {
         .with_choice_factory(&[], &[("uusd".to_string(), 6u8)]);
 
     deps.querier.with_token_factory_denom_create_fee(&[(
-        &"inj",
+        "inj",
         Uint128::from(1_000_000_000_000_000_000u128),
     )]);
 
@@ -165,7 +165,7 @@ fn create_pair() {
     let env = mock_env();
     let info = message_info(
         &deps.api.addr_make("addr0000"),
-        &vec![Coin {
+        &[Coin {
             denom: "inj".to_string(),
             amount: Uint128::from(1_000_000_000_000_000_000u128),
         }],
@@ -252,7 +252,7 @@ fn create_pair_native_token_and_ibc_token() {
     );
 
     deps.querier.with_token_factory_denom_create_fee(&[(
-        &"inj",
+        "inj",
         Uint128::from(1_000_000_000_000_000_000u128),
     )]);
 
@@ -278,7 +278,7 @@ fn create_pair_native_token_and_ibc_token() {
     let env = mock_env();
     let info = message_info(
         &mock_api.addr_make("addr0000"),
-        &vec![Coin {
+        &[Coin {
             denom: "inj".to_string(),
             amount: Uint128::from(1_000_000_000_000_000_000u128),
         }],
@@ -454,16 +454,16 @@ fn reply_only_create_pair() {
             &Config {
                 owner: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("owner0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("owner0000").as_ref())
                     .unwrap(),
                 pair_code_id: 321u64,
                 burn_address: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("burnaddr0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("burnaddr0000").as_ref())
                     .unwrap(),
                 fee_wallet_address: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("feeaddr0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("feeaddr0000").as_ref())
                     .unwrap(),
                 proposed_owner: None,
             },
@@ -592,16 +592,16 @@ fn reply_create_pair_with_provide() {
             &Config {
                 owner: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("owner0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("owner0000").as_ref())
                     .unwrap(),
                 pair_code_id: 321u64,
                 burn_address: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("burnaddr0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("burnaddr0000").as_ref())
                     .unwrap(),
                 fee_wallet_address: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("feeaddr0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("feeaddr0000").as_ref())
                     .unwrap(),
                 proposed_owner: None,
             },
@@ -994,16 +994,16 @@ fn test_execute_add_native_token_decimals_factory() {
             &Config {
                 owner: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("owner0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("owner0000").as_ref())
                     .unwrap(),
                 pair_code_id: 321u64,
                 burn_address: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("burnaddr0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("burnaddr0000").as_ref())
                     .unwrap(),
                 fee_wallet_address: deps
                     .api
-                    .addr_canonicalize(&deps.api.addr_make("feeaddr0000").to_string())
+                    .addr_canonicalize(deps.api.addr_make("feeaddr0000").as_ref())
                     .unwrap(),
                 proposed_owner: None,
             },
@@ -1040,7 +1040,7 @@ fn test_execute_add_native_token_decimals_factory() {
     assert!(res
         .attributes
         .iter()
-        .any(|attr| attr.key == "decimals" && &attr.value == &decimals.to_string()));
+        .any(|attr| attr.key == "decimals" && attr.value == decimals.to_string()));
 
     // Test case 2: Unauthorized sender (does not match owner in denom)
     let bad_info = message_info(&deps.api.addr_make("cosmwasm1otheraddr"), &[]);

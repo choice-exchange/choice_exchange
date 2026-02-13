@@ -214,7 +214,7 @@ fn provide_liquidity() {
         }],
     );
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
-    let liquidity_to_contract_msg = res.messages.get(0).expect("no message");
+    let liquidity_to_contract_msg = res.messages.first().expect("no message");
     let transfer_from_msg = res.messages.get(1).expect("no message");
     let mint_msg = res.messages.get(2).expect("no message");
 
@@ -223,7 +223,7 @@ fn provide_liquidity() {
         deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // sender
         Coin {
             // amount minted is 1_000 with the LP denom as defined in your state.
-            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
             amount: Uint128::from(1_000u128),
         },
         MOCK_CONTRACT_ADDR.to_string(), // mint_to
@@ -247,7 +247,7 @@ fn provide_liquidity() {
     let expected_mint_msg = SubMsg::new(create_mint_tokens_msg(
         deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // sender for minting
         Coin {
-            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
             amount: Uint128::from(100u128),
         },
         deps.api.addr_make("addr0000").to_string(), // mint_to recipient
@@ -265,7 +265,7 @@ fn provide_liquidity() {
                 amount: Uint128::from(200u128 + 200u128),
             },
             Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: Uint128::from(1_100u128),
             },
         ],
@@ -329,7 +329,7 @@ fn provide_liquidity() {
                 ),
             },
             Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: Uint128::from(100u128),
             },
         ],
@@ -375,7 +375,7 @@ fn provide_liquidity() {
     );
 
     let res: Response<InjectiveMsgWrapper> = execute(deps.as_mut(), env, info, msg).unwrap();
-    let transfer_from_msg = res.messages.get(0).expect("no message");
+    let transfer_from_msg = res.messages.first().expect("no message");
     let mint_msg = res.messages.get(1).expect("no message");
 
     let expected_transfer_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
@@ -394,7 +394,7 @@ fn provide_liquidity() {
     let expected_mint_msg = SubMsg::new(create_mint_tokens_msg(
         deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // sender for minting
         Coin {
-            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
             amount: Uint128::from(50u128),
         },
         deps.api.addr_make("staking0000").to_string(), // mint_to recipient
@@ -449,7 +449,7 @@ fn provide_liquidity() {
                 amount: Uint128::from(100u128 + 98u128 /* user deposit must be pre-applied */),
             },
             Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: Uint128::from(100u128),
             },
         ],
@@ -496,7 +496,7 @@ fn provide_liquidity() {
     );
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
-    let transfer_from_msg = res.messages.get(0).expect("no message");
+    let transfer_from_msg = res.messages.first().expect("no message");
     let mint_msg = res.messages.get(1).expect("no message");
 
     let expected_transfer_msg = SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
@@ -515,7 +515,7 @@ fn provide_liquidity() {
     let expected_mint_msg = SubMsg::new(create_mint_tokens_msg(
         deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // sender for minting
         Coin {
-            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
             amount: Uint128::from(98u128),
         },
         deps.api.addr_make("addr0001").to_string(), // mint_to recipient
@@ -532,7 +532,7 @@ fn withdraw_liquidity() {
         (
             &deps.api.addr_make("addr0000").to_string(),
             vec![Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: Uint128::from(100u128),
             }],
         ),
@@ -602,7 +602,7 @@ fn withdraw_liquidity() {
         &deps.api.addr_make("addr0000"),
         &[Coin {
             // pass lp denom with exact amount to burn
-            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
             amount: Uint128::from(100u128),
         }],
     );
@@ -611,7 +611,7 @@ fn withdraw_liquidity() {
 
     let log_withdrawn_share = res.attributes.get(2).expect("no log");
     let log_refund_assets = res.attributes.get(3).expect("no log");
-    let msg_refund_0 = res.messages.get(0).expect("no message");
+    let msg_refund_0 = res.messages.first().expect("no message");
     let msg_refund_1 = res.messages.get(1).expect("no message");
     let msg_burn_liquidity = res.messages.get(2).expect("no message");
 
@@ -642,7 +642,7 @@ fn withdraw_liquidity() {
     let expected_burn_msg = SubMsg::new(create_burn_tokens_msg(
         deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // sender for burning
         Coin {
-            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
             amount: Uint128::from(100u128),
         },
     ));
@@ -659,7 +659,7 @@ fn withdraw_liquidity() {
             "refund_assets",
             format!(
                 "100uusd, 100{}",
-                deps.api.addr_make("asset0000").to_string()
+                deps.api.addr_make("asset0000")
             )
         )
     );
@@ -688,7 +688,7 @@ fn withdraw_liquidity() {
     let info = message_info(
         &deps.api.addr_make("addr0000"),
         &[Coin {
-            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+            denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
             amount: Uint128::from(100u128),
         }],
     );
@@ -733,7 +733,7 @@ fn try_native_to_token() {
                 amount: collateral_pool_amount + offer_amount,
             },
             Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: total_share,
             },
         ],
@@ -790,7 +790,7 @@ fn try_native_to_token() {
         }],
     );
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
-    let msg_transfer = res.messages.get(0).expect("no message");
+    let msg_transfer = res.messages.first().expect("no message");
 
     // current price is 1.5, so expected return without spread is 1000
     // 952.380952 = 20000 - 20000 * 30000 / (30000 + 1500)
@@ -922,7 +922,7 @@ fn try_token_to_native() {
                 amount: collateral_pool_amount,
             },
             Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: total_share,
             },
         ],
@@ -998,7 +998,7 @@ fn try_token_to_native() {
     let info = message_info(&deps.api.addr_make("asset0000"), &[]);
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
-    let msg_transfer = res.messages.get(0).expect("no message");
+    let msg_transfer = res.messages.first().expect("no message");
 
     // current price is 1.5, so expected return without spread is 1000
     // 952.380952 = 20000 - 20000 * 30000 / (30000 + 1500)
@@ -1031,7 +1031,7 @@ fn try_token_to_native() {
                 amount: collateral_pool_amount,
             },
             Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: total_share,
             },
         ],
@@ -1336,7 +1336,7 @@ fn test_query_pool() {
                 amount: asset_0_amount,
             },
             Coin {
-                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR.to_string(), "lp"),
+                denom: format!("factory/{}/{}", MOCK_CONTRACT_ADDR, "lp"),
                 amount: total_share_amount,
             },
         ],
@@ -1808,7 +1808,7 @@ fn test_initial_liquidity_provide() {
     let expected_mint_msg = SubMsg::new(create_mint_tokens_msg(
         deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // sender (contract address)
         Coin {
-            denom: format!("factory/{}/lp", MOCK_CONTRACT_ADDR.to_string()),
+            denom: format!("factory/{}/lp", MOCK_CONTRACT_ADDR),
             amount: expected_provider_lp,
         },
         deps.api.addr_make("addr0000").to_string(), // mint_to (user)
@@ -1931,7 +1931,7 @@ fn test_create_pair_simulated() {
     let expected_mint_msg = SubMsg::new(create_mint_tokens_msg(
         deps.api.addr_validate(MOCK_CONTRACT_ADDR).unwrap(), // contract address
         Coin {
-            denom: format!("factory/{}/lp", MOCK_CONTRACT_ADDR.to_string()),
+            denom: format!("factory/{}/lp", MOCK_CONTRACT_ADDR),
             amount: expected_provider_lp,
         },
         creator.to_string(), // mint to creator

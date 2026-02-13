@@ -1,5 +1,7 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::{Addr, Uint256};
+use cosmwasm_std::Uint256;
+
+use crate::types::AssetInfo;
 
 #[cw_serde]
 pub struct InstantiateMsg {
@@ -10,8 +12,8 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
     /// Creates a new pool using Instantiate2 (Deterministic address)
     CreatePool {
-        token_a: String,
-        token_b: String,
+        token_a: AssetInfo,
+        token_b: AssetInfo,
         fee: u32,
         init_sqrt_price: Uint256,
     },
@@ -27,11 +29,13 @@ pub enum ExecuteMsg {
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
-    #[returns(Addr)]
+    #[returns(String)]
     GetPool {
-        token_a: String,
-        token_b: String,
+        token_a: AssetInfo,
+        token_b: AssetInfo,
         fee: u32,
     },
-    // ... other queries like GetFeeTier
 }
+
+#[cw_serde]
+pub struct MigrateMsg {}

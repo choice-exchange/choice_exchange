@@ -4,6 +4,7 @@ mod tests {
     use crate::state::{CONFIG, FEE_TIERS, POOLS};
     use choice_clmm_common::factory::{ExecuteMsg, InstantiateMsg};
     use choice_clmm_common::pool::InstantiateMsg as PoolInstantiateMsg;
+    use choice_clmm_common::types::AssetInfo;
     use cosmwasm_std::testing::{
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
     };
@@ -12,6 +13,12 @@ mod tests {
         SubMsgResult, Uint256, WasmMsg,
     };
     use sha2::{Digest, Sha256};
+
+    fn native(denom: &str) -> AssetInfo {
+        AssetInfo::NativeToken {
+            denom: denom.to_string(),
+        }
+    }
 
     // Helper to setup the factory
     fn setup_factory() -> OwnedDeps<MockStorage, MockApi, MockQuerier> {
@@ -69,8 +76,8 @@ mod tests {
 
         // 1. Same tokens
         let msg = ExecuteMsg::CreatePool {
-            token_a: "ATOM".to_string(),
-            token_b: "ATOM".to_string(),
+            token_a: native("ATOM"),
+            token_b: native("ATOM"),
             fee: 500,
             init_sqrt_price: init_price,
         };
@@ -79,8 +86,8 @@ mod tests {
 
         // 2. Invalid Fee Tier
         let msg = ExecuteMsg::CreatePool {
-            token_a: "ATOM".to_string(),
-            token_b: "OSMO".to_string(),
+            token_a: native("ATOM"),
+            token_b: native("OSMO"),
             fee: 999999, // Doesn't exist
             init_sqrt_price: init_price,
         };
@@ -97,8 +104,8 @@ mod tests {
         // We use unsorted tokens to test the sorting logic
         // "OSMO" > "ATOM", so Token0 should be ATOM, Token1 OSMO
         let msg = ExecuteMsg::CreatePool {
-            token_a: "OSMO".to_string(),
-            token_b: "ATOM".to_string(),
+            token_a: native("OSMO"),
+            token_b: native("ATOM"),
             fee: 500,
             init_sqrt_price: init_price,
         };
@@ -124,8 +131,8 @@ mod tests {
                 assert_eq!(label, "Choice CLMM Pool ATOM/OSMO");
 
                 let pool_msg: PoolInstantiateMsg = from_json(msg).unwrap();
-                assert_eq!(pool_msg.token0, "ATOM");
-                assert_eq!(pool_msg.token1, "OSMO");
+                assert_eq!(pool_msg.token0, native("ATOM"));
+                assert_eq!(pool_msg.token1, native("OSMO"));
                 assert_eq!(pool_msg.fee_config.base_fee_ppm, 500);
                 assert_eq!(pool_msg.tick_spacing, 10);
 
@@ -178,7 +185,7 @@ mod tests {
         );
 
         // 4. Verify Registry Update
-        let stored_addr = POOLS.load(&deps.storage, (&"ATOM", &"OSMO", 500)).unwrap();
+        let stored_addr = POOLS.load(&deps.storage, ("ATOM", "OSMO", 500)).unwrap();
         assert_eq!(stored_addr, Addr::unchecked(pool_addr));
 
         // 5. Verify Temp storage cleanup
@@ -193,15 +200,15 @@ mod tests {
         POOLS
             .save(
                 &mut deps.storage,
-                (&"ATOM", &"OSMO", 500),
+                ("ATOM", "OSMO", 500),
                 &Addr::unchecked("existing_pool"),
             )
             .unwrap();
 
         let info = message_info(&deps.api.addr_make("user"), &[]);
         let msg = ExecuteMsg::CreatePool {
-            token_a: "ATOM".to_string(),
-            token_b: "OSMO".to_string(),
+            token_a: native("ATOM"),
+            token_b: native("OSMO"),
             fee: 500,
             init_sqrt_price: Uint256::zero(),
         };

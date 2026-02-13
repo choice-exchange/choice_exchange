@@ -6,13 +6,16 @@ use crate::error::ContractError;
 use crate::state::{
     PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, TICKS,
 };
+use choice_clmm_common::types::AssetInfo;
 use choice_clmm_math::sqrt_price_math::{get_amount0_delta, get_amount1_delta};
 use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
-use cosmwasm_std::{ensure, DepsMut, Env, MessageInfo, Response, StdError, Uint128, Uint256};
+use cosmwasm_std::{
+    ensure, CosmosMsg, DepsMut, Env, MessageInfo, Response, StdError, Uint128, Uint256,
+};
 
 pub fn execute_mint(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     info: MessageInfo,
     recipient: String,
     lower_tick: i32,
@@ -66,23 +69,20 @@ pub fn execute_mint(
         .unwrap_or_default();
     if !tick_lower.initialized {
         tick_lower.initialized = true;
-        // Important: If tick is below current, assume all global fees happened "outside" (above) it previously?
-        // Convention:
-        // If tick <= current: fee_outside = fee_global
-        // If tick > current: fee_outside = 0
-        // This ensures that for a new range, fee_inside = global - outside_lower - outside_upper = 0
         if lower_tick <= slot0.tick {
             tick_lower.fee_growth_outside_0 = fee_g_0;
             tick_lower.fee_growth_outside_1 = fee_g_1;
         }
-        // Update bitmap
         flip_tick(deps.storage, lower_tick, spacing)?;
     }
-    tick_lower.active_positions_count += amount_liquidity;
+    tick_lower.active_positions_count = tick_lower
+        .active_positions_count
+        .checked_add(amount_liquidity)
+        .ok_or_else(|| StdError::generic_err("active_positions_count overflow on lower tick"))?;
     tick_lower.liquidity_delta = tick_lower
         .liquidity_delta
         .checked_add(amount_liquidity as i128)
-        .unwrap();
+        .ok_or_else(|| StdError::generic_err("liquidity_delta overflow on lower tick"))?;
     TICKS.save(deps.storage, lower_tick, &tick_lower)?;
 
     // --- Update Upper Tick ---
@@ -97,12 +97,14 @@ pub fn execute_mint(
         }
         flip_tick(deps.storage, upper_tick, spacing)?;
     }
-    tick_upper.active_positions_count += amount_liquidity;
-    // Upper tick crossing subtracts liquidity
+    tick_upper.active_positions_count = tick_upper
+        .active_positions_count
+        .checked_add(amount_liquidity)
+        .ok_or_else(|| StdError::generic_err("active_positions_count overflow on upper tick"))?;
     tick_upper.liquidity_delta = tick_upper
         .liquidity_delta
         .checked_sub(amount_liquidity as i128)
-        .unwrap();
+        .ok_or_else(|| StdError::generic_err("liquidity_delta overflow on upper tick"))?;
     TICKS.save(deps.storage, upper_tick, &tick_upper)?;
 
     let owner = deps.api.addr_validate(&recipient)?;
@@ -122,7 +124,7 @@ pub fn execute_mint(
         POOL_STATE.save(deps.storage, &slot0)?;
     }
 
-    // 6. Calculate Token Amounts Needed (No changes here)
+    // 6. Calculate Token Amounts Needed
     let amount0: Uint256;
     let amount1: Uint256;
 
@@ -137,47 +139,76 @@ pub fn execute_mint(
         amount1 = get_amount1_delta(sqrt_price_lower, sqrt_price_current, amount_liquidity, true);
     }
 
-    // 7. Verify Funds
+    // 7. Verify & Transfer Funds
     let amount0_u128 =
         Uint128::try_from(amount0).map_err(|_| StdError::generic_err("Amount0 too large"))?;
     let amount1_u128 =
         Uint128::try_from(amount1).map_err(|_| StdError::generic_err("Amount1 too large"))?;
 
+    let mut transfer_msgs: Vec<CosmosMsg> = vec![];
+
     if !amount0_u128.is_zero() {
-        let sent = info
-            .funds
-            .iter()
-            .find(|c| c.denom == config.token0)
-            .map(|c| c.amount)
-            .unwrap_or(Uint128::zero());
-        ensure!(
-            sent >= amount0_u128,
-            ContractError::Std(StdError::generic_err(format!(
-                "Insufficient {}. Needed: {}, Sent: {}",
-                config.token0, amount0_u128, sent
-            )))
-        );
+        verify_or_pull_funds(
+            &config.token0,
+            &info,
+            &env,
+            amount0_u128,
+            &mut transfer_msgs,
+        )?;
     }
 
     if !amount1_u128.is_zero() {
-        let sent = info
-            .funds
-            .iter()
-            .find(|c| c.denom == config.token1)
-            .map(|c| c.amount)
-            .unwrap_or(Uint128::zero());
-        ensure!(
-            sent >= amount1_u128,
-            ContractError::Std(StdError::generic_err(format!(
-                "Insufficient {}. Needed: {}, Sent: {}",
-                config.token1, amount1_u128, sent
-            )))
-        );
+        verify_or_pull_funds(
+            &config.token1,
+            &info,
+            &env,
+            amount1_u128,
+            &mut transfer_msgs,
+        )?;
     }
 
     Ok(Response::new()
+        .add_messages(transfer_msgs)
         .add_attribute("action", "mint")
         .add_attribute("liquidity_added", amount_liquidity.to_string())
         .add_attribute("amount0_consumed", amount0_u128)
         .add_attribute("amount1_consumed", amount1_u128))
+}
+
+/// For native tokens: verify info.funds contains enough.
+/// For CW20 tokens: add a TransferFrom message to pull from the sender.
+fn verify_or_pull_funds(
+    token: &AssetInfo,
+    info: &MessageInfo,
+    env: &Env,
+    amount: Uint128,
+    messages: &mut Vec<CosmosMsg>,
+) -> Result<(), ContractError> {
+    match token {
+        AssetInfo::NativeToken { denom } => {
+            let sent = info
+                .funds
+                .iter()
+                .find(|c| c.denom == *denom)
+                .map(|c| c.amount)
+                .unwrap_or(Uint128::zero());
+            ensure!(
+                sent >= amount,
+                ContractError::Std(StdError::generic_err(format!(
+                    "Insufficient {}. Needed: {}, Sent: {}",
+                    denom, amount, sent
+                )))
+            );
+        }
+        AssetInfo::Token { .. } => {
+            if let Some(msg) = token.transfer_from_msg(
+                info.sender.as_ref(),
+                env.contract.address.as_ref(),
+                amount,
+            )? {
+                messages.push(msg);
+            }
+        }
+    }
+    Ok(())
 }
