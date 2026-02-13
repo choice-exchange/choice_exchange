@@ -63,6 +63,7 @@ artifacts/                # Built WASM binaries
 ## Architecture
 
 - CLMM follows Uniswap V3: tick-based concentrated liquidity, tick bitmap for efficient traversal, "outside model" for fee accumulation
+- CLMM supports both native tokens and CW20 tokens via `AssetInfo` enum (`NativeToken { denom }` | `Token { contract_addr }`). Pools can be any combination (native/native, native/CW20, CW20/CW20). CW20 swaps work via `Receive` hook (CW20 Send) or `TransferFrom` (requires allowance)
 - Prices stored as Q64.96 fixed-point sqrt prices (`Uint256`). Ticks are `log_1.0001(price)` integers in range `[-887272, 887272]`
 - Fee growth accumulators use wrapping U256 arithmetic (intentional overflow at `U256::MAX`)
 - Dynamic fees: EMA price oracle adjusts fee between `base_fee_ppm` and `max_fee_ppm` based on volatility
@@ -73,7 +74,7 @@ artifacts/                # Built WASM binaries
 
 - `cosmwasm-std` 2.2.2, `cw-storage-plus` 2.0.0, `cw2` 2.0.0
 - `injective-cosmwasm` 0.3.4-1, `injective-math` 0.3.4-1
-- `cw721` / `cw721-base` 0.20.0
+- `cw20` 2.0.0, `cw721` / `cw721-base` 0.20.0
 - `injective-test-tube` 1.16.3-1 (tests)
 
 ## Testing

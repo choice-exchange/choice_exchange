@@ -1,6 +1,6 @@
 # Choice CLMM — Concentrated Liquidity
 
-Uniswap V3-style concentrated liquidity AMM for Injective. Three contracts plus two shared packages.
+Uniswap V3-style concentrated liquidity AMM for Injective. Three contracts plus two shared packages. Supports both native tokens and CW20 tokens via the `AssetInfo` enum.
 
 ## Contracts
 
@@ -13,7 +13,7 @@ Core pool contract. Manages tick-based liquidity, swaps, fee accounting, and a d
 **Storage (`state.rs`):**
 
 ```rust
-POOL_CONFIG: Item<PoolConfig>          // factory, token0, token1, tick_spacing, fee_config
+POOL_CONFIG: Item<PoolConfig>          // factory, token0: AssetInfo, token1: AssetInfo, tick_spacing, fee_config
 POOL_STATE: Item<PoolState>            // sqrt_price (Q96), tick, liquidity (active L)
 TICKS: Map<i32, TickInfo>              // per-tick: liquidity_delta, active_positions_count, fee_growth_outside_0/1, initialized
 POSITIONS: Map<(&str, i32, i32), PositionInfo>  // (owner, lower, upper) -> liquidity, fee checkpoints, tokens_owed
@@ -26,14 +26,15 @@ ORACLE: Item<OracleData>              // price_ema_x96, last_block_time
 **Key types (from `packages/choice_clmm_common/`):**
 
 ```rust
-PoolState { sqrt_price: Uint256, tick: i32, liquidity: u128 }
-PoolConfig { factory: Addr, token0: String, token1: String, tick_spacing: u32, fee_config: FeeConfig }
+AssetInfo::NativeToken { denom: String } | AssetInfo::Token { contract_addr: String }  // unified token type
+PoolState { sqrt_price: Uint256, tick: i32, liquidity: Uint128 }
+PoolConfig { factory: Addr, token0: AssetInfo, token1: AssetInfo, tick_spacing: u32, fee_config: FeeConfig }
 FeeConfig { base_fee_ppm: u32, max_fee_ppm: u32, volatility_multiplier: u32, ema_halflife_seconds: u64 }
 PositionInfo { liquidity: u128, fee_growth_inside_0_last: Uint256, fee_growth_inside_1_last: Uint256, tokens_owed_0: Uint128, tokens_owed_1: Uint128 }
 TickInfo { active_positions_count: u128, liquidity_delta: i128, fee_growth_outside_0: Uint256, fee_growth_outside_1: Uint256, initialized: bool }
 ```
 
-**token0 is always lexicographically smaller than token1.**
+**token0 is always ordered before token1** (NativeToken < Token; within same variant, lexicographic by key).
 
 #### Actions
 
@@ -49,7 +50,7 @@ TickInfo { active_positions_count: u128, liquidity_delta: i128, fee_growth_outsi
    - Below current tick: only token0
    - Above current tick: only token1
    - Spanning current tick: both tokens
-8. Verify sender attached sufficient funds
+8. Pull funds: native tokens verified from `info.funds`; CW20 tokens pulled via `TransferFrom` (requires prior allowance)
 
 **Swap (`actions/swap.rs`)** — Token exchange through tick ranges
 
@@ -61,7 +62,7 @@ TickInfo { active_positions_count: u128, liquidity_delta: i128, fee_growth_outsi
    - Accumulate global fee growth: `fee_amount * 2^128 / liquidity`
    - If crossing a tick: flip fee_growth_outside, apply liquidity_delta to active liquidity
 4. Save updated price, tick, liquidity
-5. Transfer tokens with refund for any excess input
+5. Transfer tokens: native input verified from `info.funds` (excess refunded); CW20 input pulled via `TransferFrom` or already held via `Receive` hook. Output sent via `BankMsg::Send` (native) or `Cw20ExecuteMsg::Transfer` (CW20)
 
 **Burn (`actions/burn.rs`)** — Remove liquidity
 
@@ -73,7 +74,7 @@ TickInfo { active_positions_count: u128, liquidity_delta: i128, fee_growth_outsi
 **Collect (`actions/collect.rs`)** — Claim tokens_owed (fees + burned principal)
 
 1. Load position
-2. Transfer requested amounts (capped at tokens_owed)
+2. Transfer requested amounts (capped at tokens_owed) via `BankMsg::Send` (native) or `Cw20ExecuteMsg::Transfer` (CW20)
 3. Decrement tokens_owed
 
 #### Core Algorithms
@@ -117,11 +118,15 @@ fee = clamp(base_fee + volatility * multiplier / ema, 0, max_fee)
 
 **Messages (`packages/choice_clmm_common/src/pool.rs`):**
 
-- `Mint { owner, lower_tick, upper_tick, liquidity_amount }` — add liquidity
-- `Swap { zero_for_one, amount_specified, sqrt_price_limit, recipient }` — swap tokens
-- `Burn { owner, lower_tick, upper_tick, liquidity_amount }` — remove liquidity
-- `Collect { owner, lower_tick, upper_tick, amount0_requested, amount1_requested }` — claim fees/principal
+- `Mint { recipient, lower_tick, upper_tick, amount, data }` — add liquidity (native funds attached; CW20 pulled via TransferFrom)
+- `Swap { recipient, zero_for_one, amount_specified, sqrt_price_limit_x96 }` — low-level swap with explicit direction
+- `SwapExactInput { minimum_amount_out, recipient, deadline }` — user-friendly swap; direction inferred from attached native funds
+- `Receive(Cw20ReceiveMsg)` — CW20 hook entry point; inner msg is `Cw20HookMsg::SwapExactInput { minimum_amount_out, recipient, deadline }`
+- `Burn { lower_tick, upper_tick, amount }` — remove liquidity
+- `Collect { recipient, lower_tick, upper_tick, amount0_requested, amount1_requested }` — claim fees/principal
 - Query `GetSlot0` — returns current sqrt_price, tick, liquidity
+- Query `GetConfig` — returns PoolConfig
+- Query `Quote { token_in: AssetInfo, amount_in }` — simulate swap, returns `{ amount_out, amount_in_consumed, fee_amount }`
 
 ---
 
@@ -149,10 +154,10 @@ TMP_INSTANTIATE_INFO: Item<TmpInstantiateInfo> // transient state for reply hand
 
 **Messages (`packages/choice_clmm_common/src/factory.rs`):**
 
-- `CreatePool { token0, token1, fee, init_sqrt_price }` — create a new pool
+- `CreatePool { token_a: AssetInfo, token_b: AssetInfo, fee, init_sqrt_price }` — create a new pool (tokens auto-sorted; CW20 addresses validated)
 - `EnableFeeAmount { fee, tick_spacing }` — add new fee tier (owner only)
-- Query `GetPool { token0, token1, fee }` — returns pool address
-- Query `GetFeeTier { fee }` — returns tick_spacing
+- `UpdateConfig { owner, pool_code_id }` — update factory config (owner only)
+- Query `GetPool { token_a: AssetInfo, token_b: AssetInfo, fee }` — returns pool address
 
 ---
 
@@ -165,16 +170,18 @@ NFT wrapper for CLMM positions. Built on `cw721-base`.
 ```rust
 CONFIG: Item<Config>                    // factory address
 TOKEN_ID_COUNTER: Item<u64>            // auto-incrementing NFT ID
-POSITIONS: Map<u64, Position>          // token_id -> Position { token0, token1, fee, tick_lower, tick_upper, pool_address }
+POSITIONS: Map<u64, Position>          // token_id -> Position { token0: AssetInfo, token1: AssetInfo, fee, tick_lower, tick_upper, pool_address }
 ```
 
 **Messages (`packages/choice_clmm_common/src/manager.rs`):**
 
-- `MintPosition { token0, token1, fee, tick_lower, tick_upper, amount0_desired, amount1_desired }` — create position NFT + mint liquidity
-- `IncreaseLiquidity { token_id, amount0_desired, amount1_desired }` — add more liquidity to existing position
-- `DecreaseLiquidity { token_id, liquidity_amount }` — remove liquidity (requires NFT ownership)
-- `Collect { token_id }` — claim accumulated fees
+- `MintPosition { token0: AssetInfo, token1: AssetInfo, fee, tick_lower, tick_upper, amount0_desired, amount1_desired, amount0_min, amount1_min, recipient, deadline }` — create position NFT + mint liquidity. Native funds attached; CW20 tokens require prior approval of the manager contract
+- `IncreaseLiquidity { token_id, amount0_desired, amount1_desired, amount0_min, amount1_min, deadline }` — add more liquidity to existing position (same funding rules)
+- `DecreaseLiquidity { token_id, liquidity, amount0_min, amount1_min, deadline }` — remove liquidity (requires NFT ownership)
+- `Collect { token_id, recipient }` — claim accumulated fees
 - `Burn { token_id }` — burn position NFT (only when liquidity = 0)
+
+**CW20 flow in manager:** For CW20 tokens, the manager uses a two-step approach: (1) `TransferFrom` to pull tokens from user to manager, (2) `IncreaseAllowance` to approve the pool, then sends `Mint` to pool. This avoids requiring users to approve both manager and pool.
 
 **Flow:** Manager queries factory for pool address, calculates liquidity from amounts using `get_liquidity_for_amounts()`, sends Mint/Burn/Collect to pool, and mints/manages the CW721 NFT.
 
@@ -218,6 +225,7 @@ Pure math — no storage, no CosmWasm deps beyond Uint types.
 
 Shared message and state types across all three CLMM contracts.
 
-- `pool.rs` — ExecuteMsg, QueryMsg, PoolState, PoolConfig, FeeConfig, PositionInfo, TickInfo, OracleData
-- `factory.rs` — ExecuteMsg, QueryMsg, Config, fee tier types
-- `manager.rs` — ExecuteMsg, QueryMsg, Position, MintPosition params
+- `types.rs` — `AssetInfo` enum (`NativeToken { denom }` | `Token { contract_addr }`) with `transfer_msg()`, `transfer_from_msg()`, `increase_allowance_msg()` helpers. Ordered: NativeToken < Token, lexicographic within variant
+- `pool.rs` — ExecuteMsg (incl. `Receive`, `SwapExactInput`), `Cw20HookMsg`, QueryMsg, PoolState, PoolConfig, FeeConfig, TickInfo, QuoteResponse
+- `factory.rs` — ExecuteMsg, QueryMsg, Config
+- `manager.rs` — ExecuteMsg, QueryMsg, Position (with `AssetInfo` token fields)
