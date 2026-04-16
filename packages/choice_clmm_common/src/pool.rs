@@ -108,6 +108,49 @@ pub enum QueryMsg {
         token_in: AssetInfo,
         amount_in: Uint128,
     },
+    /// Get position info including unclaimed fees.
+    GetPosition {
+        owner: String,
+        tick_lower: i32,
+        tick_upper: i32,
+    },
+    /// List all positions in the pool with pagination.
+    GetAllPositions {
+        start_after: Option<(String, i32, i32)>,
+        limit: Option<u32>,
+    },
+    /// Get the tick bitmap word at a given word position.
+    GetTickBitmap {
+        word_position: i16,
+    },
+    /// Get pool-level totals: active liquidity, fee growth globals, current state.
+    GetTotalLiquidity {},
+}
+
+#[cw_serde]
+pub struct PositionInfoResponse {
+    pub liquidity: Uint128,
+    pub tokens_owed_0: Uint128,
+    pub tokens_owed_1: Uint128,
+}
+
+#[cw_serde]
+pub struct AllPositionsEntry {
+    pub owner: String,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    pub liquidity: Uint128,
+    pub tokens_owed_0: Uint128,
+    pub tokens_owed_1: Uint128,
+}
+
+#[cw_serde]
+pub struct TotalLiquidityResponse {
+    pub sqrt_price: Uint256,
+    pub tick: i32,
+    pub liquidity: Uint128,
+    pub fee_growth_global_0: Uint256,
+    pub fee_growth_global_1: Uint256,
 }
 
 #[cw_serde]

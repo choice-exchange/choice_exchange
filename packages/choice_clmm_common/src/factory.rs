@@ -48,6 +48,25 @@ pub enum QueryMsg {
         start_after: Option<(String, String, u32)>,
         limit: Option<u32>,
     },
+    #[returns(ConfigResponse)]
+    GetConfig {},
+    #[returns(Vec<FeeTierEntry>)]
+    GetFeeTiers {
+        start_after: Option<u32>,
+        limit: Option<u32>,
+    },
+}
+
+#[cw_serde]
+pub struct ConfigResponse {
+    pub owner: String,
+    pub pool_code_id: u64,
+}
+
+#[cw_serde]
+pub struct FeeTierEntry {
+    pub fee: u32,
+    pub tick_spacing: u32,
 }
 
 #[cw_serde]

@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 
 use crate::state::{Config, CONFIG, FEE_TIERS, POOLS};
 
-use choice_clmm_common::factory::{ExecuteMsg, InstantiateMsg, MigrateMsg, PoolInfo, QueryMsg};
+use choice_clmm_common::factory::{
+    ConfigResponse, ExecuteMsg, FeeTierEntry, InstantiateMsg, MigrateMsg, PoolInfo, QueryMsg,
+};
 use choice_clmm_common::pool::{FeeConfig, InstantiateMsg as PoolInstantiateMsg};
 use choice_clmm_common::types::AssetInfo;
 
@@ -260,6 +262,26 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 .collect::<StdResult<_>>()?;
 
             to_json_binary(&pools)
+        }
+        QueryMsg::GetConfig {} => {
+            let config = CONFIG.load(deps.storage)?;
+            to_json_binary(&ConfigResponse {
+                owner: config.owner.to_string(),
+                pool_code_id: config.pool_code_id,
+            })
+        }
+        QueryMsg::GetFeeTiers { start_after, limit } => {
+            let limit = limit.unwrap_or(30).min(100) as usize;
+            let start = start_after.map(Bound::exclusive);
+            let tiers: Vec<FeeTierEntry> = FEE_TIERS
+                .range(deps.storage, start, None, Order::Ascending)
+                .take(limit)
+                .map(|item| {
+                    let (fee, tick_spacing) = item?;
+                    Ok(FeeTierEntry { fee, tick_spacing })
+                })
+                .collect::<StdResult<_>>()?;
+            to_json_binary(&tiers)
         }
     }
 }

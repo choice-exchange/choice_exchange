@@ -12,7 +12,9 @@ use cw721_base::traits::Cw721Execute;
 use cw721_metadata_onchain::Cw721MetadataContract;
 
 use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
-use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, MigrateMsg, Position, QueryMsg};
+use choice_clmm_common::manager::{
+    ExecuteMsg, InstantiateMsg, MigrateMsg, Position, PositionWithFeesResponse, QueryMsg,
+};
 use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, PoolState, QueryMsg as PoolQueryMsg};
 use choice_clmm_common::types::AssetInfo;
 
@@ -716,6 +718,27 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> Result<Binary, ContractErro
                 limit,
             };
             Ok(base_contract.query(deps, &env, cw721_msg)?)
+        }
+        QueryMsg::PositionWithFees { token_id } => {
+            let position = POSITIONS.load(deps.storage, &token_id)?;
+
+            // Cross-contract query to pool for unclaimed fees
+            let pool_position: choice_clmm_common::pool::PositionInfoResponse =
+                deps.querier.query_wasm_smart(
+                    position.pool_address.clone(),
+                    &PoolQueryMsg::GetPosition {
+                        owner: env.contract.address.to_string(),
+                        tick_lower: position.tick_lower,
+                        tick_upper: position.tick_upper,
+                    },
+                )?;
+
+            Ok(to_json_binary(&PositionWithFeesResponse {
+                position,
+                liquidity: pool_position.liquidity,
+                tokens_owed_0: pool_position.tokens_owed_0,
+                tokens_owed_1: pool_position.tokens_owed_1,
+            })?)
         }
     }
 }

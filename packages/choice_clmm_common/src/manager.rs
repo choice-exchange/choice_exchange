@@ -205,6 +205,18 @@ pub enum QueryMsg {
         start_after: Option<String>,
         limit: Option<u32>,
     },
+
+    /// Get position metadata and unclaimed fees in one query.
+    #[returns(PositionWithFeesResponse)]
+    PositionWithFees { token_id: String },
+}
+
+#[cw_serde]
+pub struct PositionWithFeesResponse {
+    pub position: Position,
+    pub liquidity: Uint128,
+    pub tokens_owed_0: Uint128,
+    pub tokens_owed_1: Uint128,
 }
 
 #[cw_serde]

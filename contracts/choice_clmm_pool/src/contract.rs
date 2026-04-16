@@ -1,9 +1,10 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
+    from_json, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Response, StdError,
     StdResult, Uint128,
 };
+use cw_storage_plus::Bound;
 use cw2::set_contract_version;
 use cw20::Cw20ReceiveMsg;
 
@@ -15,7 +16,10 @@ use crate::actions::swap::{
 };
 use crate::core::oracle::initialize_oracle;
 use crate::error::ContractError;
-use crate::state::{PoolConfig, POOL_CONFIG, POOL_STATE, TICKS};
+use crate::state::{
+    PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, POSITIONS,
+    TICK_BITMAP, TICKS,
+};
 use choice_clmm_common::pool::{
     Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, PoolState, QueryMsg,
 };
@@ -252,6 +256,61 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let resp = query_quote(deps, env, token_in, amount_in)
                 .map_err(|e| StdError::generic_err(e.to_string()))?;
             to_json_binary(&resp)
+        }
+        QueryMsg::GetPosition {
+            owner,
+            tick_lower,
+            tick_upper,
+        } => {
+            let owner_addr = deps.api.addr_validate(&owner)?;
+            let pos = POSITIONS
+                .may_load(deps.storage, (owner_addr.as_str(), tick_lower, tick_upper))?
+                .unwrap_or_default();
+            to_json_binary(&choice_clmm_common::pool::PositionInfoResponse {
+                liquidity: cosmwasm_std::Uint128::new(pos.liquidity),
+                tokens_owed_0: pos.tokens_owed_0,
+                tokens_owed_1: pos.tokens_owed_1,
+            })
+        }
+        QueryMsg::GetAllPositions { start_after, limit } => {
+            let limit = limit.unwrap_or(30).min(100) as usize;
+            let start = start_after
+                .as_ref()
+                .map(|(owner, tl, tu)| Bound::exclusive((owner.as_str(), *tl, *tu)));
+            let entries: Vec<choice_clmm_common::pool::AllPositionsEntry> = POSITIONS
+                .range(deps.storage, start, None, Order::Ascending)
+                .take(limit)
+                .map(|item| {
+                    let ((owner, tick_lower, tick_upper), pos) = item?;
+                    Ok(choice_clmm_common::pool::AllPositionsEntry {
+                        owner,
+                        tick_lower,
+                        tick_upper,
+                        liquidity: Uint128::new(pos.liquidity),
+                        tokens_owed_0: pos.tokens_owed_0,
+                        tokens_owed_1: pos.tokens_owed_1,
+                    })
+                })
+                .collect::<StdResult<_>>()?;
+            to_json_binary(&entries)
+        }
+        QueryMsg::GetTickBitmap { word_position } => {
+            let word = TICK_BITMAP
+                .may_load(deps.storage, word_position)?
+                .unwrap_or_default();
+            to_json_binary(&word)
+        }
+        QueryMsg::GetTotalLiquidity {} => {
+            let state = POOL_STATE.load(deps.storage)?;
+            let fg0 = FEE_GROWTH_GLOBAL_0.load(deps.storage).unwrap_or_default();
+            let fg1 = FEE_GROWTH_GLOBAL_1.load(deps.storage).unwrap_or_default();
+            to_json_binary(&choice_clmm_common::pool::TotalLiquidityResponse {
+                sqrt_price: state.sqrt_price,
+                tick: state.tick,
+                liquidity: state.liquidity,
+                fee_growth_global_0: fg0,
+                fee_growth_global_1: fg1,
+            })
         }
     }
 }

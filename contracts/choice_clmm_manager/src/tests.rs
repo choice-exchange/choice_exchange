@@ -61,6 +61,9 @@ mod tests {
                             FactoryQueryMsg::GetPool { .. } => SystemResult::Ok(
                                 ContractResult::Ok(to_json_binary(&self.pool_addr).unwrap()),
                             ),
+                            _ => SystemResult::Ok(
+                                ContractResult::Ok(to_json_binary(&"").unwrap()),
+                            ),
                         }
                     } else if contract_addr == self.pool_addr {
                         // Mock Pool Response (GetSlot0)
