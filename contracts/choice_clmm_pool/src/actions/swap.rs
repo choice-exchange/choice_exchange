@@ -264,6 +264,7 @@ fn apply_swap(
         .add_attribute("action", "swap")
         .add_attribute("amount_in", result.amount_in)
         .add_attribute("amount_out", result.amount_out)
+        .add_attribute("zero_for_one", zero_for_one.to_string())
         .add_attribute("final_price", result.sqrt_price_after.to_string())
         .add_attribute("final_tick", result.tick_after.to_string()))
 }
