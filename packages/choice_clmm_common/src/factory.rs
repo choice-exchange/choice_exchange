@@ -27,6 +27,14 @@ pub enum ExecuteMsg {
 }
 
 #[cw_serde]
+pub struct PoolInfo {
+    pub pool_address: String,
+    pub token0: String,
+    pub token1: String,
+    pub fee: u32,
+}
+
+#[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
     #[returns(String)]
@@ -34,6 +42,11 @@ pub enum QueryMsg {
         token_a: AssetInfo,
         token_b: AssetInfo,
         fee: u32,
+    },
+    #[returns(Vec<PoolInfo>)]
+    GetAllPools {
+        start_after: Option<(String, String, u32)>,
+        limit: Option<u32>,
     },
 }
 

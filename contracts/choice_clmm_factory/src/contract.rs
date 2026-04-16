@@ -1,15 +1,15 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdError, StdResult,
-    SubMsg, Uint256, WasmMsg,
+    to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply, Response, StdError,
+    StdResult, SubMsg, Uint256, WasmMsg,
 };
-use cw_storage_plus::Item;
+use cw_storage_plus::{Bound, Item};
 use sha2::{Digest, Sha256};
 
 use crate::state::{Config, CONFIG, FEE_TIERS, POOLS};
 
-use choice_clmm_common::factory::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
+use choice_clmm_common::factory::{ExecuteMsg, InstantiateMsg, MigrateMsg, PoolInfo, QueryMsg};
 use choice_clmm_common::pool::{FeeConfig, InstantiateMsg as PoolInstantiateMsg};
 use choice_clmm_common::types::AssetInfo;
 
@@ -238,6 +238,28 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let pool_address = POOLS.load(deps.storage, (&key0, &key1, fee))?;
 
             to_json_binary(&pool_address)
+        }
+        QueryMsg::GetAllPools { start_after, limit } => {
+            let limit = limit.unwrap_or(30).min(100) as usize;
+            let start = start_after
+                .as_ref()
+                .map(|(t0, t1, f)| Bound::exclusive((t0.as_str(), t1.as_str(), *f)));
+
+            let pools: Vec<PoolInfo> = POOLS
+                .range(deps.storage, start, None, Order::Ascending)
+                .take(limit)
+                .map(|item| {
+                    let ((token0, token1, fee), addr) = item?;
+                    Ok(PoolInfo {
+                        pool_address: addr.to_string(),
+                        token0,
+                        token1,
+                        fee,
+                    })
+                })
+                .collect::<StdResult<_>>()?;
+
+            to_json_binary(&pools)
         }
     }
 }
