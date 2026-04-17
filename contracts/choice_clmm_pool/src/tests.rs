@@ -141,6 +141,90 @@ mod tests {
         assert_eq!(slot0.liquidity, Uint128::from(1000u128));
     }
 
+    /// Regression: mint must refund any surplus native funds. Previously the
+    /// pool would silently absorb excess into its reserves, and coins of an
+    /// unrelated denom sent with the tx were stranded forever.
+    #[test]
+    fn mint_refunds_excess_native_funds() {
+        let mut deps = mock_dependencies();
+
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: native("peggy0xdac"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 100,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        let creator = message_info(&deps.api.addr_make("factory"), &[]);
+        instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
+
+        let user = deps.api.addr_make("user_addr");
+        let user_info = message_info(
+            &user,
+            &[
+                // Pool needs ~10 of each for L=1000 at [-200, 200]. Send 1M of
+                // each plus 500 of an unrelated denom — all three surpluses
+                // should refund.
+                Coin::new(Uint128::new(1_000_000), "inj"),
+                Coin::new(Uint128::new(1_000_000), "peggy0xdac"),
+                Coin::new(Uint128::new(500), "stranded"),
+            ],
+        );
+        let mint_msg = ExecuteMsg::Mint {
+            lower_tick: -200,
+            upper_tick: 200,
+            amount: Uint128::from(1000u128),
+        };
+        let res = execute(deps.as_mut(), mock_env(), user_info, mint_msg).unwrap();
+
+        let consumed0: Uint128 = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount0_consumed")
+            .unwrap()
+            .value
+            .parse()
+            .unwrap();
+        let consumed1: Uint128 = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount1_consumed")
+            .unwrap()
+            .value
+            .parse()
+            .unwrap();
+
+        let refund = res
+            .messages
+            .iter()
+            .find_map(|m| match &m.msg {
+                cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+                    if to_address == user.as_str() =>
+                {
+                    Some(amount.clone())
+                }
+                _ => None,
+            })
+            .expect("expected a refund BankMsg::Send");
+
+        let find = |denom: &str| {
+            refund
+                .iter()
+                .find(|c| c.denom == denom)
+                .map(|c| c.amount)
+                .unwrap_or_default()
+        };
+        assert_eq!(find("inj"), Uint128::new(1_000_000) - consumed0);
+        assert_eq!(find("peggy0xdac"), Uint128::new(1_000_000) - consumed1);
+        assert_eq!(find("stranded"), Uint128::new(500));
+    }
+
     #[test]
     fn test_mint_math_integration() {
         let mut deps = mock_dependencies();
