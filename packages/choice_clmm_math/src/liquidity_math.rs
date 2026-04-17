@@ -18,11 +18,20 @@ pub fn get_liquidity_for_amount0(
         (sqrt_ratio_bx96, sqrt_ratio_ax96)
     };
 
+    if upper == lower {
+        return Err(StdError::generic_err(
+            "get_liquidity_for_amount0: lower and upper sqrt prices are equal",
+        ));
+    }
+
     // intermediate = (lower * upper) / 2^96
-    let intermediate = mul_div(lower, upper, Q96);
+    let intermediate = mul_div(lower, upper, Q96)?;
 
     // result = amount0 * intermediate / (upper - lower)
-    let result = mul_div(amount0, intermediate, upper - lower);
+    // Round DOWN: we credit the LP with LESS liquidity than amount0 might
+    // suggest, matching V3's `getLiquidityForAmount0`. LPs can never be
+    // credited more L than the pool can back out of their deposited tokens.
+    let result = mul_div(amount0, intermediate, upper - lower)?;
 
     Uint128::try_from(result).map_err(|_| StdError::generic_err("Liquidity overflow"))
 }
@@ -41,7 +50,14 @@ pub fn get_liquidity_for_amount1(
         (sqrt_ratio_bx96, sqrt_ratio_ax96)
     };
 
-    let result = mul_div(amount1, Q96, upper - lower);
+    if upper == lower {
+        return Err(StdError::generic_err(
+            "get_liquidity_for_amount1: lower and upper sqrt prices are equal",
+        ));
+    }
+
+    // Round DOWN: same reasoning as get_liquidity_for_amount0.
+    let result = mul_div(amount1, Q96, upper - lower)?;
 
     Uint128::try_from(result).map_err(|_| StdError::generic_err("Liquidity overflow"))
 }

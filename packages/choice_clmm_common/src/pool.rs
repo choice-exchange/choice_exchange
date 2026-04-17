@@ -2,7 +2,7 @@ use cosmwasm_schema::cw_serde;
 
 // Use U256 for high precision price math (Q64.96)
 // We use Uint256 from cosmwasm_std
-use cosmwasm_std::{Binary, Uint128, Uint256};
+use cosmwasm_std::{Uint128, Uint256};
 use cw20::Cw20ReceiveMsg;
 
 use crate::types::AssetInfo;
@@ -22,6 +22,17 @@ pub struct FeeConfig {
     pub max_fee_ppm: u32,  // e.g., 10000 = 1%
     pub volatility_multiplier: u32,
     pub ema_halflife_seconds: u64,
+    /// Maximum fee change per second in ppm. The dynamic fee returned to the
+    /// swap loop is clamped to `|new_fee - prev_fee| <= value * seconds_elapsed`
+    /// — so a single-block manipulated price cannot jerk the fee to
+    /// `max_fee_ppm` for the next block's victim. A value of 0 disables the
+    /// cap (legacy behavior).
+    ///
+    /// Example: 100 ppm/sec = 600 ppm per 6-second block. To reach the 1%
+    /// max_fee from 0.3% base takes (10000 - 3000) / 100 = 70 seconds of
+    /// sustained volatility. Short enough to react to genuine volatility,
+    /// long enough to make single-block griefing unprofitable.
+    pub max_fee_change_per_second_ppm: u32,
 }
 
 #[cw_serde]
@@ -46,12 +57,18 @@ pub struct TickInfo {
 
 #[cw_serde]
 pub enum ExecuteMsg {
+    /// Mint liquidity into a position keyed by `info.sender`.
+    ///
+    /// The position is always credited to `info.sender`. This matches Uniswap V3
+    /// where pool positions are keyed by `msg.sender`; callers that want an
+    /// NFT-wrapped position must go through `choice_clmm_manager`.
+    ///
+    /// Arguments are bounded: `amount` must fit in `i128` (pool enforces this
+    /// plus a `MAX_LIQUIDITY_PER_TICK` cap).
     Mint {
-        recipient: String,
         lower_tick: i32,
         upper_tick: i32,
-        amount: Uint128, // Liquidity (L), not token amount
-        data: Option<Binary>,
+        amount: Uint128,
     },
     Swap {
         recipient: String,
@@ -125,6 +142,17 @@ pub enum QueryMsg {
     },
     /// Get pool-level totals: active liquidity, fee growth globals, current state.
     GetTotalLiquidity {},
+    /// Get the fee growth accumulated INSIDE a tick range, using the V3
+    /// "outside model". Used by the NFT manager to attribute fees to
+    /// individual NFTs that share one pool-level position.
+    ///
+    /// Errors if either `tick_lower` or `tick_upper` has not been initialized
+    /// (i.e., no position has ever referenced that tick). Callers should
+    /// only query this AFTER the pool's Mint has run for the range.
+    GetFeeGrowthInside {
+        tick_lower: i32,
+        tick_upper: i32,
+    },
 }
 
 #[cw_serde]
@@ -158,4 +186,10 @@ pub struct QuoteResponse {
     pub amount_out: Uint128,
     pub amount_in_consumed: Uint128,
     pub fee_amount: Uint128,
+}
+
+#[cw_serde]
+pub struct FeeGrowthInsideResponse {
+    pub fee_growth_inside_0_x128: Uint256,
+    pub fee_growth_inside_1_x128: Uint256,
 }

@@ -16,6 +16,7 @@ use crate::actions::swap::{
 };
 use crate::core::oracle::initialize_oracle;
 use crate::error::ContractError;
+use crate::core::ticks::get_fee_growth_inside as compute_fee_growth_inside;
 use crate::state::{
     PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, POSITIONS,
     TICK_BITMAP, TICKS,
@@ -78,6 +79,20 @@ pub fn instantiate(
             reason: "ema_halflife_seconds must be > 0".to_string(),
         });
     }
+    // `max_fee_change_per_second_ppm == 0` is allowed — disables rate limiting.
+    // Any positive value is valid; the clamp math uses `saturating_mul`/`min`
+    // so there is no upper bound to check.
+
+    // Instantiate-time sanity check on initial price: it must be within the
+    // valid sqrt_price range or the oracle's first swap will panic on a
+    // divide-by-zero or similar. `get_tick_at_sqrt_ratio` already enforces
+    // this below (returns an error out of range), but we repeat the check
+    // explicitly so the error message names the field.
+    if msg.initial_sqrt_price.is_zero() {
+        return Err(ContractError::InvalidConfig {
+            reason: "initial_sqrt_price must be > 0".to_string(),
+        });
+    }
 
     // 3. Store Configuration
     let config = PoolConfig {
@@ -128,20 +143,10 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::Mint {
-            recipient,
             lower_tick,
             upper_tick,
             amount,
-            ..
-        } => execute_mint(
-            deps,
-            env,
-            info,
-            recipient,
-            lower_tick,
-            upper_tick,
-            amount.u128(),
-        ),
+        } => execute_mint(deps, env, info, lower_tick, upper_tick, amount),
         ExecuteMsg::Swap {
             recipient,
             zero_for_one,
@@ -310,6 +315,26 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 liquidity: state.liquidity,
                 fee_growth_global_0: fg0,
                 fee_growth_global_1: fg1,
+            })
+        }
+        QueryMsg::GetFeeGrowthInside {
+            tick_lower,
+            tick_upper,
+        } => {
+            let state = POOL_STATE.load(deps.storage)?;
+            let fg0 = FEE_GROWTH_GLOBAL_0.load(deps.storage).unwrap_or_default();
+            let fg1 = FEE_GROWTH_GLOBAL_1.load(deps.storage).unwrap_or_default();
+            let (inside_0, inside_1) = compute_fee_growth_inside(
+                deps.storage,
+                tick_lower,
+                tick_upper,
+                state.tick,
+                fg0,
+                fg1,
+            )?;
+            to_json_binary(&choice_clmm_common::pool::FeeGrowthInsideResponse {
+                fee_growth_inside_0_x128: inside_0,
+                fee_growth_inside_1_x128: inside_1,
             })
         }
     }

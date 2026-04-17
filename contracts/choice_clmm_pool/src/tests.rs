@@ -36,6 +36,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -70,6 +71,7 @@ mod tests {
                 max_fee_ppm: 5000,
                 volatility_multiplier: 0,
                 ema_halflife_seconds: 0,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -97,6 +99,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -106,11 +109,9 @@ mod tests {
         // 2. Mint Liquidity
         // Range: -200 to 200. Current Tick 0 is inside.
         let mint_msg = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("user_addr").to_string(),
             lower_tick: -200,
             upper_tick: 200,
             amount: Uint128::from(1000u128),
-            data: None,
         };
 
         // --- FIX: Send funds ---
@@ -154,6 +155,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -162,11 +164,9 @@ mod tests {
 
         // Mint Scenario: Range 10 to 20 (Strictly ABOVE current price 0)
         let mint_msg = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("user").to_string(),
             lower_tick: 10,
             upper_tick: 20,
             amount: Uint128::from(1000u128),
-            data: None,
         };
 
         let user_info = message_info(
@@ -214,6 +214,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -223,11 +224,9 @@ mod tests {
         // 2. Mint Liquidity
         // Range: -200 to 200. Amount: 1,000,000
         let mint_msg = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("lp_provider").to_string(),
             lower_tick: -200,
             upper_tick: 200,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
 
         let lp_info = message_info(
@@ -323,6 +322,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -330,11 +330,9 @@ mod tests {
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
 
         let mint_msg = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("lp").to_string(),
             lower_tick: -200,
             upper_tick: 200,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
         let lp_info = message_info(
             &deps.api.addr_make("lp"),
@@ -403,6 +401,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -410,11 +409,9 @@ mod tests {
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
 
         let mint_msg = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("lp").to_string(),
             lower_tick: -200,
             upper_tick: 200,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
         let lp_info = message_info(
             &deps.api.addr_make("lp"),
@@ -467,6 +464,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -474,11 +472,9 @@ mod tests {
         instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
 
         let mint_msg = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("lp").to_string(),
             lower_tick: -200,
             upper_tick: 200,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
         let lp_info = message_info(
             &deps.api.addr_make("lp"),
@@ -551,6 +547,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -570,11 +567,9 @@ mod tests {
 
         // 2. Mint 1,000,000 Liquidity (Range -200 to 200)
         let mint_msg = ExecuteMsg::Mint {
-            recipient: lp_info.sender.to_string(), // <--- FIX: Use the actual address string
             lower_tick: -200,
             upper_tick: 200,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
         execute(deps.as_mut(), mock_env(), lp_info.clone(), mint_msg).unwrap();
 
@@ -682,6 +677,7 @@ mod tests {
                     max_fee_ppm: 100000,
                     volatility_multiplier: multiplier, // Variable
                     ema_halflife_seconds: 100,
+                max_fee_change_per_second_ppm: 0,
                 },
                 initial_sqrt_price: get_price_one(),
             };
@@ -691,11 +687,9 @@ mod tests {
 
             // 2. Mint Liquidity
             let mint_msg = ExecuteMsg::Mint {
-                recipient: deps.api.addr_make("lp").to_string(),
                 lower_tick: -2000,
                 upper_tick: 2000,
                 amount: Uint128::from(10_000_000u128),
-                data: None,
             };
             let lp_info = message_info(
                 &deps.api.addr_make("lp"),
@@ -738,7 +732,17 @@ mod tests {
                 &[Coin::new(Uint128::new(1000), "inj")],
             );
 
-            let res = execute(deps.as_mut(), env_swap, trader_info, probe_swap_msg).unwrap();
+            // Advance one second so the probe swap is a DIFFERENT block from
+            // the setup swap. Phase 4 hardening freezes the dynamic fee
+            // within a block (see oracle::update_oracle_and_fee) so that
+            // attackers cannot sandwich-tax victims in the same block by
+            // moving the price between swaps. Fees only evolve across
+            // blocks, subject to `max_fee_change_per_second_ppm`. For this
+            // test we set that cap to 0 (unlimited) so the probe's fee
+            // reflects the full raw dynamic fee at the new price.
+            let mut env_probe = env_swap.clone();
+            env_probe.block.time = env_probe.block.time.plus_seconds(1);
+            let res = execute(deps.as_mut(), env_probe, trader_info, probe_swap_msg).unwrap();
 
             // Extract amount_out
             res.attributes
@@ -803,6 +807,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 0,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(), // Tick 0
         };
@@ -820,21 +825,17 @@ mod tests {
 
         // Range A (Below)
         let mint_a = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("lp").to_string(),
             lower_tick: -200,
             upper_tick: -100,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
         execute(deps.as_mut(), mock_env(), lp_info.clone(), mint_a).unwrap();
 
         // Range B (Above)
         let mint_b = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("lp").to_string(),
             lower_tick: 100,
             upper_tick: 200,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
         execute(deps.as_mut(), mock_env(), lp_info.clone(), mint_b).unwrap();
 
@@ -894,6 +895,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 100,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -902,11 +904,9 @@ mod tests {
 
         // 1. User A Mints
         let mint_msg = ExecuteMsg::Mint {
-            recipient: deps.api.addr_make("user_a").to_string(),
             lower_tick: -100,
             upper_tick: 100,
             amount: Uint128::from(1_000_000u128),
-            data: None,
         };
         let info_a = message_info(
             &deps.api.addr_make("user_a"),
@@ -953,6 +953,7 @@ mod tests {
                 max_fee_ppm: 10000,
                 volatility_multiplier: 0,
                 ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
         };
@@ -966,7 +967,7 @@ mod tests {
             ],
         );
 
-        let lp = deps.api.addr_make("lp");
+        let _lp = deps.api.addr_make("lp");
 
         // 1. Mint Range A: [-100, 100] -> L = 10,000,000
         execute(
@@ -974,12 +975,10 @@ mod tests {
             mock_env(),
             lp_info.clone(),
             ExecuteMsg::Mint {
-                recipient: lp.to_string(),
                 lower_tick: -100,
                 upper_tick: 100,
                 amount: Uint128::from(10_000_000u128),
-                data: None,
-            },
+        },
         )
         .unwrap();
 
@@ -989,12 +988,10 @@ mod tests {
             mock_env(),
             lp_info.clone(),
             ExecuteMsg::Mint {
-                recipient: lp.to_string(),
                 lower_tick: 0,
                 upper_tick: 200,
                 amount: Uint128::from(5_000_000u128),
-                data: None,
-            },
+        },
         )
         .unwrap();
 
@@ -1047,5 +1044,685 @@ mod tests {
             Uint128::from(5_000_000u128),
             "Should have dropped Alice's liquidity (10M) after crossing 100"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2 security-fix regression tests
+    // -----------------------------------------------------------------
+
+    fn standard_pool_setup(
+        deps: &mut cosmwasm_std::OwnedDeps<
+            cosmwasm_std::MemoryStorage,
+            cosmwasm_std::testing::MockApi,
+            cosmwasm_std::testing::MockQuerier,
+        >,
+    ) {
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: native("usdt"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 100,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        let creator = message_info(&deps.api.addr_make("factory"), &[]);
+        instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
+    }
+
+    #[test]
+    fn phase2_mint_is_always_keyed_by_info_sender() {
+        // Regression for CRIT-2 (audit): pool `Mint` previously accepted a
+        // caller-chosen `recipient`, letting attackers credit or orphan
+        // liquidity on arbitrary keys. The schema removed the field entirely.
+        let mut deps = mock_dependencies();
+        standard_pool_setup(&mut deps);
+
+        let funds = vec![
+            Coin::new(Uint128::new(10_000), "inj"),
+            Coin::new(Uint128::new(10_000), "usdt"),
+        ];
+
+        // Alice and Bob mint into the same tick range.
+        let alice = deps.api.addr_make("alice");
+        let bob = deps.api.addr_make("bob");
+        let mint = ExecuteMsg::Mint {
+            lower_tick: -200,
+            upper_tick: 200,
+            amount: Uint128::from(1_000u128),
+        };
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&alice, &funds),
+            mint.clone(),
+        )
+        .unwrap();
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&bob, &funds),
+            mint,
+        )
+        .unwrap();
+
+        // Each position must exist ONLY under its own caller's key.
+        let resp_alice = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::GetPosition {
+                owner: alice.to_string(),
+                tick_lower: -200,
+                tick_upper: 200,
+            },
+        )
+        .unwrap();
+        let pos_alice: choice_clmm_common::pool::PositionInfoResponse =
+            from_json(&resp_alice).unwrap();
+        assert_eq!(pos_alice.liquidity, Uint128::from(1_000u128));
+
+        let resp_bob = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::GetPosition {
+                owner: bob.to_string(),
+                tick_lower: -200,
+                tick_upper: 200,
+            },
+        )
+        .unwrap();
+        let pos_bob: choice_clmm_common::pool::PositionInfoResponse =
+            from_json(&resp_bob).unwrap();
+        assert_eq!(pos_bob.liquidity, Uint128::from(1_000u128));
+
+        // Bob cannot burn Alice's liquidity even though they share the range.
+        let burn = ExecuteMsg::Burn {
+            lower_tick: -200,
+            upper_tick: 200,
+            amount: Uint128::from(2_000u128),
+        };
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&bob, &[]),
+            burn,
+        )
+        .unwrap_err();
+        // Bob only has 1000; trying to burn 2000 must fail per-position.
+        match err {
+            ContractError::Std(StdError::GenericErr { msg, .. }) => {
+                assert!(msg.contains("Liquidity underflow"), "got: {}", msg);
+            }
+            _ => panic!("expected Liquidity underflow, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn phase2_reject_mint_amount_above_i128_max() {
+        // Regression for CRIT-7 (audit): pre-fix, `u128 as i128` silently
+        // wrapped to a negative delta for amounts > i128::MAX and corrupted
+        // tick accounting. The fix rejects such amounts up front.
+        let mut deps = mock_dependencies();
+        standard_pool_setup(&mut deps);
+
+        let too_big = Uint128::new(u128::MAX);
+        let lp = deps.api.addr_make("lp");
+        let info = message_info(
+            &lp,
+            &[
+                Coin::new(Uint128::new(u128::MAX / 2), "inj"),
+                Coin::new(Uint128::new(u128::MAX / 2), "usdt"),
+            ],
+        );
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::Mint {
+                lower_tick: -200,
+                upper_tick: 200,
+                amount: too_big,
+            },
+        )
+        .unwrap_err();
+        match err {
+            ContractError::Std(StdError::GenericErr { msg, .. }) => {
+                assert!(msg.contains("i128::MAX"), "got: {}", msg);
+            }
+            _ => panic!("expected i128::MAX overflow error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn phase2_reject_mint_exceeding_max_liquidity_per_tick() {
+        // V3 parity: every pool enforces MAX_LIQUIDITY_PER_TICK =
+        // u128::MAX / num_ticks. Pre-fix Choice had no cap, letting a single
+        // position cause per-tick liquidity math to overflow or become
+        // non-traversable.
+        let mut deps = mock_dependencies();
+        standard_pool_setup(&mut deps);
+
+        // tick_spacing = 10, so num_ticks ~= (2 * 887270 / 10) + 1 = 177455.
+        // MAX_LIQUIDITY_PER_TICK = u128::MAX / 177455 ≈ 1.917e33.
+        // We ask for one more than that to provoke the cap check.
+        let num_ticks: u128 =
+            (((choice_clmm_math::tick_math::MAX_TICK / 10) * 2) as u128) + 1;
+        let cap = u128::MAX / num_ticks;
+        let over = cap.saturating_add(1);
+
+        let lp = deps.api.addr_make("lp_whale");
+        let info = message_info(
+            &lp,
+            &[
+                Coin::new(Uint128::new(u128::MAX / 2), "inj"),
+                Coin::new(Uint128::new(u128::MAX / 2), "usdt"),
+            ],
+        );
+
+        // `over` still fits in i128 (< i128::MAX), so we should hit the
+        // MAX_LIQUIDITY_PER_TICK check specifically, not the i128 cap.
+        assert!(over <= i128::MAX as u128);
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::Mint {
+                lower_tick: -200,
+                upper_tick: 200,
+                amount: Uint128::new(over),
+            },
+        )
+        .unwrap_err();
+        match err {
+            ContractError::Std(StdError::GenericErr { msg, .. }) => {
+                assert!(
+                    msg.contains("MAX_LIQUIDITY_PER_TICK"),
+                    "got: {}", msg
+                );
+            }
+            _ => panic!("expected MAX_LIQUIDITY_PER_TICK error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn phase2_zero_mint_amount_rejected() {
+        let mut deps = mock_dependencies();
+        standard_pool_setup(&mut deps);
+        let lp = deps.api.addr_make("lp");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&lp, &[]),
+            ExecuteMsg::Mint {
+                lower_tick: -10,
+                upper_tick: 10,
+                amount: Uint128::zero(),
+            },
+        )
+        .unwrap_err();
+        match err {
+            ContractError::Std(StdError::GenericErr { msg, .. }) => {
+                assert!(msg.contains("must be > 0"), "got: {}", msg);
+            }
+            _ => panic!("expected zero-amount rejection, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn phase2_cw20_receive_refund_on_liquidity_exhaustion() {
+        // Regression for HIGH-7 (audit): the CW20 Receive path used to
+        // silently strand unconsumed input in the pool on partial fills. The
+        // fix appends a CW20 `Transfer` back to the original sender for the
+        // delta `total_sent - amount_in`.
+        //
+        // Setup: native token0 + CW20 token1 (honors AssetInfo ordering:
+        // Native < Token). Zero pool liquidity so the swap must exit with
+        // amount_in == 0 and refund 100% of the input.
+        use crate::actions::swap::execute_swap_exact_input_cw20;
+
+        let mut deps = mock_dependencies();
+        let cw20_addr = deps.api.addr_make("cw20_usdt");
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: AssetInfo::Token {
+                contract_addr: cw20_addr.to_string(),
+            },
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 100,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        let creator = message_info(&deps.api.addr_make("factory"), &[]);
+        instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
+
+        // Trader sends CW20 token1 into the pool via Receive hook (selling
+        // token1, so `zero_for_one = false`). With zero pool liquidity the
+        // swap loop makes no progress and `amount_in` ends up at 0.
+        let trader = deps.api.addr_make("trader");
+        let sent = Uint128::new(100_000);
+        let res = execute_swap_exact_input_cw20(
+            deps.as_mut(),
+            mock_env(),
+            trader.clone(),
+            sent,
+            false, // one_for_zero: selling token1 (CW20) for token0
+            Uint128::zero(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Expect exactly one message: a CW20 Transfer refund of the full amount.
+        assert_eq!(res.messages.len(), 1, "expected one refund message");
+        let msg = &res.messages[0].msg;
+        let cosmwasm_std::CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
+            contract_addr,
+            msg: inner,
+            funds,
+        }) = msg
+        else {
+            panic!("expected WasmMsg::Execute, got {:?}", msg);
+        };
+        assert_eq!(contract_addr, &cw20_addr.to_string());
+        assert!(funds.is_empty());
+        let cw20_msg: cw20::Cw20ExecuteMsg = from_json(inner).unwrap();
+        match cw20_msg {
+            cw20::Cw20ExecuteMsg::Transfer { recipient, amount } => {
+                assert_eq!(recipient, trader.to_string());
+                assert_eq!(amount, sent);
+            }
+            other => panic!("expected CW20 Transfer refund, got {:?}", other),
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Phase 4 — dynamic fee oracle hardening regression tests
+    // ------------------------------------------------------------
+
+    /// Set up a pool whose base fee is 0 and max fee is 100_000 ppm (10%),
+    /// with the volatility multiplier high enough that `raw_dynamic_fee`
+    /// will naturally saturate at `max_fee_ppm` once the price moves.
+    /// `max_fee_change_per_second_ppm` is caller-controlled.
+    fn setup_oracle_pool(
+        deps: &mut cosmwasm_std::OwnedDeps<
+            cosmwasm_std::MemoryStorage,
+            cosmwasm_std::testing::MockApi,
+            cosmwasm_std::testing::MockQuerier,
+        >,
+        max_change_per_sec: u32,
+    ) -> cosmwasm_std::Env {
+        let env = mock_env();
+        let factory = deps.api.addr_make("factory");
+        let lp = deps.api.addr_make("lp");
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: native("usdt"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 0,
+                max_fee_ppm: 100_000, // 10%
+                volatility_multiplier: 500_000,
+                ema_halflife_seconds: 100,
+                max_fee_change_per_second_ppm: max_change_per_sec,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        instantiate(
+            deps.as_mut(),
+            env.clone(),
+            message_info(&factory, &[]),
+            msg,
+        )
+        .unwrap();
+
+        let lp_info = message_info(
+            &lp,
+            &[
+                Coin::new(Uint128::new(10_000_000_000), "inj"),
+                Coin::new(Uint128::new(10_000_000_000), "usdt"),
+            ],
+        );
+        execute(
+            deps.as_mut(),
+            env.clone(),
+            lp_info,
+            ExecuteMsg::Mint {
+                lower_tick: -2000,
+                upper_tick: 2000,
+                amount: Uint128::from(10_000_000u128),
+            },
+        )
+        .unwrap();
+        env
+    }
+
+    /// Runs a large whale swap then a probe swap `probe_delay_sec` later and
+    /// returns the probe's output and the effective fee from the response.
+    fn whale_then_probe(
+        deps: &mut cosmwasm_std::OwnedDeps<
+            cosmwasm_std::MemoryStorage,
+            cosmwasm_std::testing::MockApi,
+            cosmwasm_std::testing::MockQuerier,
+        >,
+        env_start: cosmwasm_std::Env,
+        probe_delay_sec: u64,
+    ) -> (u128, u128) {
+        // Whale moves the price.
+        let mut env_whale = env_start.clone();
+        env_whale.block.time = env_whale.block.time.plus_seconds(200);
+        let whale = deps.api.addr_make("whale");
+        let whale_info = message_info(
+            &whale,
+            &[Coin::new(Uint128::new(500_000), "inj")],
+        );
+        execute(
+            deps.as_mut(),
+            env_whale.clone(),
+            whale_info,
+            ExecuteMsg::Swap {
+                recipient: "whale".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(500_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+
+        let mut env_probe = env_whale.clone();
+        env_probe.block.time = env_probe.block.time.plus_seconds(probe_delay_sec);
+
+        let trader_info = message_info(
+            &deps.api.addr_make("trader"),
+            &[Coin::new(Uint128::new(1_000), "inj")],
+        );
+        let res = execute(
+            deps.as_mut(),
+            env_probe,
+            trader_info,
+            ExecuteMsg::Swap {
+                recipient: "trader".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(1_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+
+        let out = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount_out")
+            .unwrap()
+            .value
+            .parse::<u128>()
+            .unwrap();
+        let fee_in = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "final_price")
+            .map(|_| 0u128)
+            .unwrap_or(0);
+        let _ = fee_in;
+        // Rough fee recovery: fee = 1000 - amount_out - (amount_out's fair at 0 fee).
+        // For this regression we just return `amount_out` and let the caller compare.
+        (out, 1_000u128)
+    }
+
+    #[test]
+    fn phase4_same_block_swaps_pay_same_frozen_fee() {
+        // Sandwich-in-same-block protection: once the first swap of a block
+        // has committed a fee, subsequent swaps in the same block must pay
+        // that SAME fee. Previously the second swap re-derived the fee
+        // using post-first-swap slot0 vs. stale EMA and got slammed.
+        let mut deps = mock_dependencies();
+        // Rate limit doesn't matter here — same block freezes the fee
+        // regardless of rate.
+        let env_start = setup_oracle_pool(&mut deps, 1_000_000);
+
+        // Advance to some block time.
+        let mut env = env_start.clone();
+        env.block.time = env.block.time.plus_seconds(200);
+
+        // Attacker swap A (same block).
+        let whale_info = message_info(
+            &deps.api.addr_make("whale"),
+            &[Coin::new(Uint128::new(300_000), "inj")],
+        );
+        let res_a = execute(
+            deps.as_mut(),
+            env.clone(),
+            whale_info,
+            ExecuteMsg::Swap {
+                recipient: "whale".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(300_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+
+        // Victim swap B (SAME block).
+        let victim = message_info(
+            &deps.api.addr_make("trader"),
+            &[Coin::new(Uint128::new(1_000), "inj")],
+        );
+        let res_b = execute(
+            deps.as_mut(),
+            env.clone(),
+            victim,
+            ExecuteMsg::Swap {
+                recipient: "trader".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(1_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+
+        let fee_a = res_a
+            .attributes
+            .iter()
+            .find(|a| a.key == "fee_pips")
+            .map(|a| a.value.parse::<u128>().unwrap())
+            .unwrap_or(0);
+        let fee_b = res_b
+            .attributes
+            .iter()
+            .find(|a| a.key == "fee_pips")
+            .map(|a| a.value.parse::<u128>().unwrap())
+            .unwrap_or(0);
+        // fee_pips isn't emitted as an attribute today, but this test still
+        // asserts the outcome: same-block victim pays NO more than whale.
+        // Instead we check amount_out ratios (both are zero_for_one with same
+        // liquidity window, so proportional inputs should yield proportional
+        // outputs iff fee is constant).
+        let _ = (fee_a, fee_b);
+        let out_a = res_a
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount_out")
+            .unwrap()
+            .value
+            .parse::<u128>()
+            .unwrap();
+        let out_b = res_b
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount_out")
+            .unwrap()
+            .value
+            .parse::<u128>()
+            .unwrap();
+        // Heuristic: victim's per-token output should be similar to whale's.
+        // Under the old vulnerable behavior, victim's output was dramatically
+        // lower due to inflated fee. We use a conservative bound: victim gets
+        // at least 90% of the whale's per-token rate.
+        let whale_rate = out_a * 1000 / 300_000;
+        let victim_rate = out_b * 1000 / 1_000;
+        assert!(
+            victim_rate * 10 >= whale_rate * 9,
+            "victim swapped at far worse rate than whale in same block: \
+             whale_rate={} victim_rate={}",
+            whale_rate,
+            victim_rate,
+        );
+    }
+
+    #[test]
+    fn phase4_rate_limit_caps_cross_block_fee_rise() {
+        // Cross-block sandwich-tax protection: fee can only rise by
+        // `max_fee_change_per_second_ppm * delta` per block.
+        //
+        // With rate limit 100 ppm/sec and a 1-second block, the probe in the
+        // block following the whale must pay AT MOST base_fee + 100 ppm = 100 ppm.
+        let mut deps = mock_dependencies();
+        let env_start = setup_oracle_pool(&mut deps, 100);
+        let (out_with_limit, sent) = whale_then_probe(&mut deps, env_start, 1);
+
+        // Re-run the scenario with rate limiting DISABLED for a baseline.
+        let mut deps2 = mock_dependencies();
+        let env_start2 = setup_oracle_pool(&mut deps2, 0);
+        let (out_no_limit, _) = whale_then_probe(&mut deps2, env_start2, 1);
+
+        // With rate limiting, the probe gets MORE output (less fee taken)
+        // than without rate limiting. This is the exact behavior that
+        // defeats the cross-block sandwich-tax attack: the victim in the
+        // block after the attacker's swap cannot be slammed with a near-max
+        // fee, because the fee can only climb by `rate * delta` per block.
+        assert!(
+            out_with_limit > out_no_limit,
+            "rate limit should reduce fee, giving the probe more output: \
+             limited={} unlimited={} sent={}",
+            out_with_limit,
+            out_no_limit,
+            sent,
+        );
+    }
+
+    #[test]
+    fn phase4_rate_limit_still_allows_gradual_climb() {
+        // Given enough elapsed time (many seconds), the rate-limited fee
+        // should eventually catch up to the raw dynamic fee. This ensures
+        // the rate limit doesn't PERMANENTLY cap the fee below its natural
+        // level for sustained volatility.
+        let mut deps = mock_dependencies();
+        let env_start = setup_oracle_pool(&mut deps, 100);
+
+        // Whale manipulates.
+        let mut env_whale = env_start.clone();
+        env_whale.block.time = env_whale.block.time.plus_seconds(200);
+        let whale1 = deps.api.addr_make("whale");
+        execute(
+            deps.as_mut(),
+            env_whale.clone(),
+            message_info(&whale1, &[Coin::new(Uint128::new(500_000), "inj")]),
+            ExecuteMsg::Swap {
+                recipient: "whale".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(500_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+
+        // After 1 sec: fee capped at base + 100 ppm
+        let (out_fast, _) = whale_then_probe_from(&mut deps, &env_whale, 1);
+        // Wait much longer: fee catches up to the raw dynamic fee.
+        let mut deps2 = mock_dependencies();
+        let env_start2 = setup_oracle_pool(&mut deps2, 100);
+        let mut env_whale2 = env_start2.clone();
+        env_whale2.block.time = env_whale2.block.time.plus_seconds(200);
+        let whale2 = deps2.api.addr_make("whale");
+        execute(
+            deps2.as_mut(),
+            env_whale2.clone(),
+            message_info(&whale2, &[Coin::new(Uint128::new(500_000), "inj")]),
+            ExecuteMsg::Swap {
+                recipient: "whale".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(500_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+        let (out_slow, _) = whale_then_probe_from(&mut deps2, &env_whale2, 10_000);
+
+        // After 10k seconds, the cap (100 ppm/sec * 10000 = 1e6 ppm) exceeds
+        // the natural raw fee (capped by max_fee_ppm = 100k ppm), so fee
+        // reaches its natural level. The probe therefore pays a HIGHER fee
+        // than the 1-second probe did.
+        assert!(
+            out_slow <= out_fast,
+            "waiting longer should let the fee catch up (lower output): fast={} slow={}", out_fast, out_slow
+        );
+    }
+
+    /// Variant that takes a pre-advanced env (already at the whale's block)
+    /// and runs the probe after `probe_delay_sec` additional seconds.
+    fn whale_then_probe_from(
+        deps: &mut cosmwasm_std::OwnedDeps<
+            cosmwasm_std::MemoryStorage,
+            cosmwasm_std::testing::MockApi,
+            cosmwasm_std::testing::MockQuerier,
+        >,
+        env_whale: &cosmwasm_std::Env,
+        probe_delay_sec: u64,
+    ) -> (u128, u128) {
+        let mut env_probe = env_whale.clone();
+        env_probe.block.time = env_probe.block.time.plus_seconds(probe_delay_sec);
+        let trader_info = message_info(
+            &deps.api.addr_make("trader"),
+            &[Coin::new(Uint128::new(1_000), "inj")],
+        );
+        let res = execute(
+            deps.as_mut(),
+            env_probe,
+            trader_info,
+            ExecuteMsg::Swap {
+                recipient: "trader".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(1_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+        let out = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount_out")
+            .unwrap()
+            .value
+            .parse::<u128>()
+            .unwrap();
+        (out, 1_000u128)
+    }
+
+    #[test]
+    fn phase4_stale_oracle_falls_back_to_base_fee() {
+        // If the oracle hasn't been touched in > 1 hour, get_dynamic_fee
+        // returns base_fee_ppm. This protects quote/simulation paths from
+        // using arbitrarily-stale EMA data.
+        use crate::core::oracle::get_dynamic_fee;
+
+        let mut deps = mock_dependencies();
+        let env_start = setup_oracle_pool(&mut deps, 100);
+
+        // Fast-forward 2 hours (> MAX_ORACLE_AGE_SECONDS).
+        let mut env_later = env_start.clone();
+        env_later.block.time = env_later.block.time.plus_seconds(7200);
+
+        let fee = get_dynamic_fee(&deps.storage, &env_later, get_price_one()).unwrap();
+        // base_fee_ppm in setup_oracle_pool is 0.
+        assert_eq!(fee, 0);
     }
 }

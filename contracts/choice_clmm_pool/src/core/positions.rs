@@ -46,43 +46,64 @@ pub fn update_position(
     let fee_growth_delta_1 = fee_growth_inside_1.wrapping_sub(position.fee_growth_inside_1_last);
 
     if position.liquidity > 0 {
-        // Calculate raw token amounts
         // FullMath.mulDiv(liquidity, fee_growth_delta, Q128)
         let tokens_0 = mul_div(
             Uint256::from(position.liquidity),
             fee_growth_delta_0,
             Uint256::one() << 128u32,
-        );
+        )?;
         let tokens_1 = mul_div(
             Uint256::from(position.liquidity),
             fee_growth_delta_1,
             Uint256::one() << 128u32,
-        );
+        )?;
 
-        // Add to owed
-        position.tokens_owed_0 += Uint128::try_from(tokens_0).unwrap();
-        position.tokens_owed_1 += Uint128::try_from(tokens_1).unwrap();
+        // Saturate at u128::MAX instead of unwrapping (V3 does the same in
+        // `update()` via explicit overflow tolerance). Without saturation a
+        // position accruing > u128 of fees on one side would brick its own
+        // mint/burn/collect (update_position is always called first),
+        // permanently locking the user's principal. The user can always
+        // collect the saturated amount via `Collect`; any further accrual is
+        // socialized (effectively donated to the pool) — acceptable tradeoff
+        // vs. total lockup.
+        position.tokens_owed_0 = saturating_add_to_u128(position.tokens_owed_0, tokens_0)?;
+        position.tokens_owed_1 = saturating_add_to_u128(position.tokens_owed_1, tokens_1)?;
     }
 
     // 4. Update Position State
     position.fee_growth_inside_0_last = fee_growth_inside_0;
     position.fee_growth_inside_1_last = fee_growth_inside_1;
 
-    // Apply Liquidity Delta (Mint/Burn)
+    // Apply liquidity delta (mint/burn). Checked arithmetic throughout —
+    // `liquidity_delta` is validated by the caller to fit in i128, so
+    // `unsigned_abs()` is safe and can't panic.
     if liquidity_delta != 0 {
         if liquidity_delta > 0 {
-            position.liquidity += liquidity_delta as u128;
+            let add = liquidity_delta.unsigned_abs();
+            position.liquidity = position
+                .liquidity
+                .checked_add(add)
+                .ok_or_else(|| cosmwasm_std::StdError::generic_err("Position liquidity overflow"))?;
         } else {
-            // Safety check for underflow
-            let remove = (-liquidity_delta) as u128;
-            if remove > position.liquidity {
-                return Err(cosmwasm_std::StdError::generic_err("Liquidity underflow"));
-            }
-            position.liquidity -= remove;
+            let remove = liquidity_delta.unsigned_abs();
+            position.liquidity = position
+                .liquidity
+                .checked_sub(remove)
+                .ok_or_else(|| cosmwasm_std::StdError::generic_err("Liquidity underflow"))?;
         }
     }
 
     POSITIONS.save(storage, key, &position)?;
 
     Ok((position.tokens_owed_0, position.tokens_owed_1))
+}
+
+/// Saturating add of a Uint256 fee amount to a Uint128 running total.
+/// Returns `Uint128::MAX` if the sum would overflow u128.
+fn saturating_add_to_u128(current: Uint128, add: Uint256) -> StdResult<Uint128> {
+    let add_u128 = match Uint128::try_from(add) {
+        Ok(v) => v,
+        Err(_) => return Ok(Uint128::MAX),
+    };
+    Ok(current.checked_add(add_u128).unwrap_or(Uint128::MAX))
 }

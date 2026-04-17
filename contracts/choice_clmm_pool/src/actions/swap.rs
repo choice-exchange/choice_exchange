@@ -6,7 +6,7 @@ use cosmwasm_std::{
 };
 
 use crate::core::bitmap::next_initialized_tick_in_chunk;
-use crate::core::oracle::{get_dynamic_fee, update_oracle};
+use crate::core::oracle::{get_dynamic_fee, update_oracle_and_fee};
 use crate::error::ContractError;
 use crate::state::{
     PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, TICKS,
@@ -93,7 +93,8 @@ pub fn compute_swap(
 
         if state_liquidity > 0 && !step.fee_amount.is_zero() {
             let q128 = Uint256::one() << 128u32;
-            let fee_growth_delta = mul_div(step.fee_amount, q128, Uint256::from(state_liquidity));
+            let fee_growth_delta =
+                mul_div(step.fee_amount, q128, Uint256::from(state_liquidity))?;
 
             if zero_for_one {
                 state_fg0 = state_fg0.wrapping_add(fee_growth_delta);
@@ -119,34 +120,31 @@ pub fn compute_swap(
 
                 tick_updates.push((step_tick_next, tick_info));
 
-                if zero_for_one {
-                    if liquidity_delta >= 0 {
-                        let net_abs = liquidity_delta as u128;
-                        state_liquidity =
-                            state_liquidity.checked_sub(net_abs).ok_or_else(|| {
-                                ContractError::Std(StdError::generic_err(format!(
-                                    "L underflow: State={} Net={}",
-                                    state_liquidity, net_abs
-                                )))
-                            })?;
-                    } else {
-                        state_liquidity = state_liquidity
-                            .checked_add(liquidity_delta.unsigned_abs())
-                            .ok_or(ContractError::Std(StdError::generic_err("L overflow")))?;
-                    }
-                } else if liquidity_delta >= 0 {
-                    state_liquidity = state_liquidity
-                        .checked_add(liquidity_delta as u128)
-                        .ok_or(ContractError::Std(StdError::generic_err("L overflow")))?;
+                // Tick crossing: apply `liquidity_delta`. Direction of the
+                // swap flips the sign per V3 convention — zero_for_one moving
+                // downward crosses a tick and *removes* its upper-edge
+                // contribution (or adds its lower-edge contribution).
+                //
+                // Use `unsigned_abs()` uniformly so a misparsed `i128 as u128`
+                // cast can never silently wrap a stored-negative value.
+                let delta_abs = liquidity_delta.unsigned_abs();
+                let add_liquidity = if zero_for_one {
+                    liquidity_delta < 0
                 } else {
-                    state_liquidity = state_liquidity
-                        .checked_sub(liquidity_delta.unsigned_abs())
-                        .ok_or(ContractError::Std(StdError::generic_err(format!(
-                            "L underflow (up): State={} Net={}",
-                            state_liquidity,
-                            liquidity_delta.unsigned_abs()
-                        ))))?;
-                }
+                    liquidity_delta >= 0
+                };
+                state_liquidity = if add_liquidity {
+                    state_liquidity
+                        .checked_add(delta_abs)
+                        .ok_or(ContractError::Std(StdError::generic_err("L overflow")))?
+                } else {
+                    state_liquidity.checked_sub(delta_abs).ok_or_else(|| {
+                        ContractError::Std(StdError::generic_err(format!(
+                            "L underflow: State={} Net={}",
+                            state_liquidity, delta_abs
+                        )))
+                    })?
+                };
             }
 
             if zero_for_one {
@@ -159,9 +157,18 @@ pub fn compute_swap(
         }
     }
 
-    let amount_in = amount_specified - Uint128::try_from(state_amount_remaining).unwrap();
-    let amount_out = Uint128::try_from(state_amount_calculated).unwrap();
-    let fee_amount = Uint128::try_from(state_fee_total).unwrap();
+    // Conversions here cannot overflow in practice (amounts are bounded by
+    // input `amount_specified: Uint128`), but we surface typed errors instead
+    // of `.unwrap()` so the swap cannot panic on any input.
+    let consumed_remaining = Uint128::try_from(state_amount_remaining)
+        .map_err(|_| StdError::generic_err("swap: remaining amount exceeds u128"))?;
+    let amount_in = amount_specified.checked_sub(consumed_remaining).map_err(|_| {
+        StdError::generic_err("swap: remaining exceeds specified amount (invariant broken)")
+    })?;
+    let amount_out = Uint128::try_from(state_amount_calculated)
+        .map_err(|_| StdError::generic_err("swap: amount_out exceeds u128"))?;
+    let fee_amount = Uint128::try_from(state_fee_total)
+        .map_err(|_| StdError::generic_err("swap: fee_amount exceeds u128"))?;
 
     Ok(SwapComputation {
         amount_in,
@@ -176,20 +183,33 @@ pub fn compute_swap(
     })
 }
 
+/// How the caller delivered input to the pool.
+enum SwapInputSource<'a> {
+    /// Native coins attached to the message. Any surplus over `amount_in` is
+    /// refunded to `sender`.
+    Native(&'a [Coin]),
+    /// CW20 tokens already transferred to the pool via `Cw20ExecuteMsg::Send`
+    /// (Receive hook). `total_sent` is the full amount that arrived; if the
+    /// swap consumes less (partial fill), the delta is refunded via `Transfer`.
+    Cw20AlreadySent { total_sent: Uint128 },
+    /// CW20 via allowance — pool pulls exactly `amount_in` via `TransferFrom`.
+    Cw20Allowance,
+}
+
 /// Apply a swap computation's side effects to storage and build transfer messages.
-/// `sender` is the user who initiated the swap (for refunds/TransferFrom).
-/// `tokens_already_in_pool` indicates CW20 tokens were already sent via Receive hook.
+///
+/// Input handling: see `SwapInputSource`. Output is always a single transfer
+/// of `amount_out` to `recipient`.
 #[allow(clippy::too_many_arguments)]
 fn apply_swap(
     deps: DepsMut,
     env: &Env,
     sender: &Addr,
-    info_funds: &[Coin],
+    input_source: SwapInputSource,
     config: &PoolConfig,
     zero_for_one: bool,
     recipient: &str,
     result: &SwapComputation,
-    tokens_already_in_pool: bool,
 ) -> Result<Response, ContractError> {
     // Save tick updates
     for (tick, tick_info) in &result.tick_updates {
@@ -221,40 +241,65 @@ fn apply_swap(
         &config.token0
     };
 
-    // Handle input: verify funds / pull CW20 / skip if already in pool
-    if !tokens_already_in_pool {
-        match in_token {
-            AssetInfo::NativeToken { denom } => {
-                let sent = info_funds
-                    .iter()
-                    .find(|c| c.denom == *denom)
-                    .map(|c| c.amount)
-                    .unwrap_or_default();
+    // Handle input — reconcile what the caller delivered vs. what the swap consumed.
+    match input_source {
+        SwapInputSource::Native(info_funds) => {
+            let denom = match in_token {
+                AssetInfo::NativeToken { denom } => denom.clone(),
+                AssetInfo::Token { .. } => {
+                    return Err(ContractError::Std(StdError::generic_err(
+                        "native input source used with CW20 in-token",
+                    )));
+                }
+            };
+            let sent = info_funds
+                .iter()
+                .find(|c| c.denom == denom)
+                .map(|c| c.amount)
+                .unwrap_or_default();
 
-                if sent > result.amount_in {
-                    let refund = sent - result.amount_in;
-                    messages.push(in_token.transfer_msg(sender.as_ref(), refund)?);
-                } else {
-                    ensure!(
-                        sent == result.amount_in,
-                        ContractError::Std(StdError::generic_err("Insufficient funds"))
-                    );
-                }
+            if sent > result.amount_in {
+                let refund = sent.checked_sub(result.amount_in).map_err(|_| {
+                    StdError::generic_err("refund underflow (invariant broken)")
+                })?;
+                messages.push(in_token.transfer_msg(sender.as_ref(), refund)?);
+            } else {
+                ensure!(
+                    sent == result.amount_in,
+                    ContractError::Std(StdError::generic_err("Insufficient funds"))
+                );
             }
-            AssetInfo::Token { .. } => {
-                // Pull exact amount via TransferFrom (caller must have approved pool)
-                if let Some(msg) = in_token.transfer_from_msg(
-                    sender.as_ref(),
-                    env.contract.address.as_ref(),
-                    result.amount_in,
-                )? {
-                    messages.push(msg);
-                }
+        }
+        SwapInputSource::Cw20AlreadySent { total_sent } => {
+            // V3 parity: if the swap did not consume all attached input
+            // (partial fill due to liquidity exhaustion or price limit),
+            // return the unused CW20 amount to the original sender. Without
+            // this, the delta is silently captured by the pool and can be
+            // extracted by any later swap's rounding.
+            if total_sent < result.amount_in {
+                return Err(ContractError::Std(StdError::generic_err(
+                    "CW20 receive: consumed more than sent (invariant broken)",
+                )));
+            }
+            let refund = total_sent.checked_sub(result.amount_in).map_err(|_| {
+                StdError::generic_err("CW20 refund underflow (invariant broken)")
+            })?;
+            if !refund.is_zero() {
+                messages.push(in_token.transfer_msg(sender.as_ref(), refund)?);
+            }
+        }
+        SwapInputSource::Cw20Allowance => {
+            if let Some(msg) = in_token.transfer_from_msg(
+                sender.as_ref(),
+                env.contract.address.as_ref(),
+                result.amount_in,
+            )? {
+                messages.push(msg);
             }
         }
     }
 
-    // Handle output
+    // Handle output — always a single transfer to `recipient`.
     if !result.amount_out.is_zero() {
         messages.push(out_token.transfer_msg(recipient, result.amount_out)?);
     }
@@ -304,8 +349,9 @@ pub fn execute_swap(
     }
 
     // Oracle & Dynamic Fee
-    update_oracle(deps.storage, &env, slot0.sqrt_price)?;
-    let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
+    // change, and persists. Returns the rate-limited ppm to use for this swap.
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
 
     let result = compute_swap(
         deps.storage,
@@ -323,16 +369,26 @@ pub fn execute_swap(
 
     let sender = info.sender.clone();
     let funds = info.funds.clone();
+    // execute_swap accepts both native-with-funds and CW20-with-allowance. Pick
+    // the right source based on the in-token type.
+    let in_token = if zero_for_one {
+        &config.token0
+    } else {
+        &config.token1
+    };
+    let input_source = match in_token {
+        AssetInfo::NativeToken { .. } => SwapInputSource::Native(&funds),
+        AssetInfo::Token { .. } => SwapInputSource::Cw20Allowance,
+    };
     apply_swap(
         deps,
         &env,
         &sender,
-        &funds,
+        input_source,
         &config,
         zero_for_one,
         &recipient,
         &result,
-        false,
     )
 }
 
@@ -369,8 +425,9 @@ pub fn execute_swap_exact_input(
     let fg1 = FEE_GROWTH_GLOBAL_1.load(deps.storage).unwrap_or_default();
 
     // Oracle & Dynamic Fee
-    update_oracle(deps.storage, &env, slot0.sqrt_price)?;
-    let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
+    // change, and persists. Returns the rate-limited ppm to use for this swap.
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
 
     let result = compute_swap(
         deps.storage,
@@ -398,16 +455,17 @@ pub fn execute_swap_exact_input(
     let sender = info.sender.clone();
     let funds = info.funds.clone();
 
+    // `execute_swap_exact_input` only supports native input (direction is
+    // inferred from `info.funds`). CW20 callers use the Receive hook path.
     apply_swap(
         deps,
         &env,
         &sender,
-        &funds,
+        SwapInputSource::Native(&funds),
         &config,
         zero_for_one,
         &recipient,
         &result,
-        false,
     )
 }
 
@@ -447,8 +505,9 @@ pub fn execute_swap_exact_input_cw20(
     };
 
     // Oracle & Dynamic Fee
-    update_oracle(deps.storage, &env, slot0.sqrt_price)?;
-    let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
+    // change, and persists. Returns the rate-limited ppm to use for this swap.
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
 
     let result = compute_swap(
         deps.storage,
@@ -474,16 +533,18 @@ pub fn execute_swap_exact_input_cw20(
 
     let recipient = recipient.unwrap_or_else(|| sender.to_string());
 
+    // Tokens already in pool from the CW20 Send. If the swap partially filled
+    // (liquidity exhausted / price limit hit) and consumed less than `amount`,
+    // `apply_swap` refunds the delta via Cw20 Transfer.
     apply_swap(
         deps,
         &env,
         &sender,
-        &[],
+        SwapInputSource::Cw20AlreadySent { total_sent: amount },
         &config,
         zero_for_one,
         &recipient,
         &result,
-        true, // tokens already in pool from CW20 Send
     )
 }
 

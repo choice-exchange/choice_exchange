@@ -21,4 +21,10 @@ pub enum ContractError {
 
     #[error("Slippage: {reason}")]
     Slippage { reason: String },
+
+    #[error("Position not cleared: {field} is non-zero (burn requires zero liquidity and zero tokens_owed)")]
+    PositionNotCleared { field: String },
+
+    #[error("Invalid reply payload: {reason}")]
+    InvalidReply { reason: String },
 }

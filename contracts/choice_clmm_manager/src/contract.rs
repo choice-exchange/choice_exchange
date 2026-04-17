@@ -1,10 +1,11 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    ensure, to_json_binary, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Response,
-    StdError, Uint128, WasmMsg,
+    ensure, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, Event,
+    MessageInfo, Reply, Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
 };
 use cw2::set_contract_version;
+use std::convert::TryFrom;
 
 use cw721::msg::NftExtensionMsg;
 use cw721::traits::Cw721Query;
@@ -13,22 +14,32 @@ use cw721_metadata_onchain::Cw721MetadataContract;
 
 use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
 use choice_clmm_common::manager::{
-    ExecuteMsg, InstantiateMsg, MigrateMsg, Position, PositionWithFeesResponse, QueryMsg,
+    ExecuteMsg, InstantiateMsg, MigrateMsg, PositionWithFeesResponse, QueryMsg,
 };
-use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, PoolState, QueryMsg as PoolQueryMsg};
+use choice_clmm_common::pool::{
+    ExecuteMsg as PoolExecuteMsg, FeeGrowthInsideResponse, PoolState, QueryMsg as PoolQueryMsg,
+};
 use choice_clmm_common::types::AssetInfo;
 
+use choice_clmm_math::full_math::mul_div;
 use choice_clmm_math::liquidity_math::get_liquidity_for_amounts;
 use choice_clmm_math::sqrt_price_math::{get_amount0_delta, get_amount1_delta};
 use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::error::ContractError;
-use crate::state::{Config, CONFIG, POSITIONS, TOKEN_ID_COUNTER};
+use crate::state::{
+    next_token_id, q128, Config, PendingDecrease, PendingIncrease, PendingMint, PositionState,
+    CONFIG, PENDING_DECREASE, PENDING_INCREASE, PENDING_MINT, POSITIONS, REPLY_DECREASE_LIQUIDITY,
+    REPLY_INCREASE_LIQUIDITY, REPLY_MINT_POSITION, TOKEN_ID_COUNTER,
+};
 
 const CONTRACT_NAME: &str = "crates.io:choice-clmm-manager";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// Helper structs to fix clippy::too_many_arguments
+// =========================================================================
+// Parameter structs (keep clippy::too_many_arguments happy)
+// =========================================================================
+
 pub struct MintParams {
     pub token0: AssetInfo,
     pub token1: AssetInfo,
@@ -67,7 +78,17 @@ fn validate_deadline(env: &Env, deadline: u64) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// Check if caller is the NFT owner or an approved operator.
+// =========================================================================
+// Authorization helpers
+// =========================================================================
+
+/// Assert that `info.sender` is the NFT owner or authorized via cw721
+/// per-token approval OR cw721 operator-wide (`ApproveAll`) approval. Expired
+/// approvals are rejected.
+///
+/// Regression fixes (audit HIGH):
+///   - Include cw721 `Operator` approvals (ApproveAll), previously ignored.
+///   - Reject expired approvals by passing `include_expired = false`.
 fn assert_owner_or_approved(
     deps: Deps,
     env: &Env,
@@ -75,67 +96,40 @@ fn assert_owner_or_approved(
     token_id: &str,
 ) -> Result<(), ContractError> {
     let base = Cw721MetadataContract::default();
-    let owner_res = base.query_owner_of(deps, env, token_id.to_string(), true)?;
+
+    let owner_res = base.query_owner_of(deps, env, token_id.to_string(), false)?;
     if info.sender.to_string() == owner_res.owner {
         return Ok(());
     }
-    // Check if caller is approved for this specific token or is an operator
+
+    // Check per-token approvals (ignores expired).
     for approval in &owner_res.approvals {
         if approval.spender == info.sender {
             return Ok(());
         }
     }
-    Err(ContractError::Unauthorized {})
-}
 
-/// Build messages to transfer a token from user to pool.
-/// For native tokens: add to funds_to_pool vec and verify info.funds.
-/// For CW20 tokens: add TransferFrom(user->manager) + IncreaseAllowance(pool) messages.
-fn prepare_token_transfer(
-    token: &AssetInfo,
-    amount: Uint128,
-    info: &MessageInfo,
-    pool_addr: &str,
-    env_addr: &str,
-    funds_to_pool: &mut Vec<Coin>,
-    pre_messages: &mut Vec<CosmosMsg>,
-) -> Result<(), ContractError> {
-    if amount.is_zero() {
+    // Check ApproveAll operator approval (ignores expired).
+    let operator_res = base.query_operator(
+        deps,
+        env,
+        owner_res.owner,
+        info.sender.to_string(),
+        false,
+    );
+    if let Ok(op) = operator_res {
+        // query_operator errors if no operator is set; success means the
+        // operator exists and (since include_expired=false) is not expired.
+        let _ = op;
         return Ok(());
     }
 
-    match token {
-        AssetInfo::NativeToken { denom } => {
-            funds_to_pool.push(Coin {
-                denom: denom.clone(),
-                amount,
-            });
-            let sent = info
-                .funds
-                .iter()
-                .find(|c| c.denom == *denom)
-                .map(|c| c.amount)
-                .unwrap_or_default();
-            ensure!(
-                sent >= amount,
-                ContractError::Std(StdError::generic_err("Insufficient funds sent"))
-            );
-        }
-        AssetInfo::Token { .. } => {
-            // Pull CW20 from user to manager
-            if let Some(msg) =
-                token.transfer_from_msg(info.sender.as_ref(), env_addr, amount)?
-            {
-                pre_messages.push(msg);
-            }
-            // Approve pool to pull from manager
-            if let Some(msg) = token.increase_allowance_msg(pool_addr, amount)? {
-                pre_messages.push(msg);
-            }
-        }
-    }
-    Ok(())
+    Err(ContractError::Unauthorized {})
 }
+
+// =========================================================================
+// Entrypoints
+// =========================================================================
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -176,7 +170,6 @@ pub fn execute(
     let base_contract = Cw721MetadataContract::default();
 
     match msg {
-        // --- CUSTOM LOGIC ---
         ExecuteMsg::MintPosition {
             token0,
             token1,
@@ -253,12 +246,9 @@ pub fn execute(
             recipient,
         } => execute_collect(deps, env, info, token_id, recipient),
 
-        ExecuteMsg::Burn { token_id } => {
-            POSITIONS.remove(deps.storage, &token_id);
-            Ok(base_contract.burn_nft(deps, &env, &info, token_id)?)
-        }
+        ExecuteMsg::Burn { token_id } => execute_burn(deps, env, info, token_id),
 
-        // --- STANDARD DELEGATION ---
+        // Standard CW721 delegations
         ExecuteMsg::TransferNft {
             recipient,
             token_id,
@@ -285,6 +275,10 @@ pub fn execute(
     }
 }
 
+// =========================================================================
+// MintPosition
+// =========================================================================
+
 fn execute_mint_position(
     deps: DepsMut,
     env: Env,
@@ -293,10 +287,16 @@ fn execute_mint_position(
 ) -> Result<Response, ContractError> {
     validate_deadline(&env, params.deadline)?;
 
+    if params.tick_lower >= params.tick_upper {
+        return Err(ContractError::Std(StdError::generic_err(
+            "tick_lower must be < tick_upper",
+        )));
+    }
+
     let config = CONFIG.load(deps.storage)?;
 
     // Resolve Pool
-    let pool_addr: String = deps.querier.query_wasm_smart(
+    let pool_addr_str: String = deps.querier.query_wasm_smart(
         config.factory,
         &FactoryQueryMsg::GetPool {
             token_a: params.token0.clone(),
@@ -304,41 +304,18 @@ fn execute_mint_position(
             fee: params.fee,
         },
     )?;
+    let pool_address = deps.api.addr_validate(&pool_addr_str)?;
 
-    // Generate ID
-    let token_id_int = TOKEN_ID_COUNTER.load(deps.storage)?;
-    TOKEN_ID_COUNTER.save(deps.storage, &(token_id_int + 1))?;
-    let token_id = token_id_int.to_string();
+    // Allocate token_id.
+    let counter = TOKEN_ID_COUNTER.load(deps.storage)?;
+    let (token_id, next_counter) = next_token_id(counter);
+    TOKEN_ID_COUNTER.save(deps.storage, &next_counter)?;
 
-    // Prepare fund transfers
-    let mut funds_to_pool: Vec<Coin> = vec![];
-    let mut pre_messages: Vec<CosmosMsg> = vec![];
-
-    prepare_token_transfer(
-        &params.token0,
-        params.amount0_desired,
-        &info,
-        &pool_addr,
-        env.contract.address.as_ref(),
-        &mut funds_to_pool,
-        &mut pre_messages,
-    )?;
-    prepare_token_transfer(
-        &params.token1,
-        params.amount1_desired,
-        &info,
-        &pool_addr,
-        env.contract.address.as_ref(),
-        &mut funds_to_pool,
-        &mut pre_messages,
-    )?;
-
-    // Get Slot0
+    // Current slot0 to compute actuals.
     let slot0: PoolState = deps
         .querier
-        .query_wasm_smart(pool_addr.clone(), &PoolQueryMsg::GetSlot0 {})?;
+        .query_wasm_smart(pool_address.to_string(), &PoolQueryMsg::GetSlot0 {})?;
 
-    // Calculate Liquidity
     let sqrt_price_lower = get_sqrt_ratio_at_tick(params.tick_lower)?;
     let sqrt_price_upper = get_sqrt_ratio_at_tick(params.tick_upper)?;
 
@@ -349,8 +326,13 @@ fn execute_mint_position(
         params.amount0_desired,
         params.amount1_desired,
     )?;
+    if liquidity.is_zero() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "computed liquidity is zero — check desired amounts vs current price",
+        )));
+    }
 
-    // Slippage check: verify actual token amounts meet minimums
+    // Compute exact amounts the pool will pull (matches the pool's own calc).
     let (amount0_actual, amount1_actual) = compute_token_amounts(
         slot0.sqrt_price,
         sqrt_price_lower,
@@ -359,7 +341,10 @@ fn execute_mint_position(
         slot0.tick,
         params.tick_lower,
         params.tick_upper,
-    );
+    )?;
+
+    // Slippage: enforce pre-submission. Pool's slot0 is committed state
+    // visible atomically to this same tx, so pre-check matches reality.
     if amount0_actual < params.amount0_min {
         return Err(ContractError::Slippage {
             reason: format!(
@@ -377,59 +362,157 @@ fn execute_mint_position(
         });
     }
 
-    // Call Pool Mint
-    let pool_mint_msg = PoolExecuteMsg::Mint {
-        recipient: env.contract.address.to_string(),
-        lower_tick: params.tick_lower,
-        upper_tick: params.tick_upper,
-        amount: liquidity,
-        data: None,
-    };
+    let recipient_str = params.recipient.unwrap_or_else(|| info.sender.to_string());
+    let recipient_addr = deps.api.addr_validate(&recipient_str)?;
 
-    let wasm_msg = WasmMsg::Execute {
-        contract_addr: pool_addr.clone(),
-        msg: to_json_binary(&pool_mint_msg)?,
-        funds: funds_to_pool,
-    };
+    // Prepare funds flow: pull exactly `amount0_actual` / `amount1_actual`.
+    //
+    // Native refunds: `info.funds` minus actuals, returned to sender in the
+    // same response.
+    // CW20: TransferFrom only the actual amount + grant pool an exact-amount
+    // allowance. No excess allowance lingers.
+    let mut pre_messages: Vec<CosmosMsg> = vec![];
+    let mut funds_to_pool: Vec<Coin> = vec![];
+    let mut native_refunds: Vec<Coin> = vec![];
 
-    // Store Logic Data
-    let position = Position {
+    prepare_token_forward(
+        &params.token0,
+        amount0_actual,
+        &info,
+        pool_address.as_ref(),
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
+    prepare_token_forward(
+        &params.token1,
+        amount1_actual,
+        &info,
+        pool_address.as_ref(),
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
+    compute_native_refunds(
+        &info,
+        &[
+            (&params.token0, amount0_actual),
+            (&params.token1, amount1_actual),
+        ],
+        &mut native_refunds,
+    )?;
+
+    // Stage pending context for the reply.
+    let pending = PendingMint {
+        token_id: token_id.clone(),
+        owner: recipient_addr.to_string(),
+        pool_address: pool_address.clone(),
         token0: params.token0,
         token1: params.token1,
         fee: params.fee,
         tick_lower: params.tick_lower,
         tick_upper: params.tick_upper,
-        pool_address: pool_addr,
+        liquidity,
+        amount0_min: params.amount0_min,
+        amount1_min: params.amount1_min,
+        amount0_sent_to_pool: amount0_actual,
+        amount1_sent_to_pool: amount1_actual,
+        native_refunds: native_refunds.clone(),
     };
-    POSITIONS.save(deps.storage, &token_id, &position)?;
+    PENDING_MINT.save(deps.storage, &pending)?;
 
-    // Mint NFT
-    let metadata: NftExtensionMsg = position.into();
+    let pool_mint_msg = PoolExecuteMsg::Mint {
+        lower_tick: params.tick_lower,
+        upper_tick: params.tick_upper,
+        amount: liquidity,
+    };
+    let pool_mint_submsg = SubMsg::reply_on_success(
+        WasmMsg::Execute {
+            contract_addr: pool_address.to_string(),
+            msg: to_json_binary(&pool_mint_msg)?,
+            funds: funds_to_pool,
+        },
+        REPLY_MINT_POSITION,
+    );
+
+    // Build response: pre-messages, then the submsg.
+    let mut response = Response::new().add_messages(pre_messages);
+    // Native refunds can go out immediately — they only return surplus that
+    // never needed to enter the pool. Failure of the pool submsg will revert
+    // everything anyway.
+    for coin in native_refunds {
+        response = response.add_message(CosmosMsg::Bank(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: vec![coin],
+        }));
+    }
+    Ok(response.add_submessage(pool_mint_submsg).add_attributes([
+        ("action", "mint_position"),
+        ("token_id", token_id.as_str()),
+        ("liquidity", liquidity.to_string().as_str()),
+        ("amount0_sent", amount0_actual.to_string().as_str()),
+        ("amount1_sent", amount1_actual.to_string().as_str()),
+    ]))
+}
+
+fn reply_mint_position(deps: DepsMut, env: Env, _reply: Reply) -> Result<Response, ContractError> {
+    let pending = PENDING_MINT.load(deps.storage)?;
+    PENDING_MINT.remove(deps.storage);
+
+    // Fetch current fee_growth_inside so the NFT's starting snapshot is right.
+    // After pool.Mint, ticks at `tick_lower`/`tick_upper` are initialized, so
+    // the query cannot fail due to missing ticks.
+    let fg: FeeGrowthInsideResponse = deps.querier.query_wasm_smart(
+        pending.pool_address.to_string(),
+        &PoolQueryMsg::GetFeeGrowthInside {
+            tick_lower: pending.tick_lower,
+            tick_upper: pending.tick_upper,
+        },
+    )?;
+
+    let state = PositionState {
+        pool_address: pending.pool_address.clone(),
+        token0: pending.token0,
+        token1: pending.token1,
+        fee: pending.fee,
+        tick_lower: pending.tick_lower,
+        tick_upper: pending.tick_upper,
+        liquidity: pending.liquidity,
+        fee_growth_inside_0_last_x128: fg.fee_growth_inside_0_x128,
+        fee_growth_inside_1_last_x128: fg.fee_growth_inside_1_x128,
+        tokens_owed_0: Uint128::zero(),
+        tokens_owed_1: Uint128::zero(),
+    };
+    POSITIONS.save(deps.storage, &pending.token_id, &state)?;
+
+    // Mint NFT.
+    let metadata: NftExtensionMsg = state.metadata().into();
     let self_info = MessageInfo {
         sender: env.contract.address.clone(),
         funds: vec![],
     };
-
     Cw721MetadataContract::default().mint(
         deps,
         &env,
         &self_info,
-        token_id.clone(),
-        params.recipient.unwrap_or(info.sender.to_string()),
+        pending.token_id.clone(),
+        pending.owner.clone(),
         None,
         Some(metadata),
     )?;
 
-    // Order: CW20 transfers first, then pool mint last
-    let mut all_messages: Vec<CosmosMsg> = pre_messages;
-    all_messages.push(CosmosMsg::Wasm(wasm_msg));
-
     Ok(Response::new()
-        .add_messages(all_messages)
-        .add_attribute("action", "mint_position")
-        .add_attribute("token_id", token_id)
-        .add_attribute("liquidity", liquidity))
+        .add_event(
+            Event::new("mint_position_complete")
+                .add_attribute("token_id", pending.token_id)
+                .add_attribute("owner", pending.owner)
+                .add_attribute("liquidity", pending.liquidity),
+        ))
 }
+
+// =========================================================================
+// IncreaseLiquidity
+// =========================================================================
 
 fn execute_increase_liquidity(
     deps: DepsMut,
@@ -440,58 +523,39 @@ fn execute_increase_liquidity(
     validate_deadline(&env, params.deadline)?;
     assert_owner_or_approved(deps.as_ref(), &env, &info, &params.token_id)?;
 
-    let position = POSITIONS
+    let state = POSITIONS
         .load(deps.storage, &params.token_id)
         .map_err(|_| ContractError::Std(StdError::generic_err("Position not found")))?;
 
-    // Prepare fund transfers
-    let mut funds_to_pool: Vec<Coin> = vec![];
-    let mut pre_messages: Vec<CosmosMsg> = vec![];
-
-    prepare_token_transfer(
-        &position.token0,
-        params.amount0_desired,
-        &info,
-        &position.pool_address,
-        env.contract.address.as_ref(),
-        &mut funds_to_pool,
-        &mut pre_messages,
-    )?;
-    prepare_token_transfer(
-        &position.token1,
-        params.amount1_desired,
-        &info,
-        &position.pool_address,
-        env.contract.address.as_ref(),
-        &mut funds_to_pool,
-        &mut pre_messages,
-    )?;
-
     let slot0: PoolState = deps
         .querier
-        .query_wasm_smart(position.pool_address.clone(), &PoolQueryMsg::GetSlot0 {})?;
+        .query_wasm_smart(state.pool_address.to_string(), &PoolQueryMsg::GetSlot0 {})?;
 
-    let sqrt_price_lower = get_sqrt_ratio_at_tick(position.tick_lower)?;
-    let sqrt_price_upper = get_sqrt_ratio_at_tick(position.tick_upper)?;
+    let sqrt_price_lower = get_sqrt_ratio_at_tick(state.tick_lower)?;
+    let sqrt_price_upper = get_sqrt_ratio_at_tick(state.tick_upper)?;
 
-    let liquidity = get_liquidity_for_amounts(
+    let liquidity_added = get_liquidity_for_amounts(
         slot0.sqrt_price,
         sqrt_price_lower,
         sqrt_price_upper,
         params.amount0_desired,
         params.amount1_desired,
     )?;
+    if liquidity_added.is_zero() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "computed liquidity is zero — check desired amounts vs current price",
+        )));
+    }
 
-    // Slippage check
     let (amount0_actual, amount1_actual) = compute_token_amounts(
         slot0.sqrt_price,
         sqrt_price_lower,
         sqrt_price_upper,
-        liquidity.u128(),
+        liquidity_added.u128(),
         slot0.tick,
-        position.tick_lower,
-        position.tick_upper,
-    );
+        state.tick_lower,
+        state.tick_upper,
+    )?;
     if amount0_actual < params.amount0_min {
         return Err(ContractError::Slippage {
             reason: format!(
@@ -509,29 +573,111 @@ fn execute_increase_liquidity(
         });
     }
 
+    let mut pre_messages: Vec<CosmosMsg> = vec![];
+    let mut funds_to_pool: Vec<Coin> = vec![];
+    let mut native_refunds: Vec<Coin> = vec![];
+
+    prepare_token_forward(
+        &state.token0,
+        amount0_actual,
+        &info,
+        state.pool_address.as_ref(),
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
+    prepare_token_forward(
+        &state.token1,
+        amount1_actual,
+        &info,
+        state.pool_address.as_ref(),
+        env.contract.address.as_ref(),
+        &mut funds_to_pool,
+        &mut pre_messages,
+    )?;
+    compute_native_refunds(
+        &info,
+        &[
+            (&state.token0, amount0_actual),
+            (&state.token1, amount1_actual),
+        ],
+        &mut native_refunds,
+    )?;
+
+    let pending = PendingIncrease {
+        token_id: params.token_id.clone(),
+        liquidity_added,
+        amount0_min: params.amount0_min,
+        amount1_min: params.amount1_min,
+        amount0_sent_to_pool: amount0_actual,
+        amount1_sent_to_pool: amount1_actual,
+        native_refunds: native_refunds.clone(),
+    };
+    PENDING_INCREASE.save(deps.storage, &pending)?;
+
     let pool_mint_msg = PoolExecuteMsg::Mint {
-        recipient: env.contract.address.to_string(),
-        lower_tick: position.tick_lower,
-        upper_tick: position.tick_upper,
-        amount: liquidity,
-        data: None,
+        lower_tick: state.tick_lower,
+        upper_tick: state.tick_upper,
+        amount: liquidity_added,
     };
+    let pool_mint_submsg = SubMsg::reply_on_success(
+        WasmMsg::Execute {
+            contract_addr: state.pool_address.to_string(),
+            msg: to_json_binary(&pool_mint_msg)?,
+            funds: funds_to_pool,
+        },
+        REPLY_INCREASE_LIQUIDITY,
+    );
 
-    let wasm_msg = WasmMsg::Execute {
-        contract_addr: position.pool_address,
-        msg: to_json_binary(&pool_mint_msg)?,
-        funds: funds_to_pool,
-    };
-
-    // Order: CW20 transfers first, then pool mint last
-    let mut all_messages: Vec<CosmosMsg> = pre_messages;
-    all_messages.push(CosmosMsg::Wasm(wasm_msg));
-
-    Ok(Response::new()
-        .add_messages(all_messages)
+    let mut response = Response::new().add_messages(pre_messages);
+    for coin in native_refunds {
+        response = response.add_message(CosmosMsg::Bank(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: vec![coin],
+        }));
+    }
+    Ok(response
+        .add_submessage(pool_mint_submsg)
         .add_attribute("action", "increase_liquidity")
-        .add_attribute("token_id", params.token_id))
+        .add_attribute("token_id", params.token_id)
+        .add_attribute("liquidity_added", liquidity_added))
 }
+
+fn reply_increase_liquidity(deps: DepsMut, _env: Env, _reply: Reply) -> Result<Response, ContractError> {
+    let pending = PENDING_INCREASE.load(deps.storage)?;
+    PENDING_INCREASE.remove(deps.storage);
+
+    let mut state = POSITIONS.load(deps.storage, &pending.token_id)?;
+
+    // Accrue pending fees to NFT before modifying liquidity (V3 pattern: any
+    // change to L closes the current "fee period" for this NFT).
+    let fg: FeeGrowthInsideResponse = deps.querier.query_wasm_smart(
+        state.pool_address.to_string(),
+        &PoolQueryMsg::GetFeeGrowthInside {
+            tick_lower: state.tick_lower,
+            tick_upper: state.tick_upper,
+        },
+    )?;
+    accrue_fees_to_nft(&mut state, &fg)?;
+
+    // Apply liquidity delta.
+    state.liquidity = state.liquidity.checked_add(pending.liquidity_added).map_err(|_| {
+        StdError::generic_err("NFT liquidity overflow")
+    })?;
+
+    POSITIONS.save(deps.storage, &pending.token_id, &state)?;
+
+    Ok(Response::new().add_event(
+        Event::new("increase_liquidity_complete")
+            .add_attribute("token_id", pending.token_id)
+            .add_attribute("liquidity_added", pending.liquidity_added)
+            .add_attribute("new_liquidity", state.liquidity),
+    ))
+}
+
+// =========================================================================
+// DecreaseLiquidity
+// =========================================================================
 
 fn execute_decrease_liquidity(
     deps: DepsMut,
@@ -542,24 +688,126 @@ fn execute_decrease_liquidity(
     validate_deadline(&env, params.deadline)?;
     assert_owner_or_approved(deps.as_ref(), &env, &info, &params.token_id)?;
 
-    let position = POSITIONS.load(deps.storage, &params.token_id)?;
+    let state = POSITIONS.load(deps.storage, &params.token_id)?;
+
+    if params.liquidity.is_zero() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "liquidity to remove must be > 0",
+        )));
+    }
+    if params.liquidity > state.liquidity {
+        return Err(ContractError::Std(StdError::generic_err(
+            "liquidity to remove exceeds NFT liquidity",
+        )));
+    }
+
+    let pending = PendingDecrease {
+        token_id: params.token_id.clone(),
+        liquidity_removed: params.liquidity,
+        amount0_min: params.amount0_min,
+        amount1_min: params.amount1_min,
+    };
+    PENDING_DECREASE.save(deps.storage, &pending)?;
 
     let burn_msg = PoolExecuteMsg::Burn {
-        lower_tick: position.tick_lower,
-        upper_tick: position.tick_upper,
+        lower_tick: state.tick_lower,
+        upper_tick: state.tick_upper,
         amount: params.liquidity,
     };
-
-    let wasm_msg = WasmMsg::Execute {
-        contract_addr: position.pool_address,
-        msg: to_json_binary(&burn_msg)?,
-        funds: vec![],
-    };
+    let submsg = SubMsg::reply_on_success(
+        WasmMsg::Execute {
+            contract_addr: state.pool_address.to_string(),
+            msg: to_json_binary(&burn_msg)?,
+            funds: vec![],
+        },
+        REPLY_DECREASE_LIQUIDITY,
+    );
 
     Ok(Response::new()
-        .add_message(wasm_msg)
-        .add_attribute("action", "decrease_liquidity"))
+        .add_submessage(submsg)
+        .add_attribute("action", "decrease_liquidity")
+        .add_attribute("token_id", params.token_id)
+        .add_attribute("liquidity", params.liquidity))
 }
+
+fn reply_decrease_liquidity(
+    deps: DepsMut,
+    _env: Env,
+    reply: Reply,
+) -> Result<Response, ContractError> {
+    let pending = PENDING_DECREASE.load(deps.storage)?;
+    PENDING_DECREASE.remove(deps.storage);
+
+    let mut state = POSITIONS.load(deps.storage, &pending.token_id)?;
+
+    // Extract amount0_burned / amount1_burned attributes from the pool event.
+    // Filter by emitter so a malicious CW20 in the burn submsg chain can't
+    // inject counterfeit attributes. Today `pool.Burn` dispatches no
+    // submessages, so the filter is defense in depth.
+    let (amount0_burned, amount1_burned) = parse_amounts_from_reply(
+        &reply,
+        "amount0_burned",
+        "amount1_burned",
+        state.pool_address.as_str(),
+    )?;
+
+    if amount0_burned < pending.amount0_min {
+        return Err(ContractError::Slippage {
+            reason: format!(
+                "amount0_burned {} below minimum {}",
+                amount0_burned, pending.amount0_min
+            ),
+        });
+    }
+    if amount1_burned < pending.amount1_min {
+        return Err(ContractError::Slippage {
+            reason: format!(
+                "amount1_burned {} below minimum {}",
+                amount1_burned, pending.amount1_min
+            ),
+        });
+    }
+
+    // Accrue pending fees before liquidity change (V3 pattern).
+    let fg: FeeGrowthInsideResponse = deps.querier.query_wasm_smart(
+        state.pool_address.to_string(),
+        &PoolQueryMsg::GetFeeGrowthInside {
+            tick_lower: state.tick_lower,
+            tick_upper: state.tick_upper,
+        },
+    )?;
+    accrue_fees_to_nft(&mut state, &fg)?;
+
+    // Credit burned principal to NFT's tokens_owed.
+    state.tokens_owed_0 = state
+        .tokens_owed_0
+        .checked_add(amount0_burned)
+        .unwrap_or(Uint128::MAX);
+    state.tokens_owed_1 = state
+        .tokens_owed_1
+        .checked_add(amount1_burned)
+        .unwrap_or(Uint128::MAX);
+
+    // Reduce NFT's liquidity.
+    state.liquidity = state
+        .liquidity
+        .checked_sub(pending.liquidity_removed)
+        .map_err(|_| StdError::generic_err("NFT liquidity underflow"))?;
+
+    POSITIONS.save(deps.storage, &pending.token_id, &state)?;
+
+    Ok(Response::new().add_event(
+        Event::new("decrease_liquidity_complete")
+            .add_attribute("token_id", pending.token_id)
+            .add_attribute("amount0_burned", amount0_burned)
+            .add_attribute("amount1_burned", amount1_burned)
+            .add_attribute("new_liquidity", state.liquidity),
+    ))
+}
+
+// =========================================================================
+// Collect
+// =========================================================================
 
 fn execute_collect(
     deps: DepsMut,
@@ -572,30 +820,239 @@ fn execute_collect(
 
     let base = Cw721MetadataContract::default();
     let owner_res = base.query_owner_of(deps.as_ref(), &env, token_id.clone(), false)?;
-    let dest = recipient.unwrap_or(owner_res.owner);
-
-    let position = POSITIONS.load(deps.storage, &token_id)?;
-
-    let collect_msg = PoolExecuteMsg::Collect {
-        recipient: dest,
-        lower_tick: position.tick_lower,
-        upper_tick: position.tick_upper,
-        amount0_requested: Uint128::MAX,
-        amount1_requested: Uint128::MAX,
+    let dest = match recipient {
+        Some(r) => deps.api.addr_validate(&r)?.to_string(),
+        None => owner_res.owner,
     };
 
-    let wasm_msg = WasmMsg::Execute {
-        contract_addr: position.pool_address,
-        msg: to_json_binary(&collect_msg)?,
-        funds: vec![],
-    };
+    let mut state = POSITIONS.load(deps.storage, &token_id)?;
+
+    // If NFT has active liquidity, force the pool to credit its own
+    // position.tokens_owed with the latest fee delta BEFORE we call
+    // pool.Collect. V3 does this with `pool.burn(0)`; we mirror it.
+    //
+    // After that, we query fee_growth_inside (unchanged by burn(0)) and
+    // accrue fees to this NFT's tokens_owed locally.
+    //
+    // NOTE: we do NOT use a submsg here because fee_growth_inside is stable
+    // across burn(0) — swaps are the only thing that can change it, and swaps
+    // can't happen in the middle of our own tx. So we can:
+    //   1. (msg) pool.burn(0)           — credits pool.position.tokens_owed
+    //   2. (msg) pool.collect(amount)   — pays out to recipient
+    //   3. (inline) update this NFT's state locally
+    //
+    // Step 3 depends only on data we already have plus fg queried NOW.
+    let mut messages: Vec<CosmosMsg> = vec![];
+
+    if !state.liquidity.is_zero() {
+        // 1. Force pool to roll fees into position.tokens_owed.
+        let burn_zero = PoolExecuteMsg::Burn {
+            lower_tick: state.tick_lower,
+            upper_tick: state.tick_upper,
+            amount: Uint128::zero(),
+        };
+        messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: state.pool_address.to_string(),
+            msg: to_json_binary(&burn_zero)?,
+            funds: vec![],
+        }));
+
+        // 2. Accrue fees into this NFT's tokens_owed using current
+        //    fee_growth_inside. burn(0) doesn't change fee_growth_inside, so
+        //    reading it BEFORE the message dispatches is still correct (the
+        //    value we read is exactly the value the pool's update_position
+        //    will compare against during burn(0)).
+        let fg: FeeGrowthInsideResponse = deps.querier.query_wasm_smart(
+            state.pool_address.to_string(),
+            &PoolQueryMsg::GetFeeGrowthInside {
+                tick_lower: state.tick_lower,
+                tick_upper: state.tick_upper,
+            },
+        )?;
+        accrue_fees_to_nft(&mut state, &fg)?;
+    }
+
+    // Snapshot how much we'll ask the pool for, capped to NFT's owed balance.
+    let pay0 = state.tokens_owed_0;
+    let pay1 = state.tokens_owed_1;
+
+    if !pay0.is_zero() || !pay1.is_zero() {
+        let collect_msg = PoolExecuteMsg::Collect {
+            recipient: dest.clone(),
+            lower_tick: state.tick_lower,
+            upper_tick: state.tick_upper,
+            amount0_requested: pay0,
+            amount1_requested: pay1,
+        };
+        messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: state.pool_address.to_string(),
+            msg: to_json_binary(&collect_msg)?,
+            funds: vec![],
+        }));
+        state.tokens_owed_0 = Uint128::zero();
+        state.tokens_owed_1 = Uint128::zero();
+    }
+
+    POSITIONS.save(deps.storage, &token_id, &state)?;
 
     Ok(Response::new()
-        .add_message(wasm_msg)
-        .add_attribute("action", "collect"))
+        .add_messages(messages)
+        .add_attribute("action", "collect")
+        .add_attribute("token_id", token_id)
+        .add_attribute("recipient", dest)
+        .add_attribute("amount0", pay0)
+        .add_attribute("amount1", pay1))
 }
 
-/// Compute the actual token amounts for a given liquidity, matching the pool's mint logic.
+// =========================================================================
+// Burn (NFT destruction)
+// =========================================================================
+
+fn execute_burn(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    token_id: String,
+) -> Result<Response, ContractError> {
+    // SECURITY (audit CRIT-3):
+    //   - Assert ownership BEFORE mutating any storage.
+    //   - Require the NFT's position to be fully cleared: zero liquidity and
+    //     zero tokens_owed on both sides. Otherwise funds are stranded.
+    assert_owner_or_approved(deps.as_ref(), &env, &info, &token_id)?;
+
+    let state = POSITIONS.load(deps.storage, &token_id)?;
+    if !state.liquidity.is_zero() {
+        return Err(ContractError::PositionNotCleared {
+            field: "liquidity".to_string(),
+        });
+    }
+    if !state.tokens_owed_0.is_zero() {
+        return Err(ContractError::PositionNotCleared {
+            field: "tokens_owed_0".to_string(),
+        });
+    }
+    if !state.tokens_owed_1.is_zero() {
+        return Err(ContractError::PositionNotCleared {
+            field: "tokens_owed_1".to_string(),
+        });
+    }
+
+    POSITIONS.remove(deps.storage, &token_id);
+
+    let base = Cw721MetadataContract::default();
+    Ok(base.burn_nft(deps, &env, &info, token_id)?)
+}
+
+// =========================================================================
+// Reply dispatcher
+// =========================================================================
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
+    match reply.id {
+        REPLY_MINT_POSITION => reply_mint_position(deps, env, reply),
+        REPLY_INCREASE_LIQUIDITY => reply_increase_liquidity(deps, env, reply),
+        REPLY_DECREASE_LIQUIDITY => reply_decrease_liquidity(deps, env, reply),
+        other => Err(ContractError::InvalidReply {
+            reason: format!("unknown reply id {}", other),
+        }),
+    }
+}
+
+// =========================================================================
+// Shared helpers
+// =========================================================================
+
+/// For each token+actual_amount pair this builds either attached native
+/// `funds_to_pool` entries or CW20 `TransferFrom(user→manager) +
+/// IncreaseAllowance(manager→pool, actual)` messages.
+fn prepare_token_forward(
+    token: &AssetInfo,
+    amount: Uint128,
+    info: &MessageInfo,
+    pool_addr: &str,
+    manager_addr: &str,
+    funds_to_pool: &mut Vec<Coin>,
+    pre_messages: &mut Vec<CosmosMsg>,
+) -> Result<(), ContractError> {
+    if amount.is_zero() {
+        return Ok(());
+    }
+    match token {
+        AssetInfo::NativeToken { denom } => {
+            let sent = info
+                .funds
+                .iter()
+                .find(|c| c.denom == *denom)
+                .map(|c| c.amount)
+                .unwrap_or_default();
+            ensure!(
+                sent >= amount,
+                ContractError::Std(StdError::generic_err(format!(
+                    "Insufficient funds for {}: need {}, sent {}",
+                    denom, amount, sent
+                )))
+            );
+            funds_to_pool.push(Coin {
+                denom: denom.clone(),
+                amount,
+            });
+        }
+        AssetInfo::Token { .. } => {
+            if let Some(msg) =
+                token.transfer_from_msg(info.sender.as_ref(), manager_addr, amount)?
+            {
+                pre_messages.push(msg);
+            }
+            if let Some(msg) = token.increase_allowance_msg(pool_addr, amount)? {
+                pre_messages.push(msg);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compute native refunds: for every native token among `tokens`, subtract
+/// `actual` from what `info.funds` supplied; residual is refundable.
+///
+/// CW20 tokens need no refund path — `TransferFrom(actual)` pulls only the
+/// exact amount and the remaining user-granted allowance (if any) is outside
+/// this contract's control.
+fn compute_native_refunds(
+    info: &MessageInfo,
+    tokens: &[(&AssetInfo, Uint128)],
+    refunds: &mut Vec<Coin>,
+) -> Result<(), ContractError> {
+    // Track per-denom required amount.
+    use std::collections::BTreeMap;
+    let mut required: BTreeMap<String, Uint128> = BTreeMap::new();
+    for (token, amount) in tokens {
+        if let AssetInfo::NativeToken { denom } = token {
+            let entry = required.entry(denom.clone()).or_insert_with(Uint128::zero);
+            *entry = entry.checked_add(*amount).map_err(|_| {
+                StdError::generic_err(format!("required overflow for {}", denom))
+            })?;
+        }
+    }
+    for coin in &info.funds {
+        let need = required.get(&coin.denom).copied().unwrap_or_else(Uint128::zero);
+        if coin.amount > need {
+            let refund = coin.amount.checked_sub(need).map_err(|_| {
+                StdError::generic_err("refund subtraction underflow (unreachable)")
+            })?;
+            if !refund.is_zero() {
+                refunds.push(Coin {
+                    denom: coin.denom.clone(),
+                    amount: refund,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compute the actuals `(amount0, amount1)` for a given liquidity at a given
+/// sqrt price. Matches the pool's mint math exactly.
 fn compute_token_amounts(
     sqrt_price_current: cosmwasm_std::Uint256,
     sqrt_price_lower: cosmwasm_std::Uint256,
@@ -604,31 +1061,157 @@ fn compute_token_amounts(
     current_tick: i32,
     tick_lower: i32,
     tick_upper: i32,
-) -> (Uint128, Uint128) {
-    use std::convert::TryFrom;
-
+) -> StdResult<(Uint128, Uint128)> {
     let (amount0, amount1) = if current_tick < tick_lower {
         (
-            get_amount0_delta(sqrt_price_lower, sqrt_price_upper, liquidity, true),
+            get_amount0_delta(sqrt_price_lower, sqrt_price_upper, liquidity, true)?,
             cosmwasm_std::Uint256::zero(),
         )
     } else if current_tick >= tick_upper {
         (
             cosmwasm_std::Uint256::zero(),
-            get_amount1_delta(sqrt_price_lower, sqrt_price_upper, liquidity, true),
+            get_amount1_delta(sqrt_price_lower, sqrt_price_upper, liquidity, true)?,
         )
     } else {
         (
-            get_amount0_delta(sqrt_price_current, sqrt_price_upper, liquidity, true),
-            get_amount1_delta(sqrt_price_lower, sqrt_price_current, liquidity, true),
+            get_amount0_delta(sqrt_price_current, sqrt_price_upper, liquidity, true)?,
+            get_amount1_delta(sqrt_price_lower, sqrt_price_current, liquidity, true)?,
         )
     };
-
-    (
+    Ok((
         Uint128::try_from(amount0).unwrap_or(Uint128::MAX),
         Uint128::try_from(amount1).unwrap_or(Uint128::MAX),
-    )
+    ))
 }
+
+/// Apply the V3 fee-accrual step to an NFT's state:
+///   delta_N = current_fgi_N - state.fee_growth_inside_N_last
+///   tokens_owed_N += state.liquidity * delta_N / 2^128
+///   state.fee_growth_inside_N_last = current_fgi_N
+///
+/// Uses wrapping subtraction on Uint256 because fee_growth accumulators are
+/// intentionally allowed to overflow (V3 convention).
+fn accrue_fees_to_nft(
+    state: &mut PositionState,
+    current: &FeeGrowthInsideResponse,
+) -> Result<(), ContractError> {
+    if state.liquidity.is_zero() {
+        // No fees owed — just snapshot current value.
+        state.fee_growth_inside_0_last_x128 = current.fee_growth_inside_0_x128;
+        state.fee_growth_inside_1_last_x128 = current.fee_growth_inside_1_x128;
+        return Ok(());
+    }
+
+    let delta_0 = current
+        .fee_growth_inside_0_x128
+        .wrapping_sub(state.fee_growth_inside_0_last_x128);
+    let delta_1 = current
+        .fee_growth_inside_1_x128
+        .wrapping_sub(state.fee_growth_inside_1_last_x128);
+
+    let liquidity_u256 = Uint256::from(state.liquidity);
+    let q128 = q128();
+    let fees_0 = mul_div(liquidity_u256, delta_0, q128)?;
+    let fees_1 = mul_div(liquidity_u256, delta_1, q128)?;
+
+    // Saturate per the pool's own convention: a position accruing > u128 of
+    // fees on one side should not brick itself. The small amount lost to
+    // saturation is acceptable vs. permanent lockup.
+    let fees_0_u128 = Uint128::try_from(fees_0).unwrap_or(Uint128::MAX);
+    let fees_1_u128 = Uint128::try_from(fees_1).unwrap_or(Uint128::MAX);
+    state.tokens_owed_0 = state
+        .tokens_owed_0
+        .checked_add(fees_0_u128)
+        .unwrap_or(Uint128::MAX);
+    state.tokens_owed_1 = state
+        .tokens_owed_1
+        .checked_add(fees_1_u128)
+        .unwrap_or(Uint128::MAX);
+
+    state.fee_growth_inside_0_last_x128 = current.fee_growth_inside_0_x128;
+    state.fee_growth_inside_1_last_x128 = current.fee_growth_inside_1_x128;
+    Ok(())
+}
+
+/// Extract two Uint128 attributes from the sub-message reply events, keyed by
+/// `key0` and `key1`. Only events emitted by `emitter` (matched on the
+/// `_contract_address` attribute) are considered — this prevents a malicious
+/// CW20 in the submsg chain from forging attributes with these keys.
+fn parse_amounts_from_reply(
+    reply: &Reply,
+    key0: &str,
+    key1: &str,
+    emitter: &str,
+) -> Result<(Uint128, Uint128), ContractError> {
+    let result = match &reply.result {
+        cosmwasm_std::SubMsgResult::Ok(r) => r,
+        cosmwasm_std::SubMsgResult::Err(e) => {
+            return Err(ContractError::InvalidReply {
+                reason: format!("pool submsg failed: {e}"),
+            });
+        }
+    };
+
+    let mut v0: Option<Uint128> = None;
+    let mut v1: Option<Uint128> = None;
+
+    for event in &result.events {
+        // Only `wasm` (or `wasm-*`) events carry a `_contract_address`
+        // attribute naming the emitting contract; other event types (e.g.
+        // `execute`, `coin_received`) don't and are skipped.
+        if !event.ty.starts_with("wasm") {
+            continue;
+        }
+        let event_emitter = event
+            .attributes
+            .iter()
+            .find(|a| a.key == "_contract_address")
+            .map(|a| a.value.as_str());
+        if event_emitter != Some(emitter) {
+            continue;
+        }
+        for attr in &event.attributes {
+            if attr.key == key0 && v0.is_none() {
+                v0 = Some(Uint128::from_str_checked(&attr.value).map_err(|e| {
+                    ContractError::InvalidReply {
+                        reason: format!("parse {key0} = {} : {e}", attr.value),
+                    }
+                })?);
+            } else if attr.key == key1 && v1.is_none() {
+                v1 = Some(Uint128::from_str_checked(&attr.value).map_err(|e| {
+                    ContractError::InvalidReply {
+                        reason: format!("parse {key1} = {} : {e}", attr.value),
+                    }
+                })?);
+            }
+        }
+    }
+
+    Ok((
+        v0.ok_or_else(|| ContractError::InvalidReply {
+            reason: format!("missing attribute {key0}"),
+        })?,
+        v1.ok_or_else(|| ContractError::InvalidReply {
+            reason: format!("missing attribute {key1}"),
+        })?,
+    ))
+}
+
+trait Uint128FromStr {
+    fn from_str_checked(s: &str) -> Result<Uint128, String>;
+}
+
+impl Uint128FromStr for Uint128 {
+    fn from_str_checked(s: &str) -> Result<Uint128, String> {
+        s.parse::<u128>()
+            .map(Uint128::new)
+            .map_err(|e| e.to_string())
+    }
+}
+
+// =========================================================================
+// Migrate
+// =========================================================================
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
@@ -645,15 +1228,18 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
         .add_attribute("to_version", CONTRACT_VERSION))
 }
 
+// =========================================================================
+// Query
+// =========================================================================
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> Result<Binary, ContractError> {
     let base_contract = Cw721MetadataContract::default();
 
     match msg {
-        // Custom Query for Logic
         QueryMsg::Position { token_id } => {
-            let position = POSITIONS.load(deps.storage, &token_id)?;
-            Ok(to_json_binary(&position)?)
+            let state = POSITIONS.load(deps.storage, &token_id)?;
+            Ok(to_json_binary(&state.metadata())?)
         }
 
         QueryMsg::OwnerOf {
@@ -688,7 +1274,6 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> Result<Binary, ContractErro
             };
             Ok(base_contract.query(deps, &env, cw721_msg)?)
         }
-
         QueryMsg::NumTokens {} => {
             let cw721_msg = cw721_metadata_onchain::msg::QueryMsg::NumTokens {};
             Ok(base_contract.query(deps, &env, cw721_msg)?)
@@ -720,24 +1305,51 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> Result<Binary, ContractErro
             Ok(base_contract.query(deps, &env, cw721_msg)?)
         }
         QueryMsg::PositionWithFees { token_id } => {
-            let position = POSITIONS.load(deps.storage, &token_id)?;
+            let state = POSITIONS.load(deps.storage, &token_id)?;
 
-            // Cross-contract query to pool for unclaimed fees
-            let pool_position: choice_clmm_common::pool::PositionInfoResponse =
-                deps.querier.query_wasm_smart(
-                    position.pool_address.clone(),
-                    &PoolQueryMsg::GetPosition {
-                        owner: env.contract.address.to_string(),
-                        tick_lower: position.tick_lower,
-                        tick_upper: position.tick_upper,
+            // Pending fees: compute the delta `(current_fgi - last_fgi) * L / Q128`
+            // but DO NOT mutate storage; queries are read-only. Added to
+            // `tokens_owed` already recorded on the NFT.
+            let pending = if state.liquidity.is_zero() {
+                (Uint128::zero(), Uint128::zero())
+            } else {
+                let fg: FeeGrowthInsideResponse = deps.querier.query_wasm_smart(
+                    state.pool_address.to_string(),
+                    &PoolQueryMsg::GetFeeGrowthInside {
+                        tick_lower: state.tick_lower,
+                        tick_upper: state.tick_upper,
                     },
                 )?;
+                let delta_0 = fg
+                    .fee_growth_inside_0_x128
+                    .wrapping_sub(state.fee_growth_inside_0_last_x128);
+                let delta_1 = fg
+                    .fee_growth_inside_1_x128
+                    .wrapping_sub(state.fee_growth_inside_1_last_x128);
+                let l = Uint256::from(state.liquidity);
+                let q = q128();
+                let f0 = mul_div(l, delta_0, q)?;
+                let f1 = mul_div(l, delta_1, q)?;
+                (
+                    Uint128::try_from(f0).unwrap_or(Uint128::MAX),
+                    Uint128::try_from(f1).unwrap_or(Uint128::MAX),
+                )
+            };
+
+            let tokens_owed_0 = state
+                .tokens_owed_0
+                .checked_add(pending.0)
+                .unwrap_or(Uint128::MAX);
+            let tokens_owed_1 = state
+                .tokens_owed_1
+                .checked_add(pending.1)
+                .unwrap_or(Uint128::MAX);
 
             Ok(to_json_binary(&PositionWithFeesResponse {
-                position,
-                liquidity: pool_position.liquidity,
-                tokens_owed_0: pool_position.tokens_owed_0,
-                tokens_owed_1: pool_position.tokens_owed_1,
+                position: state.metadata(),
+                liquidity: state.liquidity,
+                tokens_owed_0,
+                tokens_owed_1,
             })?)
         }
     }

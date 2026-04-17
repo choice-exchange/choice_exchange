@@ -139,12 +139,18 @@ fn execute_create_pool(
     hasher.update(fee.to_le_bytes());
     let salt = Binary::from(hasher.finalize().to_vec());
 
-    // 4. Create FeeConfig
+    // 4. Create FeeConfig. `max_fee_change_per_second_ppm` rate-limits how
+    // fast the dynamic fee can move across blocks, dampening single-block
+    // price-manipulation attacks (see audit MED-14). 100 ppm/sec = 600 ppm
+    // per 6-second block, so reaching the max fee from base takes roughly a
+    // minute of sustained volatility — short enough to react to real
+    // volatility, long enough to make griefing unprofitable.
     let fee_config = FeeConfig {
         base_fee_ppm: fee,
-        max_fee_ppm: fee * 2,
+        max_fee_ppm: fee.saturating_mul(2),
         volatility_multiplier: 100,
         ema_halflife_seconds: 600,
+        max_fee_change_per_second_ppm: 100,
     };
 
     // 5. Prepare Instantiate Msg

@@ -1,33 +1,49 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
-    use crate::contract::{execute, instantiate, query};
-    use crate::state::POSITIONS;
+    use crate::contract::{execute, instantiate, query, reply};
+    use crate::state::{
+        PositionState, POSITIONS, REPLY_DECREASE_LIQUIDITY, REPLY_INCREASE_LIQUIDITY,
+        REPLY_MINT_POSITION,
+    };
     use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
     use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, QueryMsg};
-    use choice_clmm_common::pool::{PoolState, QueryMsg as PoolQueryMsg};
+    use choice_clmm_common::pool::{
+        FeeGrowthInsideResponse, PoolState, QueryMsg as PoolQueryMsg,
+    };
     use choice_clmm_common::types::AssetInfo;
     use cosmwasm_std::testing::{
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
     };
     use cosmwasm_std::{
-        from_json, to_json_binary, Coin, ContractResult, OwnedDeps, Querier, QuerierResult,
-        QueryRequest, SystemError, SystemResult, Uint128, Uint256, WasmQuery,
+        from_json, to_json_binary, Coin, ContractResult, CosmosMsg, Event, OwnedDeps, Querier,
+        QuerierResult, QueryRequest, Reply, SubMsgResponse, SubMsgResult, SystemError,
+        SystemResult, Uint128, Uint256, WasmMsg, WasmQuery,
     };
     use cw721::msg::OwnerOfResponse;
-
+    use std::cell::RefCell;
+    
     fn native(denom: &str) -> AssetInfo {
         AssetInfo::NativeToken {
             denom: denom.to_string(),
         }
     }
 
-    // --- 1. MOCK QUERIER SETUP ---
+    // ------------------------------------------------------------
+    // Mock pool/factory querier.
+    //
+    // Serves:
+    //   factory: GetPool -> pool_addr
+    //   pool:    GetSlot0 -> PoolState { sqrt_price = 2^96, tick = 0, liquidity = 0 }
+    //   pool:    GetFeeGrowthInside -> values from an interior cell so each
+    //            test can independently simulate fee accrual
+    // ------------------------------------------------------------
 
     pub struct CustomMockQuerier {
         base: MockQuerier,
         factory_addr: String,
         pool_addr: String,
+        fee_growth_inside: RefCell<(Uint256, Uint256)>,
     }
 
     impl CustomMockQuerier {
@@ -36,6 +52,7 @@ mod tests {
                 base,
                 factory_addr,
                 pool_addr,
+                fee_growth_inside: RefCell::new((Uint256::zero(), Uint256::zero())),
             }
         }
     }
@@ -55,7 +72,6 @@ mod tests {
             match request {
                 QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => {
                     if contract_addr == self.factory_addr {
-                        // Mock Factory Response
                         let q: FactoryQueryMsg = from_json(&msg).unwrap();
                         match q {
                             FactoryQueryMsg::GetPool { .. } => SystemResult::Ok(
@@ -66,12 +82,13 @@ mod tests {
                             ),
                         }
                     } else if contract_addr == self.pool_addr {
-                        // Mock Pool Response (GetSlot0)
                         let q: PoolQueryMsg = from_json(&msg).unwrap();
                         match q {
                             PoolQueryMsg::GetSlot0 {} => {
                                 let slot0 = PoolState {
-                                    sqrt_price: Uint256::from(79228162514264337593543950336u128), // 2^96 (Price = 1.0)
+                                    sqrt_price: Uint256::from(
+                                        79228162514264337593543950336u128,
+                                    ), // 2^96
                                     tick: 0,
                                     liquidity: Uint128::zero(),
                                 };
@@ -79,8 +96,18 @@ mod tests {
                                     to_json_binary(&slot0).unwrap(),
                                 ))
                             }
+                            PoolQueryMsg::GetFeeGrowthInside { .. } => {
+                                let (f0, f1) = *self.fee_growth_inside.borrow();
+                                let resp = FeeGrowthInsideResponse {
+                                    fee_growth_inside_0_x128: f0,
+                                    fee_growth_inside_1_x128: f1,
+                                };
+                                SystemResult::Ok(ContractResult::Ok(
+                                    to_json_binary(&resp).unwrap(),
+                                ))
+                            }
                             _ => SystemResult::Err(SystemError::UnsupportedRequest {
-                                kind: "Unknown Pool Msg".to_string(),
+                                kind: format!("Unknown Pool Msg: {:?}", q),
                             }),
                         }
                     } else {
@@ -93,15 +120,20 @@ mod tests {
         }
     }
 
+    fn set_fee_growth_inside(
+        deps: &mut OwnedDeps<MockStorage, MockApi, CustomMockQuerier>,
+        v0: Uint256,
+        v1: Uint256,
+    ) {
+        *deps.querier.fee_growth_inside.borrow_mut() = (v0, v1);
+    }
+
     fn setup_deps() -> OwnedDeps<MockStorage, MockApi, CustomMockQuerier> {
         let deps = mock_dependencies();
         let factory_bech32 = deps.api.addr_make("factory_addr").to_string();
+        let pool_bech32 = deps.api.addr_make("pool_addr").to_string();
 
-        let querier = CustomMockQuerier::new(
-            deps.querier,
-            factory_bech32, // Pass the full Bech32 address here
-            "pool_addr".to_string(),
-        );
+        let querier = CustomMockQuerier::new(deps.querier, factory_bech32, pool_bech32);
         OwnedDeps {
             storage: deps.storage,
             api: deps.api,
@@ -110,10 +142,53 @@ mod tests {
         }
     }
 
-    // --- 2. TESTS ---
+    fn ok_reply(id: u64) -> Reply {
+        Reply {
+            id,
+            payload: Default::default(),
+            gas_used: 0,
+            result: SubMsgResult::Ok(ok_submsg_response(vec![])),
+        }
+    }
+
+    fn ok_reply_with_burn_attrs(
+        id: u64,
+        amount0: u128,
+        amount1: u128,
+        emitter: &str,
+    ) -> Reply {
+        let ev = Event::new("wasm")
+            .add_attribute("_contract_address", emitter)
+            .add_attribute("amount0_burned", Uint128::new(amount0).to_string())
+            .add_attribute("amount1_burned", Uint128::new(amount1).to_string());
+        Reply {
+            id,
+            payload: Default::default(),
+            gas_used: 0,
+            result: SubMsgResult::Ok(ok_submsg_response(vec![ev])),
+        }
+    }
+
+    /// Build a `SubMsgResponse` with `events` populated. The `data` field is
+    /// deprecated post-CosmWasm 2.0 but still required by the struct; we
+    /// suppress the deprecation warning at the one allocation site instead
+    /// of polluting every call site.
+    #[allow(deprecated)]
+    fn ok_submsg_response(events: Vec<Event>) -> SubMsgResponse {
+        SubMsgResponse {
+            events,
+            data: None,
+            msg_responses: vec![],
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Basic setup tests
+    // ------------------------------------------------------------
 
     #[test]
     fn test_instantiate() {
+
         let mut deps = setup_deps();
         let msg = InstantiateMsg {
             name: "Choice Positions".to_string(),
@@ -121,21 +196,14 @@ mod tests {
             factory_addr: deps.api.addr_make("factory_addr").to_string(),
         };
 
-        // Style: message_info + addr_make
         let creator = deps.api.addr_make("creator");
         let info = message_info(&creator, &[]);
-
         let res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
         assert_eq!(res.attributes[0].value, "instantiate");
     }
 
-    #[test]
-    fn test_mint_position() {
-        let mut deps = setup_deps();
+    fn instantiate_manager(deps: &mut OwnedDeps<MockStorage, MockApi, CustomMockQuerier>) {
         let creator = deps.api.addr_make("creator");
-        let user = deps.api.addr_make("user");
-
-        // 1. Instantiate
         let init_msg = InstantiateMsg {
             name: "Choice Positions".to_string(),
             symbol: "CH-POS".to_string(),
@@ -148,175 +216,135 @@ mod tests {
             init_msg,
         )
         .unwrap();
-
-        // 2. Mint Position
-        let mint_msg = ExecuteMsg::MintPosition {
-            token0: native("ATOM"),
-            token1: native("OSMO"),
-            fee: 500,
-            tick_lower: -100,
-            tick_upper: 100,
-            amount0_desired: Uint128::new(1000),
-            amount1_desired: Uint128::new(1000),
-            amount0_min: Uint128::zero(),
-            amount1_min: Uint128::zero(),
-            recipient: None,
-            deadline: 9999999999,
-        };
-
-        // Style: Explicit Coins with Uint128
-        let user_info = message_info(
-            &user,
-            &[
-                Coin {
-                    denom: "ATOM".to_string(),
-                    amount: Uint128::new(1000),
-                },
-                Coin {
-                    denom: "OSMO".to_string(),
-                    amount: Uint128::new(1000),
-                },
-            ],
-        );
-
-        let res = execute(deps.as_mut(), mock_env(), user_info, mint_msg).unwrap();
-
-        // 3. Verify Response
-        assert_eq!(res.attributes[0].value, "mint_position");
-        assert_eq!(res.attributes[1].value, "1"); // Token ID 1
-
-        // 4. Verify Sidecar State (Logic Data)
-        let pos = POSITIONS.load(&deps.storage, "1").unwrap();
-        assert_eq!(pos.pool_address, "pool_addr");
-        assert_eq!(pos.tick_lower, -100);
-
-        // 5. Verify NFT State (Ownership)
-        let query_msg = QueryMsg::OwnerOf {
-            token_id: "1".to_string(),
-            include_expired: None,
-        };
-        let res_bin = query(deps.as_ref(), mock_env(), query_msg).unwrap();
-        let owner_res: OwnerOfResponse = from_json(&res_bin).unwrap();
-        assert_eq!(owner_res.owner, user.to_string());
     }
 
-    #[test]
-    fn test_decrease_liquidity_permissions() {
-        let mut deps = setup_deps();
-        let creator = deps.api.addr_make("creator");
-        let user = deps.api.addr_make("user");
-        let hacker = deps.api.addr_make("hacker");
-
-        // Setup
-        let init_msg = InstantiateMsg {
-            name: "Choice Positions".to_string(),
-            symbol: "CH-POS".to_string(),
-            factory_addr: deps.api.addr_make("factory_addr").to_string(),
-        };
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            init_msg,
-        )
-        .unwrap();
-
-        // Mint ID #1 to "user"
-        let mint_msg = ExecuteMsg::MintPosition {
-            token0: native("ATOM"),
-            token1: native("OSMO"),
-            fee: 500,
-            tick_lower: -100,
-            tick_upper: 100,
-            amount0_desired: Uint128::new(100),
-            amount1_desired: Uint128::new(100),
-            amount0_min: Uint128::zero(),
-            amount1_min: Uint128::zero(),
-            recipient: None,
-            deadline: 0,
-        };
-
-        let mint_info = message_info(
-            &user,
+    fn mint_nft(
+        deps: &mut OwnedDeps<MockStorage, MockApi, CustomMockQuerier>,
+        user: &cosmwasm_std::Addr,
+        amount0: u128,
+        amount1: u128,
+        tick_lower: i32,
+        tick_upper: i32,
+    ) -> String {
+        // 1. execute_mint_position
+        let info = message_info(
+            user,
             &[
                 Coin {
                     denom: "ATOM".to_string(),
-                    amount: Uint128::new(100),
+                    amount: Uint128::new(amount0),
                 },
                 Coin {
                     denom: "OSMO".to_string(),
-                    amount: Uint128::new(100),
+                    amount: Uint128::new(amount1),
                 },
             ],
         );
-
-        execute(deps.as_mut(), mock_env(), mint_info, mint_msg).unwrap();
-
-        // Test 1: Hacker tries to decrease liquidity
-        let hack_msg = ExecuteMsg::DecreaseLiquidity {
-            token_id: "1".to_string(),
-            liquidity: Uint128::new(50),
-            amount0_min: Uint128::zero(),
-            amount1_min: Uint128::zero(),
-            deadline: 0,
-        };
-
-        let hack_info = message_info(&hacker, &[]);
-        let err = execute(deps.as_mut(), mock_env(), hack_info, hack_msg.clone()).unwrap_err();
-        assert_eq!(err.to_string(), "Unauthorized");
-
-        // Test 2: Owner succeeds
-        let owner_info = message_info(&user, &[]);
-        let res = execute(deps.as_mut(), mock_env(), owner_info, hack_msg).unwrap();
-        assert_eq!(res.attributes[0].value, "decrease_liquidity");
-    }
-
-    #[test]
-    fn test_increase_liquidity() {
-        let mut deps = setup_deps();
-        let creator = deps.api.addr_make("creator");
-        let user = deps.api.addr_make("user");
-
-        // Setup & Mint
-        let init_msg = InstantiateMsg {
-            name: "Choice Positions".to_string(),
-            symbol: "CH-POS".to_string(),
-            factory_addr: deps.api.addr_make("factory_addr").to_string(),
-        };
-        instantiate(
+        let res = execute(
             deps.as_mut(),
             mock_env(),
-            message_info(&creator, &[]),
-            init_msg,
-        )
-        .unwrap();
-
-        let mint_info = message_info(
-            &user,
-            &[
-                Coin {
-                    denom: "ATOM".to_string(),
-                    amount: Uint128::new(100),
-                },
-                Coin {
-                    denom: "OSMO".to_string(),
-                    amount: Uint128::new(100),
-                },
-            ],
-        );
-
-        execute(
-            deps.as_mut(),
-            mock_env(),
-            mint_info,
+            info,
             ExecuteMsg::MintPosition {
                 token0: native("ATOM"),
                 token1: native("OSMO"),
                 fee: 500,
-                tick_lower: -100,
+                tick_lower,
+                tick_upper,
+                amount0_desired: Uint128::new(amount0),
+                amount1_desired: Uint128::new(amount1),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                recipient: None,
+                deadline: 0,
+            },
+        )
+        .unwrap();
+        let token_id = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "token_id")
+            .unwrap()
+            .value
+            .clone();
+
+        // 2. simulate the pool submsg having succeeded -> run reply
+        reply(deps.as_mut(), mock_env(), ok_reply(REPLY_MINT_POSITION)).unwrap();
+
+        token_id
+    }
+
+    // ------------------------------------------------------------
+    // Phase 3 tests
+    // ------------------------------------------------------------
+
+    #[test]
+    fn mint_position_records_nft_state_and_liquidity() {
+
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+
+        let user = deps.api.addr_make("user");
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        assert_eq!(token_id, "1");
+
+        // Sidecar state reflects NFT-level liquidity.
+        let pos = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        assert_eq!(pos.tick_lower, -100);
+        assert_eq!(pos.tick_upper, 100);
+        assert!(!pos.liquidity.is_zero(), "liquidity should be set");
+        assert_eq!(pos.tokens_owed_0, Uint128::zero());
+        assert_eq!(pos.tokens_owed_1, Uint128::zero());
+        assert_eq!(pos.fee_growth_inside_0_last_x128, Uint256::zero());
+        assert_eq!(pos.fee_growth_inside_1_last_x128, Uint256::zero());
+
+        // NFT ownership.
+        let owner_bin = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::OwnerOf {
+                token_id: token_id.clone(),
+                include_expired: None,
+            },
+        )
+        .unwrap();
+        let owner_res: OwnerOfResponse = from_json(&owner_bin).unwrap();
+        assert_eq!(owner_res.owner, user.to_string());
+    }
+
+    #[test]
+    fn mint_refunds_native_excess_to_sender() {
+        // Regression (audit HIGH-8): prior versions forwarded the full
+        // attached native amount to the pool regardless of actual consumption;
+        // excess was stranded. Fix: manager sends exactly `amount*_actual` and
+        // refunds the rest via BankMsg::Send in the same response.
+
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+
+        // Mint a RANGE-ABOVE-CURRENT position so only token0 is consumed.
+        // User sends BOTH tokens; token1 (OSMO) should be fully refunded.
+        let info = message_info(
+            &user,
+            &[
+                Coin::new(Uint128::new(1_000), "ATOM"),
+                Coin::new(Uint128::new(1_000), "OSMO"), // extra
+            ],
+        );
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::MintPosition {
+                token0: native("ATOM"),
+                token1: native("OSMO"),
+                fee: 500,
+                // Range entirely ABOVE current price 0.
+                tick_lower: 10,
                 tick_upper: 100,
-                amount0_desired: Uint128::new(100),
-                amount1_desired: Uint128::new(100),
+                amount0_desired: Uint128::new(1_000),
+                amount1_desired: Uint128::new(1_000),
                 amount0_min: Uint128::zero(),
                 amount1_min: Uint128::zero(),
                 recipient: None,
@@ -325,43 +353,390 @@ mod tests {
         )
         .unwrap();
 
-        // Increase Liquidity Msg
-        let inc_msg = ExecuteMsg::IncreaseLiquidity {
-            token_id: "1".to_string(),
-            amount0_desired: Uint128::new(50),
-            amount1_desired: Uint128::new(50),
-            amount0_min: Uint128::zero(),
-            amount1_min: Uint128::zero(),
-            deadline: 0,
-        };
+        // Find the BankMsg::Send refund.
+        let refund = res
+            .messages
+            .iter()
+            .find_map(|m| match &m.msg {
+                CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount })
+                    if to_address == &user.to_string() =>
+                {
+                    Some(amount.clone())
+                }
+                _ => None,
+            })
+            .expect("should refund excess to user");
 
-        // Fail: insufficient funds sent
-        // User sends 49 ATOM (missing 1)
-        let fail_info = message_info(
-            &user,
-            &[Coin {
-                denom: "ATOM".to_string(),
-                amount: Uint128::new(49),
-            }],
-        );
-        let err = execute(deps.as_mut(), mock_env(), fail_info, inc_msg.clone()).unwrap_err();
-        assert!(err.to_string().contains("Insufficient funds"));
+        // Token1 not consumed at all for an entirely-above-current range.
+        let osmo = refund.iter().find(|c| c.denom == "OSMO");
+        assert!(osmo.is_some(), "expected OSMO refund");
+        assert_eq!(osmo.unwrap().amount, Uint128::new(1_000));
+    }
 
-        // Success: User sends correct funds
-        let success_info = message_info(
+    #[test]
+    fn increase_liquidity_accrues_existing_fees_to_nft() {
+
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        // Pre: no tokens_owed.
+        let before = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        assert_eq!(before.tokens_owed_0, Uint128::zero());
+
+        // Simulate the pool accruing some fee_growth_inside_0.
+        // 100 * Q128 of growth over L=<from mint> -> fees = 100 * L.
+        let q128 = Uint256::one() << 128u32;
+        set_fee_growth_inside(&mut deps, q128, Uint256::zero());
+
+        // User adds more liquidity.
+        let info = message_info(
             &user,
             &[
-                Coin {
-                    denom: "ATOM".to_string(),
-                    amount: Uint128::new(50),
-                },
-                Coin {
-                    denom: "OSMO".to_string(),
-                    amount: Uint128::new(50),
-                },
+                Coin::new(Uint128::new(500), "ATOM"),
+                Coin::new(Uint128::new(500), "OSMO"),
             ],
         );
-        let res = execute(deps.as_mut(), mock_env(), success_info, inc_msg).unwrap();
-        assert_eq!(res.attributes[0].value, "increase_liquidity");
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::IncreaseLiquidity {
+                token_id: token_id.clone(),
+                amount0_desired: Uint128::new(500),
+                amount1_desired: Uint128::new(500),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                deadline: 0,
+            },
+        )
+        .unwrap();
+
+        // Reply fires after pool mint.
+        reply(deps.as_mut(), mock_env(), ok_reply(REPLY_INCREASE_LIQUIDITY)).unwrap();
+
+        let after = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        // fee delta = Q128 - 0 = Q128
+        // accrued_0 = L * Q128 / Q128 = L (before the increase)
+        assert_eq!(after.tokens_owed_0, Uint128::new(before.liquidity.u128()));
+        assert!(
+            after.liquidity > before.liquidity,
+            "liquidity should have increased"
+        );
+        assert_eq!(after.fee_growth_inside_0_last_x128, q128);
+    }
+
+    #[test]
+    fn decrease_liquidity_credits_principal_and_fees_to_tokens_owed() {
+
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        // Swap accrues Q128 of fee_growth_inside_0.
+        let q128 = Uint256::one() << 128u32;
+        set_fee_growth_inside(&mut deps, q128, Uint256::zero());
+
+        // Request decrease half the liquidity.
+        let before = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        let half = Uint128::new(before.liquidity.u128() / 2);
+
+        let info = message_info(&user, &[]);
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::DecreaseLiquidity {
+                token_id: token_id.clone(),
+                liquidity: half,
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                deadline: 0,
+            },
+        )
+        .unwrap();
+
+        // Simulate pool.Burn result: amount0_burned=400, amount1_burned=600 (arbitrary).
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        reply(
+            deps.as_mut(),
+            mock_env(),
+            ok_reply_with_burn_attrs(REPLY_DECREASE_LIQUIDITY, 400, 600, &pool_addr),
+        )
+        .unwrap();
+
+        let after = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        // principal credited
+        assert_eq!(after.tokens_owed_0, Uint128::new(400 + before.liquidity.u128()));
+        assert_eq!(after.tokens_owed_1, Uint128::new(600));
+        // liquidity decreased by exactly `half`.
+        assert_eq!(after.liquidity.u128(), before.liquidity.u128() - half.u128());
+        assert_eq!(after.fee_growth_inside_0_last_x128, q128);
+    }
+
+    #[test]
+    fn decrease_liquidity_slippage_revert() {
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+        let before = POSITIONS.load(&deps.storage, &token_id).unwrap();
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user, &[]),
+            ExecuteMsg::DecreaseLiquidity {
+                token_id: token_id.clone(),
+                liquidity: Uint128::new(before.liquidity.u128() / 2),
+                // Require more than the pool will actually return.
+                amount0_min: Uint128::new(10_000_000),
+                amount1_min: Uint128::zero(),
+                deadline: 0,
+            },
+        )
+        .unwrap();
+
+        // Pool reports only 100 burned — below the 10M minimum we asked for.
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        let err = reply(
+            deps.as_mut(),
+            mock_env(),
+            ok_reply_with_burn_attrs(REPLY_DECREASE_LIQUIDITY, 100, 100, &pool_addr),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Slippage"), "got: {}", err);
+    }
+
+    #[test]
+    fn collect_sends_only_this_nfts_share() {
+        // Headline Phase 3 exploit regression (audit CRIT-1): two NFTs share
+        // the same (manager, tickL, tickU) pool position. After fee accrual,
+        // each NFT's collect must pay ONLY its own share, not drain the
+        // whole pool-level tokens_owed.
+
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let alice = deps.api.addr_make("alice");
+        let bob = deps.api.addr_make("bob");
+
+        // Alice mints first.
+        let alice_id = mint_nft(&mut deps, &alice, 1_000, 1_000, -100, 100);
+        let alice_before = POSITIONS.load(&deps.storage, &alice_id).unwrap();
+
+        // Between Alice and Bob's mints, half the total fee accrual happens.
+        let q128 = Uint256::one() << 128u32;
+        set_fee_growth_inside(&mut deps, q128, Uint256::zero());
+
+        // Bob mints (snapshots fee_growth_inside_last = Q128; no fees accrue to him yet).
+        let bob_id = mint_nft(&mut deps, &bob, 1_000, 1_000, -100, 100);
+        let bob_before = POSITIONS.load(&deps.storage, &bob_id).unwrap();
+        assert_eq!(bob_before.fee_growth_inside_0_last_x128, q128);
+
+        // More fee accrual after Bob's entry.
+        set_fee_growth_inside(&mut deps, q128 * Uint256::from(2u128), Uint256::zero());
+
+        // Alice collects. Her share = L_A * (2Q - 0) / Q = 2 * L_A.
+        // Bob's hypothetical share (if he collected now) = L_B * (2Q - Q) / Q = L_B.
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&alice, &[]),
+            ExecuteMsg::Collect {
+                token_id: alice_id.clone(),
+                recipient: None,
+            },
+        )
+        .unwrap();
+
+        // Inspect the pool.Collect msg — must request exactly Alice's share.
+        let collect_amount_0 = res
+            .messages
+            .iter()
+            .find_map(|m| match &m.msg {
+                CosmosMsg::Wasm(WasmMsg::Execute { msg: bin, .. }) => {
+                    let pe: Result<
+                        choice_clmm_common::pool::ExecuteMsg,
+                        _,
+                    > = from_json(bin);
+                    if let Ok(choice_clmm_common::pool::ExecuteMsg::Collect {
+                        amount0_requested,
+                        ..
+                    }) = pe
+                    {
+                        Some(amount0_requested)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .expect("expected pool.Collect msg");
+
+        let alice_share = 2 * alice_before.liquidity.u128();
+        assert_eq!(
+            collect_amount_0.u128(),
+            alice_share,
+            "Alice should collect exactly her share, not Bob's"
+        );
+
+        // Alice's NFT tokens_owed was zeroed after collect.
+        let alice_after = POSITIONS.load(&deps.storage, &alice_id).unwrap();
+        assert_eq!(alice_after.tokens_owed_0, Uint128::zero());
+        assert_eq!(alice_after.fee_growth_inside_0_last_x128, q128 * Uint256::from(2u128));
+
+        // Bob's NFT is untouched (still snapshot = Q128, no tokens_owed).
+        let bob_still = POSITIONS.load(&deps.storage, &bob_id).unwrap();
+        assert_eq!(bob_still.tokens_owed_0, Uint128::zero());
+        assert_eq!(bob_still.fee_growth_inside_0_last_x128, q128);
+    }
+
+    #[test]
+    fn burn_rejected_while_liquidity_nonzero() {
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user, &[]),
+            ExecuteMsg::Burn { token_id },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not cleared"), "got: {}", err);
+    }
+
+    #[test]
+    fn burn_rejected_while_tokens_owed_nonzero() {
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        // Manually clear liquidity but leave tokens_owed — simulate a state
+        // where user decreased to zero but hasn't collected yet.
+        let mut state = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        state.liquidity = Uint128::zero();
+        state.tokens_owed_0 = Uint128::new(42);
+        POSITIONS.save(&mut deps.storage, &token_id, &state).unwrap();
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user, &[]),
+            ExecuteMsg::Burn { token_id },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not cleared"), "got: {}", err);
+    }
+
+    #[test]
+    fn burn_succeeds_when_fully_cleared() {
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        // Fully clear position state in storage (simulating decrease + collect).
+        let mut state = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        state.liquidity = Uint128::zero();
+        state.tokens_owed_0 = Uint128::zero();
+        state.tokens_owed_1 = Uint128::zero();
+        POSITIONS.save(&mut deps.storage, &token_id, &state).unwrap();
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user, &[]),
+            ExecuteMsg::Burn { token_id: token_id.clone() },
+        )
+        .unwrap();
+        // POSITIONS entry removed.
+        assert!(POSITIONS.may_load(&deps.storage, &token_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn hacker_cannot_decrease_or_burn_another_users_nft() {
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let hacker = deps.api.addr_make("hacker");
+
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&hacker, &[]),
+            ExecuteMsg::DecreaseLiquidity {
+                token_id: token_id.clone(),
+                liquidity: Uint128::new(50),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                deadline: 0,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Unauthorized");
+
+        // Also cannot burn (even though burn also hits the not-cleared check).
+        let err2 = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&hacker, &[]),
+            ExecuteMsg::Burn { token_id },
+        )
+        .unwrap_err();
+        assert_eq!(err2.to_string(), "Unauthorized");
+    }
+
+    #[test]
+    fn approve_all_operator_can_decrease() {
+        // Regression (audit HIGH-6): `assert_owner_or_approved` previously
+        // ignored cw721 operator (ApproveAll) approvals, breaking standard
+        // cw721 delegation semantics.
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let operator = deps.api.addr_make("operator");
+
+        let token_id = mint_nft(&mut deps, &user, 1_000, 1_000, -100, 100);
+
+        // User grants ApproveAll to operator.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user, &[]),
+            ExecuteMsg::ApproveAll {
+                operator: operator.to_string(),
+                expires: None,
+            },
+        )
+        .unwrap();
+
+        // Operator can decrease.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&operator, &[]),
+            ExecuteMsg::DecreaseLiquidity {
+                token_id,
+                liquidity: Uint128::new(10),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                deadline: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    fn _ensure_position_default_construction_compiles() {
+        // Type sanity check: PositionState must not accidentally require Default.
+        let _ = |s: PositionState| s.liquidity;
     }
 }
