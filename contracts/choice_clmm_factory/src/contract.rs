@@ -70,7 +70,10 @@ pub fn execute(
                 return Err(StdError::generic_err("Tick spacing must be > 0"));
             }
             FEE_TIERS.save(deps.storage, fee, &tick_spacing)?;
-            Ok(Response::new().add_attribute("action", "enable_fee_amount"))
+            Ok(Response::new()
+                .add_attribute("action", "enable_fee_amount")
+                .add_attribute("fee", fee.to_string())
+                .add_attribute("tick_spacing", tick_spacing.to_string()))
         }
         ExecuteMsg::UpdateConfig {
             owner,
@@ -87,7 +90,11 @@ pub fn execute(
                 config.pool_code_id = new_code_id;
             }
             CONFIG.save(deps.storage, &config)?;
-            Ok(Response::new().add_attribute("action", "update_config"))
+            Ok(Response::new()
+                .add_attribute("action", "update_config")
+                .add_attribute("factory_action", "update_config")
+                .add_attribute("owner", config.owner.as_str())
+                .add_attribute("pool_code_id", config.pool_code_id.to_string()))
         }
     }
 }
@@ -181,7 +188,9 @@ fn execute_create_pool(
         .add_attribute("action", "create_pool")
         .add_attribute("token0", token0.to_string())
         .add_attribute("token1", token1.to_string())
-        .add_attribute("fee", fee.to_string()))
+        .add_attribute("fee", fee.to_string())
+        .add_attribute("tick_spacing", tick_spacing.to_string())
+        .add_attribute("init_sqrt_price", init_sqrt_price.to_string()))
 }
 
 pub const TMP_POOL_INFO: Item<(String, String, u32)> = Item::new("tmp_pool_info");

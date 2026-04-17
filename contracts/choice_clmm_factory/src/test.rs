@@ -62,7 +62,14 @@ mod tests {
         // 2. Owner success
         let info = message_info(&deps.api.addr_make("creator"), &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-        assert_eq!(res.attributes, vec![attr("action", "enable_fee_amount")]);
+        assert_eq!(
+            res.attributes,
+            vec![
+                attr("action", "enable_fee_amount"),
+                attr("fee", "250"),
+                attr("tick_spacing", "5"),
+            ]
+        );
 
         // Verify storage
         assert_eq!(FEE_TIERS.load(&deps.storage, 250).unwrap(), 5);

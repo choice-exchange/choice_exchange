@@ -506,7 +506,13 @@ fn reply_mint_position(deps: DepsMut, env: Env, _reply: Reply) -> Result<Respons
             Event::new("mint_position_complete")
                 .add_attribute("token_id", pending.token_id)
                 .add_attribute("owner", pending.owner)
-                .add_attribute("liquidity", pending.liquidity),
+                .add_attribute("pool_address", pending.pool_address.as_str())
+                .add_attribute("fee", pending.fee.to_string())
+                .add_attribute("tick_lower", pending.tick_lower.to_string())
+                .add_attribute("tick_upper", pending.tick_upper.to_string())
+                .add_attribute("liquidity", pending.liquidity)
+                .add_attribute("amount0", pending.amount0_sent_to_pool)
+                .add_attribute("amount1", pending.amount1_sent_to_pool),
         ))
 }
 
@@ -671,7 +677,9 @@ fn reply_increase_liquidity(deps: DepsMut, _env: Env, _reply: Reply) -> Result<R
         Event::new("increase_liquidity_complete")
             .add_attribute("token_id", pending.token_id)
             .add_attribute("liquidity_added", pending.liquidity_added)
-            .add_attribute("new_liquidity", state.liquidity),
+            .add_attribute("new_liquidity", state.liquidity)
+            .add_attribute("amount0_consumed", pending.amount0_sent_to_pool)
+            .add_attribute("amount1_consumed", pending.amount1_sent_to_pool),
     ))
 }
 
@@ -898,6 +906,7 @@ fn execute_collect(
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "collect")
+        .add_attribute("manager_action", "collect")
         .add_attribute("token_id", token_id)
         .add_attribute("recipient", dest)
         .add_attribute("amount0", pay0)
@@ -940,7 +949,8 @@ fn execute_burn(
     POSITIONS.remove(deps.storage, &token_id);
 
     let base = Cw721MetadataContract::default();
-    Ok(base.burn_nft(deps, &env, &info, token_id)?)
+    let response = base.burn_nft(deps, &env, &info, token_id.clone())?;
+    Ok(response.add_event(Event::new("burn_position_complete").add_attribute("token_id", token_id)))
 }
 
 // =========================================================================

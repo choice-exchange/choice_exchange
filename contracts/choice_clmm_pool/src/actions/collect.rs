@@ -37,7 +37,12 @@ pub fn execute_collect(
     if amount0.is_zero() && amount1.is_zero() {
         return Ok(Response::new()
             .add_attribute("action", "collect")
-            .add_attribute("amount", "0"));
+            .add_attribute("owner", info.sender.as_str())
+            .add_attribute("recipient", &recipient)
+            .add_attribute("lower_tick", lower_tick.to_string())
+            .add_attribute("upper_tick", upper_tick.to_string())
+            .add_attribute("amount0", "0")
+            .add_attribute("amount1", "0"));
     }
 
     // 2. Decrement Owed
@@ -57,6 +62,10 @@ pub fn execute_collect(
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "collect")
+        .add_attribute("owner", info.sender.as_str())
+        .add_attribute("recipient", &recipient)
+        .add_attribute("lower_tick", lower_tick.to_string())
+        .add_attribute("upper_tick", upper_tick.to_string())
         .add_attribute("amount0", amount0)
         .add_attribute("amount1", amount1))
 }
