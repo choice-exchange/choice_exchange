@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 library = []
 
 [dependencies]
+cw2               = { version = "2.0.0" }
 cw20              = { version = "2.0.0" }
 cosmwasm-std      = { version = "2.2.2", features = [
     "abort",

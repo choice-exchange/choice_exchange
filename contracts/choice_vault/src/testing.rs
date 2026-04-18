@@ -40,7 +40,9 @@ mod tests {
         let creator_addr = deps.api.addr_make("creator");
 
         let token_b_denom = "uinj";
-        let reward_denom = "reward_denom";
+        // reward_token is set equal to token_b so the compound path terminates on a pair asset
+        // (see H-2 init-time validation in contract.rs).
+        let reward_denom = token_b_denom;
 
         let msg = InstantiateMsg {
             owner: owner_addr.to_string(),
@@ -136,7 +138,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -237,7 +239,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -337,7 +339,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -459,6 +461,549 @@ mod tests {
     }
 
     #[test]
+    fn test_activate_pending_deposits_rejects_uncompounded_rewards() {
+        // C-2 regression: activating while farm has unharvested rewards would silently dilute
+        // existing shareholders (share price denominator excludes pending_reward). Verify the
+        // guard blocks activation and unblocks it once the farm reports no pending reward.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+
+        let minimum_reward = Uint128::new(1_000);
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: minimum_reward,
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        let creator_addr = deps.api.addr_make("creator");
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        let user1_addr = deps.api.addr_make("user1");
+        let user2_addr = deps.api.addr_make("user2");
+        let initial_total_shares = Uint128::new(100);
+        let user2_pending_amount = Uint128::new(60);
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &initial_total_shares)
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &user2_pending_amount)
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user1_addr,
+                &UserInfo {
+                    shares: initial_total_shares,
+                    pending_deposit: Uint128::zero(),
+                },
+            )
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user2_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: user2_pending_amount,
+                },
+            )
+            .unwrap();
+
+        // Farm reports pending_reward at the compound threshold — activation must be rejected.
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: Uint128::new(180),
+                pending_reward: minimum_reward,
+            },
+        );
+
+        let msg = ExecuteMsg::ActivatePendingDeposits {
+            users: vec![user2_addr.to_string()],
+        };
+        let info = message_info(&owner_addr, &[]);
+        let err = execute(deps.as_mut(), mock_env(), info.clone(), msg.clone()).unwrap_err();
+        match err {
+            ContractError::PendingRewardsMustBeCompounded { pending } => {
+                assert_eq!(pending, minimum_reward);
+            }
+            other => panic!("expected PendingRewardsMustBeCompounded, got {:?}", other),
+        }
+
+        // State must be untouched by the rejected call.
+        let user2_info: UserInfoResponse = from_json(
+            query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user2_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(user2_info.shares, Uint128::zero());
+        assert_eq!(user2_info.pending_deposit, user2_pending_amount);
+
+        // Sub-threshold rewards are allowed (they can't be harvested anyway).
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: Uint128::new(180),
+                pending_reward: minimum_reward - Uint128::new(1),
+            },
+        );
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        let user2_info: UserInfoResponse = from_json(
+            query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user2_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(user2_info.pending_deposit, Uint128::zero());
+        assert!(user2_info.shares > Uint128::zero());
+    }
+
+    #[test]
+    fn test_activate_pending_deposits_rejects_any_pending_when_minimum_is_zero() {
+        // C-2 regression: when minimum_reward_to_compound is 0 the guard clamps to 1, so any
+        // nonzero pending_reward still blocks activation.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        let creator_addr = deps.api.addr_make("creator");
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        let user_addr = deps.api.addr_make("user_pending");
+        TOTAL_SHARES
+            .save(&mut deps.storage, &Uint128::new(100))
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &Uint128::new(50))
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: Uint128::new(50),
+                },
+            )
+            .unwrap();
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: Uint128::new(150),
+                pending_reward: Uint128::new(1),
+            },
+        );
+
+        let msg = ExecuteMsg::ActivatePendingDeposits {
+            users: vec![user_addr.to_string()],
+        };
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            msg,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ContractError::PendingRewardsMustBeCompounded { .. }
+        ));
+    }
+
+    /// Shared helper for C-3 tests: spins up a vault at initial_compounder with the given
+    /// farm snapshot and a single pending-deposit user, so tests only contain the assertions
+    /// that matter for the behavior under test.
+    fn setup_vault_for_c3(
+        initial_compounder: &cosmwasm_std::Addr,
+        pending_reward: Uint128,
+    ) -> (
+        cosmwasm_std::OwnedDeps<
+            cosmwasm_std::testing::MockStorage,
+            cosmwasm_std::testing::MockApi,
+            crate::mock_querier::WasmMockQuerier,
+        >,
+        cosmwasm_std::Addr,
+        cosmwasm_std::Addr,
+        cosmwasm_std::Addr,
+    ) {
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner_c3");
+        let farm_contract_addr = deps.api.addr_make("farm_c3");
+        let lp_token_addr = deps.api.addr_make("lp_token_c3");
+        let user_addr = deps.api.addr_make("user_c3");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair_c3").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: initial_compounder.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        let creator_addr = deps.api.addr_make("creator_c3");
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        TOTAL_SHARES
+            .save(&mut deps.storage, &Uint128::new(100))
+            .unwrap();
+        TOTAL_PENDING_DEPOSITS
+            .save(&mut deps.storage, &Uint128::new(50))
+            .unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user_addr,
+                &UserInfo {
+                    shares: Uint128::zero(),
+                    pending_deposit: Uint128::new(50),
+                },
+            )
+            .unwrap();
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: Uint128::new(150),
+                pending_reward,
+            },
+        );
+
+        (deps, owner_addr, user_addr, farm_contract_addr)
+    }
+
+    #[test]
+    fn test_compounder_rotation_rejects_apply_before_timelock() {
+        // C-3 regression: proposing a new compounder must not take effect until the timelock
+        // expires. ApplyCompounderRotation before the delay must error.
+        let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
+        let (mut deps, owner_addr, _, _) =
+            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let new_compounder = deps.api.addr_make("keeper1");
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::ProposeCompounder {
+                new_compounder: new_compounder.to_string(),
+            },
+        )
+        .unwrap();
+
+        // Same block — timelock has not elapsed.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::ApplyCompounderRotation,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::CompounderRotationNotReady {}));
+
+        // And any stale call to Compound by the *new* compounder must fail — they aren't the
+        // active compounder yet.
+        let staker_info_unauthorized = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&new_compounder, &[]),
+            ExecuteMsg::Compound {
+                belief_prices: vec![Decimal::one()],
+                minimum_lp_to_receive: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            staker_info_unauthorized,
+            ContractError::Unauthorized {}
+        ));
+    }
+
+    #[test]
+    fn test_compounder_rotation_applies_after_timelock() {
+        // C-3 regression: once the timelock has elapsed, the owner can finalize the rotation
+        // and the new compounder replaces the old. The old compounder loses access.
+        let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
+        let (mut deps, owner_addr, _, _) =
+            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let new_compounder = deps.api.addr_make("keeper1");
+
+        let propose_env = mock_env();
+        execute(
+            deps.as_mut(),
+            propose_env.clone(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::ProposeCompounder {
+                new_compounder: new_compounder.to_string(),
+            },
+        )
+        .unwrap();
+
+        // Advance past the timelock.
+        let mut applied_env = mock_env();
+        applied_env.block.time = propose_env
+            .block
+            .time
+            .plus_seconds(crate::state::COMPOUNDER_ROTATION_DELAY_SECONDS + 1);
+
+        execute(
+            deps.as_mut(),
+            applied_env.clone(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::ApplyCompounderRotation,
+        )
+        .unwrap();
+
+        // Old compounder is now unauthorized.
+        let err_old = execute(
+            deps.as_mut(),
+            applied_env.clone(),
+            message_info(&initial_compounder, &[]),
+            ExecuteMsg::ActivatePendingDeposits { users: vec![] },
+        )
+        .unwrap_err();
+        assert!(matches!(err_old, ContractError::Unauthorized {}));
+
+        // New compounder is authorized (empty users vec just exercises the permission check).
+        execute(
+            deps.as_mut(),
+            applied_env,
+            message_info(&new_compounder, &[]),
+            ExecuteMsg::ActivatePendingDeposits { users: vec![] },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_propose_compounder_rejects_non_owner() {
+        let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
+        let (mut deps, _, _, _) = setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let attacker = deps.api.addr_make("attacker");
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&attacker, &[]),
+            ExecuteMsg::ProposeCompounder {
+                new_compounder: attacker.to_string(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::Unauthorized {}));
+    }
+
+    #[test]
+    fn test_cancel_compounder_proposal_clears_pending() {
+        let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
+        let (mut deps, owner_addr, _, _) =
+            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let proposed = deps.api.addr_make("keeper1");
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::ProposeCompounder {
+                new_compounder: proposed.to_string(),
+            },
+        )
+        .unwrap();
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::CancelCompounderProposal,
+        )
+        .unwrap();
+
+        // Subsequent apply — even after a long wait — errors with NoPending, not Timelock.
+        let mut future = mock_env();
+        future.block.time = future
+            .block
+            .time
+            .plus_seconds(crate::state::COMPOUNDER_ROTATION_DELAY_SECONDS * 10);
+        let err = execute(
+            deps.as_mut(),
+            future,
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::ApplyCompounderRotation,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::NoPendingCompounderRotation {}));
+    }
+
+    #[test]
+    fn test_activate_my_deposit_works_without_keeper() {
+        // C-3 regression: users can self-activate their pending deposits without waiting on
+        // the keeper, so a dead keeper cannot permanently strand their capital.
+        let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
+        let (mut deps, _, user_addr, _) =
+            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user_addr, &[]),
+            ExecuteMsg::ActivateMyDeposit {},
+        )
+        .unwrap();
+
+        let info: UserInfoResponse = from_json(
+            query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(info.pending_deposit, Uint128::zero());
+        assert!(info.shares > Uint128::zero());
+    }
+
+    #[test]
+    fn test_activate_my_deposit_respects_dilution_guard() {
+        // C-3 must not bypass the C-2 guard: self-activation still errors when pending farm
+        // rewards would dilute existing holders.
+        let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
+        let (mut deps, _, user_addr, _) = setup_vault_for_c3(&initial_compounder, Uint128::new(5));
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user_addr, &[]),
+            ExecuteMsg::ActivateMyDeposit {},
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ContractError::PendingRewardsMustBeCompounded { .. }
+        ));
+    }
+
+    #[test]
+    fn test_activate_my_deposit_errors_without_pending() {
+        let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
+        let (mut deps, _, _, _) = setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let random = deps.api.addr_make("no_deposit_user");
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&random, &[]),
+            ExecuteMsg::ActivateMyDeposit {},
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::NoPendingDeposit {}));
+    }
+
+    #[test]
     fn test_withdraw_simple() {
         // --- Arrange ---
         // 1. Setup and instantiate the contract
@@ -477,7 +1022,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -612,7 +1157,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -729,7 +1274,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -859,9 +1404,10 @@ mod tests {
         let pair_contract_addr = deps.api.addr_make("pair0000");
         let vault_addr = deps.api.addr_make("vault_contract"); // Mock our own address
 
-        let reward_denom = "uinj";
         let token_a_addr = deps.api.addr_make("token_a0000"); // CW20
         let token_b_denom = "uusd"; // Native
+        // reward_token must be one of the pair's assets (H-2) — pick token_b (native).
+        let reward_denom = token_b_denom;
 
         let creator_addr = deps.api.addr_make("creator");
         let pending_rewards = Uint128::new(20);
@@ -910,18 +1456,13 @@ mod tests {
             },
         );
 
+        // reward_denom == token_b_denom, so both legs live under the same denom entry.
         deps.querier.with_balance(&[(
             vault_addr.to_string(),
-            &[
-                cosmwasm_std::Coin {
-                    denom: reward_denom.to_string(),
-                    amount: pending_rewards,
-                },
-                cosmwasm_std::Coin {
-                    denom: token_b_denom.to_string(),
-                    amount: Uint128::new(10),
-                },
-            ],
+            &[cosmwasm_std::Coin {
+                denom: token_b_denom.to_string(),
+                amount: pending_rewards + Uint128::new(10),
+            }],
         )]);
 
         // This is the balance of the CW20 asset after the swap
@@ -942,7 +1483,16 @@ mod tests {
 
         // ==> STEP 1: Execute Compound
         let info = message_info(&owner_addr, &[]);
-        let res = execute(deps.as_mut(), env.clone(), info, ExecuteMsg::Compound {}).unwrap();
+        let res = execute(
+            deps.as_mut(),
+            env.clone(),
+            info,
+            ExecuteMsg::Compound {
+                belief_prices: vec![Decimal::one()],
+                minimum_lp_to_receive: None,
+            },
+        )
+        .unwrap();
         assert_eq!(res.messages.len(), 1);
         assert_eq!(res.messages[0].id, HARVEST_REPLY_ID);
 
@@ -950,6 +1500,8 @@ mod tests {
         let payload = HarvestReplyPayload {
             reward_amount_to_compound: pending_rewards,
             tvl_before_compound: total_lp_staked,
+            belief_prices: vec![Decimal::one()],
+            minimum_lp_to_receive: None,
         };
         let reply_msg = Reply {
             id: HARVEST_REPLY_ID,
@@ -1057,9 +1609,10 @@ mod tests {
         let pair_contract_addr = deps.api.addr_make("pair0000");
         let vault_addr = deps.api.addr_make("vault_contract");
 
-        let reward_denom = "uinj";
         let token_a_denom = "uatom"; // Native
         let token_b_denom = "uusd"; // Native
+        // reward_token must be one of the pair's assets (H-2) — pick token_a.
+        let reward_denom = token_a_denom;
 
         let pending_rewards = Uint128::new(20);
         let total_lp_staked = Uint128::new(1000);
@@ -1109,20 +1662,15 @@ mod tests {
             },
         );
 
-        // Mock balances for all native tokens involved
+        // reward_denom == token_a_denom, so the reward and "asset A after swap" balances
+        // live under the same entry.
         deps.querier.with_balance(&[(
             vault_addr.to_string(),
             &[
                 cosmwasm_std::Coin {
-                    denom: reward_denom.to_string(),
-                    amount: pending_rewards,
-                },
-                // This is the balance of asset A after the swap
-                cosmwasm_std::Coin {
                     denom: token_a_denom.to_string(),
-                    amount: Uint128::new(8),
+                    amount: pending_rewards + Uint128::new(8),
                 },
-                // This is the balance of asset B after the swap
                 cosmwasm_std::Coin {
                     denom: token_b_denom.to_string(),
                     amount: Uint128::new(10),
@@ -1142,11 +1690,22 @@ mod tests {
 
         // Execute the full compound flow
         let info = message_info(&owner_addr, &[]);
-        execute(deps.as_mut(), env.clone(), info, ExecuteMsg::Compound {}).unwrap();
+        execute(
+            deps.as_mut(),
+            env.clone(),
+            info,
+            ExecuteMsg::Compound {
+                belief_prices: vec![Decimal::one()],
+                minimum_lp_to_receive: None,
+            },
+        )
+        .unwrap();
 
         let payload = HarvestReplyPayload {
             reward_amount_to_compound: pending_rewards,
             tvl_before_compound: total_lp_staked,
+            belief_prices: vec![Decimal::one()],
+            minimum_lp_to_receive: None,
         };
         let reply_msg = Reply {
             id: HARVEST_REPLY_ID,
@@ -1198,6 +1757,368 @@ mod tests {
     }
 
     #[test]
+    fn test_compound_rejects_wrong_belief_prices_length() {
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // No route configured -> expect exactly 1 belief price. Pass 0 and 2 and expect rejection.
+        let info = message_info(&owner_addr, &[]);
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info.clone(),
+            ExecuteMsg::Compound {
+                belief_prices: vec![],
+                minimum_lp_to_receive: None,
+            },
+        );
+        assert!(matches!(
+            res,
+            Err(ContractError::InvalidBeliefPrices {
+                expected: 1,
+                got: 0
+            })
+        ));
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::Compound {
+                belief_prices: vec![Decimal::one(), Decimal::one()],
+                minimum_lp_to_receive: None,
+            },
+        );
+        assert!(matches!(
+            res,
+            Err(ContractError::InvalidBeliefPrices {
+                expected: 1,
+                got: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn test_compound_rejects_zero_belief_price() {
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair0000").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        let info = message_info(&owner_addr, &[]);
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::Compound {
+                belief_prices: vec![Decimal::zero()],
+                minimum_lp_to_receive: None,
+            },
+        );
+        assert!(matches!(res, Err(ContractError::ZeroBeliefPrice {})));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_compound_swap_submsg_sets_belief_price_and_slippage() {
+        // Verifies C-1 fix: every swap carries the caller-supplied belief_price,
+        // and the ProvideLiquidity call carries a non-None slippage_tolerance.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let pair_contract_addr = deps.api.addr_make("pair0000");
+        let vault_addr = deps.api.addr_make("vault_contract");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let token_a_denom = "uatom";
+        let token_b_denom = "uusd";
+        // reward_token must be one of the pair's assets (H-2) — pick token_a.
+        let reward_denom = token_a_denom;
+
+        let total_rewards = Uint128::new(1000);
+        let slippage = Decimal::permille(5); // 0.5%
+        let belief_price = Decimal::percent(200); // 2.0
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: pair_contract_addr.to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: reward_denom.to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: token_a_denom.to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: token_b_denom.to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: slippage,
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: vault_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: Uint128::new(1000),
+                pending_reward: total_rewards,
+            },
+        );
+        // reward_denom == token_a_denom, merged into one entry.
+        deps.querier.with_balance(&[(
+            vault_addr.to_string(),
+            &[
+                cosmwasm_std::Coin {
+                    denom: token_a_denom.to_string(),
+                    amount: total_rewards + Uint128::new(500),
+                },
+                cosmwasm_std::Coin {
+                    denom: token_b_denom.to_string(),
+                    amount: Uint128::new(500),
+                },
+            ],
+        )]);
+
+        let mut env = mock_env();
+        env.contract.address = vault_addr;
+
+        // Drive the harvest reply, which builds the swap submsg.
+        let payload = HarvestReplyPayload {
+            reward_amount_to_compound: total_rewards,
+            tvl_before_compound: Uint128::new(1000),
+            belief_prices: vec![belief_price],
+            minimum_lp_to_receive: None,
+        };
+        let reply_msg = Reply {
+            id: HARVEST_REPLY_ID,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                msg_responses: vec![],
+                data: None,
+            }),
+            gas_used: 0,
+            payload: to_json_binary(&payload).unwrap(),
+        };
+        let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+
+        let swap_submsg = res.messages.last().unwrap();
+        assert_eq!(swap_submsg.id, FINAL_SWAP_REPLY_ID);
+        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &swap_submsg.msg {
+            if let Ok(choice::pair::ExecuteMsg::Swap {
+                belief_price: bp,
+                max_spread,
+                ..
+            }) = from_json(msg)
+            {
+                assert_eq!(bp, Some(belief_price));
+                assert_eq!(max_spread, Some(slippage));
+            } else {
+                panic!("inner msg is not a Swap");
+            }
+        } else {
+            panic!("outer msg is not a Wasm execute");
+        }
+
+        // Drive the final swap reply and verify ProvideLiquidity carries slippage_tolerance.
+        let reply_msg = Reply {
+            id: FINAL_SWAP_REPLY_ID,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                msg_responses: vec![],
+                data: None,
+            }),
+            gas_used: 0,
+            payload: to_json_binary(&payload).unwrap(),
+        };
+        let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+        let provide_submsg = res.messages.last().unwrap();
+        assert_eq!(provide_submsg.id, PROVIDE_LIQUIDITY_REPLY_ID);
+        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &provide_submsg.msg {
+            if let Ok(choice::pair::ExecuteMsg::ProvideLiquidity {
+                slippage_tolerance, ..
+            }) = from_json(msg)
+            {
+                assert_eq!(slippage_tolerance, Some(slippage));
+            } else {
+                panic!("inner msg is not ProvideLiquidity");
+            }
+        } else {
+            panic!("outer msg is not a Wasm execute");
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_compound_rejects_insufficient_lp_received() {
+        // Verifies C-1 fix: minimum_lp_to_receive reverts the compound when the
+        // provide step mints fewer LP than the caller specified.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let pair_contract_addr = deps.api.addr_make("pair0000");
+        let vault_addr = deps.api.addr_make("vault_contract");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: pair_contract_addr.to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        let minted_lp = Uint128::new(50);
+        let minimum_required = Uint128::new(100);
+        deps.querier.with_token_balance(
+            lp_token_addr.as_ref(),
+            vault_addr.as_ref(),
+            minted_lp,
+        );
+
+        let mut env = mock_env();
+        env.contract.address = vault_addr;
+
+        let payload = HarvestReplyPayload {
+            reward_amount_to_compound: Uint128::new(1000),
+            tvl_before_compound: Uint128::new(1000),
+            belief_prices: vec![Decimal::one()],
+            minimum_lp_to_receive: Some(minimum_required),
+        };
+        let reply_msg = Reply {
+            id: PROVIDE_LIQUIDITY_REPLY_ID,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                msg_responses: vec![],
+                data: None,
+            }),
+            gas_used: 0,
+            payload: to_json_binary(&payload).unwrap(),
+        };
+        let res = reply(deps.as_mut(), env, reply_msg);
+        assert!(matches!(
+            res,
+            Err(ContractError::InsufficientLpReceived {
+                minimum,
+                got,
+            }) if minimum == minimum_required && got == minted_lp
+        ));
+    }
+
+    #[test]
     fn test_withdraw_insufficient_shares() {
         // --- Arrange ---
         // 1. Setup and instantiate
@@ -1215,7 +2136,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -1288,7 +2209,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -1346,7 +2267,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -1384,7 +2305,10 @@ mod tests {
         );
 
         // --- Act ---
-        let msg = ExecuteMsg::Compound {};
+        let msg = ExecuteMsg::Compound {
+            belief_prices: vec![Decimal::one()],
+            minimum_lp_to_receive: None,
+        };
         let info = message_info(&owner_addr, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
 
@@ -1413,7 +2337,8 @@ mod tests {
         let vault_addr = deps.api.addr_make("vault_contract");
         let fee_recipient_addr = deps.api.addr_make("fee_recipient");
         let lp_token_addr = deps.api.addr_make("lp_token0000");
-        let reward_denom = "uinj";
+        // reward_token must be one of the pair's assets (H-2) — pick token_a.
+        let reward_denom = "token_a";
 
         // Instantiate with a 10% fee
         let instantiate_msg = InstantiateMsg {
@@ -1480,6 +2405,8 @@ mod tests {
         let payload = HarvestReplyPayload {
             reward_amount_to_compound: total_rewards, // Use the actual reward amount
             tvl_before_compound: Uint128::new(1000),
+            belief_prices: vec![Decimal::one()],
+            minimum_lp_to_receive: None,
         };
         let reply_msg = Reply {
             id: HARVEST_REPLY_ID,
@@ -1550,14 +2477,14 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -1588,7 +2515,10 @@ mod tests {
             },
         );
 
-        let msg = ExecuteMsg::Compound {};
+        let msg = ExecuteMsg::Compound {
+            belief_prices: vec![Decimal::one()],
+            minimum_lp_to_receive: None,
+        };
         let info = message_info(&compounder_addr, &[]); // Correct compounder calls
         let res = execute(deps.as_mut(), env.clone(), info, msg.clone());
 
@@ -1631,7 +2561,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -1710,14 +2640,14 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -1786,14 +2716,14 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -1861,14 +2791,14 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -1897,7 +2827,10 @@ mod tests {
         );
 
         // A random, non-compounder user calls Compound
-        let msg = ExecuteMsg::Compound {};
+        let msg = ExecuteMsg::Compound {
+            belief_prices: vec![Decimal::one()],
+            minimum_lp_to_receive: None,
+        };
         let info = message_info(&random_caller, &[]);
         let res = execute(deps.as_mut(), mock_env(), info, msg);
 
@@ -1927,14 +2860,14 @@ mod tests {
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -2011,14 +2944,14 @@ mod tests {
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -2106,14 +3039,14 @@ mod tests {
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             farm_contract: farm_contract_addr.to_string(),
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -2309,14 +3242,26 @@ mod tests {
         // ==> STEP 1: Execute Compound
         // We need 2 belief prices: one for SAI->SHROOM, one for SHROOM->INJ
 
+        let belief_prices = vec![Decimal::one(), Decimal::one()];
         let info = message_info(&compounder_addr, &[]);
-        let res = execute(deps.as_mut(), env.clone(), info, ExecuteMsg::Compound {}).unwrap();
+        let res = execute(
+            deps.as_mut(),
+            env.clone(),
+            info,
+            ExecuteMsg::Compound {
+                belief_prices: belief_prices.clone(),
+                minimum_lp_to_receive: None,
+            },
+        )
+        .unwrap();
         assert_eq!(res.messages[0].id, HARVEST_REPLY_ID);
 
         // ==> STEP 2: Handle Harvest Reply -> Should start the route
         let harvest_payload = HarvestReplyPayload {
             reward_amount_to_compound: pending_rewards,
             tvl_before_compound: total_lp_staked,
+            belief_prices: belief_prices.clone(),
+            minimum_lp_to_receive: None,
         };
         let reply_msg = Reply {
             id: HARVEST_REPLY_ID,
@@ -2337,6 +3282,8 @@ mod tests {
             hop_index: 1,
             reward_amount_to_compound: pending_rewards,
             tvl_before_compound: total_lp_staked,
+            belief_prices: belief_prices.clone(),
+            minimum_lp_to_receive: None,
         };
         let reply_msg = Reply {
             id: ROUTE_SWAP_REPLY_ID,
@@ -2356,6 +3303,8 @@ mod tests {
         let final_swap_payload = HarvestReplyPayload {
             reward_amount_to_compound: pending_rewards,
             tvl_before_compound: total_lp_staked,
+            belief_prices: belief_prices.clone(),
+            minimum_lp_to_receive: None,
         };
         let reply_msg = Reply {
             id: FINAL_SWAP_REPLY_ID,
@@ -2416,14 +3365,14 @@ mod tests {
             },
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -2566,14 +3515,14 @@ mod tests {
             },
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -2685,14 +3634,14 @@ mod tests {
             // ... other fields can be defaults
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -2782,7 +3731,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -2930,10 +3879,120 @@ mod tests {
         let res3 = query(deps.as_ref(), mock_env(), query_msg_3).unwrap();
         let page3: PendingDepositsResponse = from_json(&res3).unwrap();
 
-        assert!(page3.users.is_empty(), "Page 3 should be empty");
-        assert!(
-            page3.last_user.is_none(),
-            "last_user should be None when the page is empty"
+        assert!(page3.users.is_empty(), "Page 3 should have no pending users");
+
+        // The cursor must still advance past any non-pending users that were
+        // iterated on this page, so paginate again to confirm termination.
+        if let Some(cursor) = page3.last_user {
+            let query_msg_4 = QueryMsg::PendingDeposits {
+                start_after: Some(cursor),
+                limit: Some(2),
+            };
+            let res4 = query(deps.as_ref(), mock_env(), query_msg_4).unwrap();
+            let page4: PendingDepositsResponse = from_json(&res4).unwrap();
+            assert!(page4.users.is_empty());
+            assert!(
+                page4.last_user.is_none(),
+                "last_user should be None once the iterator is exhausted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_query_pending_users_pagination_advances_past_non_pending_page() {
+        // Regression: if a full page of iterated users has no pending deposits,
+        // the cursor must still advance. Otherwise the keeper stops paginating
+        // and pending deposits beyond the page are silently missed.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner");
+        let farm_contract_addr = deps.api.addr_make("farm0000");
+        let lp_token_addr = deps.api.addr_make("lp_token0000");
+        let pair_contract_addr = deps.api.addr_make("pair0000");
+        let creator_addr = deps.api.addr_make("creator");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: pair_contract_addr.to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::Token {
+                contract_addr: lp_token_addr.to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        // Create 10 users, only 1 with a pending deposit. With limit=2, at
+        // least one page will contain zero pending users regardless of the
+        // sort order produced by addr_make.
+        let mut expected_pending: HashSet<String> = HashSet::new();
+        for i in 0..10 {
+            let addr = deps.api.addr_make(&format!("user{i}"));
+            let pending = if i == 7 {
+                expected_pending.insert(addr.to_string());
+                Uint128::new(42)
+            } else {
+                Uint128::zero()
+            };
+            USERS
+                .save(
+                    &mut deps.storage,
+                    &addr,
+                    &UserInfo {
+                        shares: Uint128::new(100),
+                        pending_deposit: pending,
+                    },
+                )
+                .unwrap();
+        }
+
+        // Paginate to exhaustion, collecting every user returned as pending.
+        let mut collected: HashSet<String> = HashSet::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let res = query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::PendingDeposits {
+                    start_after: cursor.clone(),
+                    limit: Some(2),
+                },
+            )
+            .unwrap();
+            let page: PendingDepositsResponse = from_json(&res).unwrap();
+            for u in &page.users {
+                collected.insert(u.clone());
+            }
+            match page.last_user {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        assert_eq!(
+            collected, expected_pending,
+            "pagination must return every user with a pending deposit"
         );
     }
 
@@ -2956,14 +4015,14 @@ mod tests {
             // ... other fields can be defaults
             pair_contract: deps.api.addr_make("pair0000").to_string(),
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
-                    denom: "a".to_string(),
+                    denom: "token_a".to_string(),
                 },
                 AssetInfo::NativeToken {
-                    denom: "b".to_string(),
+                    denom: "token_b".to_string(),
                 },
             ],
             fee_recipient: None,
@@ -3042,7 +4101,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3173,7 +4232,7 @@ mod tests {
             },
             // ... other fields are default for this test
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3311,7 +4370,7 @@ mod tests {
                 contract_addr: lp_token_addr.to_string(),
             },
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3434,7 +4493,7 @@ mod tests {
             },
             // ... other fields are default for this test
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3540,7 +4599,7 @@ mod tests {
             },
             // ... other fields are default
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3671,7 +4730,7 @@ mod tests {
             },
             // ... other fields are default
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3798,7 +4857,7 @@ mod tests {
             },
             // ... other fields are default
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3892,7 +4951,7 @@ mod tests {
             },
             // ... other fields are default
             reward_token: AssetInfo::NativeToken {
-                denom: "reward".to_string(),
+                denom: "token_a".to_string(),
             },
             asset_infos: [
                 AssetInfo::NativeToken {
@@ -3969,5 +5028,469 @@ mod tests {
             res,
             Err(ContractError::Std(StdError::Overflow { .. }))
         ));
+    }
+
+    /// Spins up a single-user native-LP/native-reward vault ready for withdraw-shares tests.
+    /// Returns deps, the farm addr, user addr, user's shares, and the total bonded LP.
+    fn setup_vault_for_withdraw_shares(
+        pending_reward: Uint128,
+    ) -> (
+        cosmwasm_std::OwnedDeps<
+            cosmwasm_std::testing::MockStorage,
+            cosmwasm_std::testing::MockApi,
+            crate::mock_querier::WasmMockQuerier,
+        >,
+        cosmwasm_std::Addr,
+        cosmwasm_std::Addr,
+        Uint128,
+        Uint128,
+    ) {
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner_h1");
+        let farm_contract_addr = deps.api.addr_make("farm_h1");
+        let user_addr = deps.api.addr_make("exiter_h1");
+        let creator_addr = deps.api.addr_make("creator_h1");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair_h1").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp_denom".to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        let user_shares = Uint128::new(100);
+        let total_bonded = Uint128::new(100);
+        TOTAL_SHARES.save(&mut deps.storage, &user_shares).unwrap();
+        USERS
+            .save(
+                &mut deps.storage,
+                &user_addr,
+                &UserInfo {
+                    shares: user_shares,
+                    pending_deposit: Uint128::zero(),
+                },
+            )
+            .unwrap();
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: total_bonded,
+                pending_reward,
+            },
+        );
+
+        (deps, farm_contract_addr, user_addr, user_shares, total_bonded)
+    }
+
+    #[test]
+    fn test_withdraw_shares_emits_harvest_submsg_when_rewards_pending() {
+        // H-1/H-5 regression: when the farm has unharvested rewards, withdraw must route
+        // through the farm Withdraw reply chain instead of directly unbonding — otherwise the
+        // exiter forfeits their slice of the pending reward.
+        let (mut deps, farm_addr, user_addr, shares, _) =
+            setup_vault_for_withdraw_shares(Uint128::new(999));
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user_addr, &[]),
+            ExecuteMsg::WithdrawShares {
+                shares_to_burn: shares,
+            },
+        )
+        .unwrap();
+
+        // Exactly one submessage: farm.Withdraw. The unbond + transfer happen in the reply.
+        assert_eq!(res.messages.len(), 1);
+        let sub = &res.messages[0];
+        assert_eq!(sub.id, crate::contract::WITHDRAW_SHARES_REPLY_ID);
+        match &sub.msg {
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr, msg, ..
+            }) => {
+                assert_eq!(contract_addr, &farm_addr.to_string());
+                let decoded: FarmExecuteMsg = from_json(msg).unwrap();
+                assert!(matches!(decoded, FarmExecuteMsg::Withdraw {}));
+            }
+            other => panic!("unexpected submsg: {:?}", other),
+        }
+
+        // User bookkeeping already updated — the reply only emits transfers.
+        let info: UserInfoResponse = from_json(
+            query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::UserInfo {
+                    user: user_addr.to_string(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(info.shares, Uint128::zero());
+    }
+
+    #[test]
+    fn test_withdraw_shares_reply_sends_proportional_reward() {
+        // Sole shareholder exits. Reply sees the full reward_token balance and must forward
+        // all of it to the exiter (100% of shares → 100% of harvested rewards).
+        let (mut deps, farm_addr, user_addr, shares, bonded) =
+            setup_vault_for_withdraw_shares(Uint128::new(999));
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user_addr, &[]),
+            ExecuteMsg::WithdrawShares {
+                shares_to_burn: shares,
+            },
+        )
+        .unwrap();
+        let payload = res.messages[0].payload.clone();
+
+        // Simulate farm handing the reward tokens to the vault. The reward_token in
+        // `setup_vault_for_withdraw_shares` is "token_a" (must be a pair asset per H-2).
+        let harvested = Uint128::new(999);
+        let env = mock_env();
+        deps.querier.with_balance(&[(
+            env.contract.address.to_string(),
+            &[cosmwasm_std::Coin {
+                denom: "token_a".to_string(),
+                amount: harvested,
+            }],
+        )]);
+
+        let reply_msg = Reply {
+            id: crate::contract::WITHDRAW_SHARES_REPLY_ID,
+            payload,
+            gas_used: 0,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                data: None,
+                msg_responses: vec![],
+            }),
+        };
+
+        let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+
+        // Expect: unbond, LP transfer, reward transfer.
+        assert_eq!(res.messages.len(), 3);
+
+        let unbond = &res.messages[0].msg;
+        match unbond {
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr, msg, ..
+            }) => {
+                assert_eq!(contract_addr, &farm_addr.to_string());
+                let decoded: FarmExecuteMsg = from_json(msg).unwrap();
+                assert!(matches!(
+                    decoded,
+                    FarmExecuteMsg::Unbond { amount } if amount == bonded
+                ));
+            }
+            other => panic!("expected unbond, got {:?}", other),
+        }
+
+        let lp_transfer = &res.messages[1].msg;
+        match lp_transfer {
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+                assert_eq!(to_address, &user_addr.to_string());
+                assert_eq!(amount.len(), 1);
+                assert_eq!(amount[0].denom, "lp_denom");
+                assert_eq!(amount[0].amount, bonded);
+            }
+            other => panic!("expected LP bank send, got {:?}", other),
+        }
+
+        let reward_transfer = &res.messages[2].msg;
+        match reward_transfer {
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+                assert_eq!(to_address, &user_addr.to_string());
+                assert_eq!(amount.len(), 1);
+                assert_eq!(amount[0].denom, "token_a");
+                assert_eq!(amount[0].amount, harvested);
+            }
+            other => panic!("expected reward bank send, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_withdraw_shares_reply_proportional_split_with_multiple_holders() {
+        // Two shareholders of equal stake. Exiter burns half the shares, must receive exactly
+        // half of whatever reward balance is in the vault when the reply fires.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner_h1b");
+        let farm_contract_addr = deps.api.addr_make("farm_h1b");
+        let exiter_addr = deps.api.addr_make("exiter_h1b");
+        let stayer_addr = deps.api.addr_make("stayer_h1b");
+        let creator_addr = deps.api.addr_make("creator_h1b");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair_h1b").to_string(),
+            farm_contract: farm_contract_addr.to_string(),
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp_denom".to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator_addr, &[]),
+            instantiate_msg,
+        )
+        .unwrap();
+
+        let shares_each = Uint128::new(100);
+        TOTAL_SHARES
+            .save(&mut deps.storage, &(shares_each + shares_each))
+            .unwrap();
+        for addr in [&exiter_addr, &stayer_addr] {
+            USERS
+                .save(
+                    &mut deps.storage,
+                    addr,
+                    &UserInfo {
+                        shares: shares_each,
+                        pending_deposit: Uint128::zero(),
+                    },
+                )
+                .unwrap();
+        }
+
+        deps.querier.with_staker_info(
+            farm_contract_addr.to_string(),
+            StakerInfoResponse {
+                staker: owner_addr.to_string(),
+                reward_index: Decimal::one(),
+                bond_amount: Uint128::new(200),
+                pending_reward: Uint128::new(500),
+            },
+        );
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&exiter_addr, &[]),
+            ExecuteMsg::WithdrawShares {
+                shares_to_burn: shares_each,
+            },
+        )
+        .unwrap();
+        let payload = res.messages[0].payload.clone();
+
+        let env = mock_env();
+        deps.querier.with_balance(&[(
+            env.contract.address.to_string(),
+            &[cosmwasm_std::Coin {
+                denom: "token_a".to_string(),
+                amount: Uint128::new(500),
+            }],
+        )]);
+
+        let reply_msg = Reply {
+            id: crate::contract::WITHDRAW_SHARES_REPLY_ID,
+            payload,
+            gas_used: 0,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                events: vec![],
+                data: None,
+                msg_responses: vec![],
+            }),
+        };
+        let res = reply(deps.as_mut(), env, reply_msg).unwrap();
+
+        let reward_transfer = &res.messages[2].msg;
+        match reward_transfer {
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+                assert_eq!(to_address, &exiter_addr.to_string());
+                // Exiter burns 100 of 200 pre-burn shares → 500 * 100 / 200 = 250.
+                assert_eq!(amount[0].amount, Uint128::new(250));
+            }
+            other => panic!("expected reward bank send, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_withdraw_shares_fast_path_when_no_pending_reward() {
+        // Regression guard: when pending_reward is zero the vault should still emit the old
+        // direct unbond + transfer (no reply chain), keeping the happy path simple.
+        let (mut deps, farm_addr, user_addr, shares, bonded) =
+            setup_vault_for_withdraw_shares(Uint128::zero());
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user_addr, &[]),
+            ExecuteMsg::WithdrawShares {
+                shares_to_burn: shares,
+            },
+        )
+        .unwrap();
+
+        // Two direct messages, no submessages keyed on WITHDRAW_SHARES_REPLY_ID.
+        assert_eq!(res.messages.len(), 2);
+        assert!(res
+            .messages
+            .iter()
+            .all(|m| m.id != crate::contract::WITHDRAW_SHARES_REPLY_ID));
+
+        let unbond = &res.messages[0].msg;
+        match unbond {
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr, msg, ..
+            }) => {
+                assert_eq!(contract_addr, &farm_addr.to_string());
+                let decoded: FarmExecuteMsg = from_json(msg).unwrap();
+                assert!(matches!(
+                    decoded,
+                    FarmExecuteMsg::Unbond { amount } if amount == bonded
+                ));
+            }
+            other => panic!("expected unbond, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_instantiate_rejects_route_that_does_not_end_on_pair_asset() {
+        // H-2 regression: a route that terminates on a non-pair asset would leave the final
+        // 50/50 swap trying to offer a token the configured pair_contract doesn't trade,
+        // stranding every compound. Instantiate must reject at deploy time.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner_h2");
+        let orphan_denom = "orphan";
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair_h2").to_string(),
+            farm_contract: deps.api.addr_make("farm_h2").to_string(),
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp_denom".to_string(),
+            },
+            // reward is one of the pair assets, which alone would be fine — but the route
+            // redirects to an orphan terminal asset. That must still be rejected.
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![crate::msg::SwapHop {
+                pair_contract: deps.api.addr_make("hop_pair_h2").to_string(),
+                to_asset_info: AssetInfo::NativeToken {
+                    denom: orphan_denom.to_string(),
+                },
+            }],
+        };
+
+        let creator = deps.api.addr_make("creator_h2");
+        let err = instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator, &[]),
+            instantiate_msg,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::CompoundPathMustEndOnPairAsset {}));
+    }
+
+    #[test]
+    fn test_instantiate_rejects_empty_route_when_reward_is_not_pair_asset() {
+        // H-2 regression: empty route + reward_token that isn't one of the pair's assets is
+        // the same silent-burn config, just with no intermediate hops.
+        let mut deps = mock_dependencies();
+        let owner_addr = deps.api.addr_make("owner_h2b");
+
+        let instantiate_msg = InstantiateMsg {
+            owner: owner_addr.to_string(),
+            pair_contract: deps.api.addr_make("pair_h2b").to_string(),
+            farm_contract: deps.api.addr_make("farm_h2b").to_string(),
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp_denom".to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "orphan".to_string(),
+            },
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
+            ],
+            fee_recipient: None,
+            fee_percentage: None,
+            minimum_reward_to_compound: Uint128::zero(),
+            compounder: owner_addr.to_string(),
+            slippage_tolerance: Decimal::percent(1),
+            reward_to_lp_token_route: vec![],
+        };
+
+        let creator = deps.api.addr_make("creator_h2b");
+        let err = instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator, &[]),
+            instantiate_msg,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::CompoundPathMustEndOnPairAsset {}));
     }
 }

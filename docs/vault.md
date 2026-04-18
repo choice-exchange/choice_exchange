@@ -60,11 +60,17 @@ Triggered by `Compound {}` (compounder-only). Uses SubMsg reply chain (4 steps):
 
 - `Deposit {}` / `Receive(Cw20ReceiveMsg)` — deposit native or CW20 LP tokens. Added to pending_deposit, bonded to farm immediately.
 - `WithdrawPending { amount }` — withdraw LP tokens that haven't been activated as shares yet. Unbonds from farm first.
-- `WithdrawShares { shares_to_burn }` — redeem shares for LP tokens: `lp = shares * (total_staked - pending) / total_shares`. Unbonds from farm.
-- `Compound {}` — compounder only. Initiates the 4-step auto-compound flow.
-- `ActivatePendingDeposits { users: Vec<String> }` — compounder only. Batch convert pending deposits to shares (max 30 users).
-- `UpdateConfig { ... }` — owner only. Update compounder, slippage, fees, minimum_reward_to_compound.
+- `WithdrawShares { shares_to_burn }` — redeem shares for LP tokens: `lp = shares * (total_staked - pending) / total_shares`. When the farm has unharvested rewards, the exit runs through a reply chain: farm.Withdraw → on reply, unbond + transfer LP + transfer the exiter's proportional slice of the reward_token balance. This prevents exiters from forfeiting unharvested rewards.
+- `Compound { belief_prices, minimum_lp_to_receive }` — compounder only. Initiates the 4-step auto-compound flow.
+- `ActivatePendingDeposits { users: Vec<String> }` — compounder only. Batch convert pending deposits to shares (max 30 users). Refuses to run while farm's `pending_reward >= max(1, minimum_reward_to_compound)` to prevent dilution of existing shareholders.
+- `ActivateMyDeposit {}` — any user, activates their own pending deposit. Same dilution guard as the batch variant.
+- `UpdateConfig { ... }` — owner only. Update slippage, fees, minimum_reward_to_compound. Compounder rotation is intentionally excluded — use the timelocked propose/apply flow below.
+- `ProposeCompounder { new_compounder }` — owner only. Stages a compounder rotation that cannot take effect for `COMPOUNDER_ROTATION_DELAY_SECONDS` (48h).
+- `ApplyCompounderRotation` — owner only. Finalizes the rotation once the timelock has elapsed.
+- `CancelCompounderProposal` — owner only. Clears a pending rotation.
 - `ProposeNewOwner / AcceptOwnership / CancelOwnershipProposal` — ownership transfer.
+
+**Instantiate validation:** the compound path must terminate on one of the pair's two assets — either `reward_token` itself is a pair asset and `reward_to_lp_token_route` is empty, or the last hop's `to_asset_info` equals a pair asset. Otherwise instantiate rejects with `CompoundPathMustEndOnPairAsset`, since the final 50/50 swap would offer a token `pair_contract` doesn't trade.
 
 **Query:**
 
@@ -74,6 +80,7 @@ Triggered by `Compound {}` (compounder-only). Uses SubMsg reply chain (4 steps):
 - `CompoundingInfo {}` — last compound time and metrics (useful for APR calculation)
 - `PendingDeposits { start_after, limit }` — paginated list of users with pending deposits
 - `TotalPendingDeposits {}` — sum of all pending LP deposits
+- `PendingCompounderRotation {}` — `{ pending_compounder, effective_at }` for a staged rotation
 
 ## Errors (`error.rs`)
 

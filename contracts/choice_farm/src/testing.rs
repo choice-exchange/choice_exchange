@@ -1,17 +1,46 @@
 use crate::contract::{execute, instantiate, query};
-use crate::mock_querier::mock_dependencies;
+use crate::mock_querier::{mock_dependencies, WasmMockQuerier};
 use choice::asset::AssetInfo;
 use choice::staking::ExecuteMsg::UpdateConfig;
 use choice::staking::{
     ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg, StakerInfoResponse,
     StateResponse,
 };
-use cosmwasm_std::testing::{message_info, mock_env};
+use cosmwasm_std::testing::{message_info, mock_env, MockApi, MockStorage};
 use cosmwasm_std::{
-    attr, coins, from_json, to_json_binary, BankMsg, Coin, CosmosMsg, Decimal, StdError, SubMsg,
-    Uint128, WasmMsg,
+    attr, coins, from_json, to_json_binary, BankMsg, Coin, CosmosMsg, Decimal, OwnedDeps, StdError,
+    SubMsg, Uint128, WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
+
+type TestDeps = OwnedDeps<MockStorage, MockApi, WasmMockQuerier>;
+
+/// Fund the farm's reward pool via a Cw20 Send hook from the configured reward
+/// token "reward0000". Tests that use a CW20 reward token share this helper.
+fn fund_via_reward_cw20(deps: &mut TestDeps, amount: Uint128) {
+    let reward_addr = deps.api.addr_make("reward0000");
+    let funder = deps.api.addr_make("funder").to_string();
+    let info = message_info(&reward_addr, &[]);
+    let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
+        sender: funder,
+        amount,
+        msg: to_json_binary(&Cw20HookMsg::Fund {}).unwrap(),
+    });
+    execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+}
+
+/// Fund the farm's reward pool with a native reward token (e.g. "inj").
+fn fund_via_reward_native(deps: &mut TestDeps, denom: &str, amount: Uint128) {
+    let funder = deps.api.addr_make("funder");
+    let info = message_info(
+        &funder,
+        &[Coin {
+            denom: denom.to_string(),
+            amount,
+        }],
+    );
+    execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Fund {}).unwrap();
+}
 
 #[test]
 fn proper_initialization() {
@@ -57,6 +86,7 @@ fn proper_initialization() {
             last_distributed: mock_env().block.time.seconds(),
             total_bond_amount: Uint128::zero(),
             global_reward_index: Decimal::zero(),
+            undistributed_rewards: Uint128::zero(),
         }
     );
 }
@@ -88,6 +118,9 @@ fn test_bond_tokens() {
 
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Fund the distribution pool so rewards can actually be distributed.
+    fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
 
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
@@ -134,6 +167,7 @@ fn test_bond_tokens() {
             total_bond_amount: Uint128::from(100u128),
             global_reward_index: Decimal::zero(),
             last_distributed: mock_env().block.time.seconds(),
+            undistributed_rewards: Uint128::from(11_000_000u128),
         }
     );
 
@@ -182,6 +216,7 @@ fn test_bond_tokens() {
             total_bond_amount: Uint128::from(200u128),
             global_reward_index: Decimal::from_ratio(1000u128, 1u128),
             last_distributed: mock_env().block.time.seconds() + 10,
+            undistributed_rewards: Uint128::from(10_900_000u128),
         }
     );
 
@@ -291,6 +326,8 @@ fn test_compute_reward() {
 
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
 
     // bond 100 tokens
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
@@ -417,6 +454,8 @@ fn test_withdraw() {
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
+    fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
+
     // bond 100 tokens
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
@@ -478,6 +517,8 @@ fn test_migrate_staking() {
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
+    fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
+
     // bond 100 tokens
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
@@ -525,6 +566,10 @@ fn test_migrate_staking() {
     }
 
     // successful attempt
+    //
+    // Funded 11M; 1M was credited on the withdraw (slot 0 fully); another 5M
+    // credited on compute_reward inside migrate_staking (half of slot 1).
+    // Remaining undistributed: 11M - 6M = 5M, which is what's forwarded.
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let res = execute(deps.as_mut(), env, info, msg).unwrap();
 
@@ -532,8 +577,7 @@ fn test_migrate_staking() {
         res.attributes,
         vec![
             attr("action", "migrate_staking"),
-            attr("distributed_amount", "6000000"), // 1000000 + (10000000 / 2)
-            attr("remaining_amount", "5000000")    // 11,000,000 - 6000000
+            attr("remaining_amount", "5000000"),
         ]
     );
 
@@ -550,7 +594,9 @@ fn test_migrate_staking() {
         }))]
     );
 
-    // query config
+    // The distribution schedule is untouched by migrate_staking — the source
+    // of truth for what's left to distribute is `undistributed_rewards`, not
+    // the schedule.
     let res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
     let config: ConfigResponse = from_json(&res).unwrap();
     assert_eq!(
@@ -566,12 +612,22 @@ fn test_migrate_staking() {
                 ),
                 (
                     mock_env().block.time.seconds() + 100,
-                    mock_env().block.time.seconds() + 150,
-                    Uint128::from(5000000u128)
-                ), // slot was modified
+                    mock_env().block.time.seconds() + 200,
+                    Uint128::from(10000000u128)
+                ),
             ]
         }
     );
+
+    // State's undistributed_rewards is zeroed after migrate.
+    let res = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::State { block_time: None },
+    )
+    .unwrap();
+    let state: StateResponse = from_json(&res).unwrap();
+    assert_eq!(state.undistributed_rewards, Uint128::zero());
 }
 
 #[test]
@@ -616,6 +672,10 @@ fn test_update_config() {
 
     let info = message_info(&deps.api.addr_make("gov0000"), &[]);
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Fund with the full schedule total so distribution math matches the
+    // original expectations of this test.
+    fund_via_reward_cw20(&mut deps, Uint128::from(41_000_000u128));
 
     let update_config = UpdateConfig {
         distribution_schedule: vec![(
@@ -1132,6 +1192,9 @@ fn test_withdraw_native_reward_token() {
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
 
+    // Fund the reward pool with native "inj".
+    fund_via_reward_native(&mut deps, "inj", Uint128::from(11_000_000u128));
+
     // Bond 100 tokens.
     let bond_msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
@@ -1294,4 +1357,230 @@ fn test_unbond_native() {
     }));
 
     assert_eq!(res_unbond.messages, vec![expected_msg]);
+}
+
+/// Fund via the CW20 reward token's `Receive` hook succeeds and increments
+/// `undistributed_rewards`. Fund via a different CW20 is rejected.
+#[test]
+fn test_fund_cw20() {
+    let mut deps = mock_dependencies(&[]);
+
+    let msg = InstantiateMsg {
+        reward_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(
+            mock_env().block.time.seconds(),
+            mock_env().block.time.seconds() + 100,
+            Uint128::from(1_000_000u128),
+        )],
+    };
+    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Someone else's CW20 is not accepted as the reward token.
+    let wrong_info = message_info(&deps.api.addr_make("staking0000"), &[]);
+    let wrong_msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
+        sender: deps.api.addr_make("funder").to_string(),
+        amount: Uint128::from(100u128),
+        msg: to_json_binary(&Cw20HookMsg::Fund {}).unwrap(),
+    });
+    let err = execute(deps.as_mut(), mock_env(), wrong_info, wrong_msg).unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert_eq!(msg, "unauthorized"),
+        _ => panic!("expected unauthorized"),
+    };
+
+    // Native Fund is rejected when reward_token is CW20.
+    let native_info = message_info(
+        &deps.api.addr_make("funder"),
+        &coins(100, "inj"),
+    );
+    let err = execute(deps.as_mut(), mock_env(), native_info, ExecuteMsg::Fund {}).unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(msg.contains("reward token is cw20")),
+        _ => panic!("expected cw20 rejection"),
+    };
+
+    // Correct CW20 funding.
+    fund_via_reward_cw20(&mut deps, Uint128::from(500_000u128));
+    let res = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::State { block_time: None },
+    )
+    .unwrap();
+    let state: StateResponse = from_json(&res).unwrap();
+    assert_eq!(state.undistributed_rewards, Uint128::from(500_000u128));
+}
+
+/// Native Fund succeeds with the correct denom; wrong denom and CW20 hook
+/// against a native reward are rejected.
+#[test]
+fn test_fund_native() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        reward_token: AssetInfo::NativeToken {
+            denom: "inj".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(
+            mock_env().block.time.seconds(),
+            mock_env().block.time.seconds() + 100,
+            Uint128::from(1_000_000u128),
+        )],
+    };
+    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Wrong denom rejected.
+    let wrong_info = message_info(&deps.api.addr_make("funder"), &coins(100, "usdc"));
+    let err = execute(deps.as_mut(), mock_env(), wrong_info, ExecuteMsg::Fund {}).unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(msg.contains("Incorrect fund denom")),
+        _ => panic!("expected denom rejection"),
+    };
+
+    // CW20 Fund hook rejected when reward is native.
+    let cw20_info = message_info(&deps.api.addr_make("reward0000"), &[]);
+    let cw20_msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
+        sender: deps.api.addr_make("funder").to_string(),
+        amount: Uint128::from(100u128),
+        msg: to_json_binary(&Cw20HookMsg::Fund {}).unwrap(),
+    });
+    let err = execute(deps.as_mut(), mock_env(), cw20_info, cw20_msg).unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(msg.contains("reward token is native")),
+        _ => panic!("expected native rejection"),
+    };
+
+    // Correct native funding.
+    fund_via_reward_native(&mut deps, "inj", Uint128::from(777u128));
+    let res = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::State { block_time: None },
+    )
+    .unwrap();
+    let state: StateResponse = from_json(&res).unwrap();
+    assert_eq!(state.undistributed_rewards, Uint128::from(777u128));
+}
+
+/// If the contract is underfunded, distribution is capped to what's available
+/// — the schedule cannot promise rewards the contract can't pay.
+#[test]
+fn test_compute_reward_capped_by_funding() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        reward_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        // Schedule promises 1,000,000 over 100 seconds.
+        distribution_schedule: vec![(
+            mock_env().block.time.seconds(),
+            mock_env().block.time.seconds() + 100,
+            Uint128::from(1_000_000u128),
+        )],
+    };
+    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Only fund 300_000 — schedule promises 1_000_000.
+    fund_via_reward_cw20(&mut deps, Uint128::from(300_000u128));
+
+    // Bond.
+    let bond = ExecuteMsg::Receive(Cw20ReceiveMsg {
+        sender: deps.api.addr_make("addr0000").to_string(),
+        amount: Uint128::from(100u128),
+        msg: to_json_binary(&Cw20HookMsg::Bond {}).unwrap(),
+    });
+    let bond_info = message_info(&deps.api.addr_make("staking0000"), &[]);
+    let mut env = mock_env();
+    execute(deps.as_mut(), env.clone(), bond_info, bond).unwrap();
+
+    // Fast-forward past the end of the schedule. Theoretical = 1M, but only
+    // 300k was funded — user's pending_reward is capped at 300k.
+    env.block.time = env.block.time.plus_seconds(200);
+    let withdraw_info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    let res = execute(deps.as_mut(), env, withdraw_info, ExecuteMsg::Withdraw {}).unwrap();
+
+    assert_eq!(
+        res.messages,
+        vec![SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: deps.api.addr_make("addr0000").to_string(),
+                amount: Uint128::from(300_000u128),
+            })
+            .unwrap(),
+            funds: vec![],
+        }))]
+    );
+
+    // undistributed is drained to zero.
+    let state: StateResponse = from_json(
+        &query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::State { block_time: None },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state.undistributed_rewards, Uint128::zero());
+}
+
+/// Rewards accrued during a period when nobody is staked stay in the pool and
+/// are forwarded on migrate — they're not trapped forever (L-3).
+#[test]
+fn test_zero_bond_period_preserves_funds_through_migrate() {
+    let mut deps = mock_dependencies(&[]);
+    let start = mock_env().block.time.seconds();
+    let msg = InstantiateMsg {
+        reward_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(start, start + 100, Uint128::from(1_000_000u128))],
+    };
+    let owner = deps.api.addr_make("addr0000");
+    let info = message_info(&owner, &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    fund_via_reward_cw20(&mut deps, Uint128::from(1_000_000u128));
+
+    // Advance past the end of the schedule without anyone bonding. The whole
+    // distribution period happens with total_bond_amount == 0 — in the old
+    // design this 1M would be stranded; now it stays in undistributed_rewards.
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(200);
+
+    let migrate = ExecuteMsg::MigrateStaking {
+        new_staking_contract: deps.api.addr_make("newstaking").to_string(),
+    };
+    let res = execute(deps.as_mut(), env, message_info(&owner, &[]), migrate).unwrap();
+
+    // Full 1M forwarded to the new contract.
+    assert_eq!(
+        res.messages,
+        vec![SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: deps.api.addr_make("newstaking").to_string(),
+                amount: Uint128::from(1_000_000u128),
+            })
+            .unwrap(),
+            funds: vec![],
+        }))]
+    );
 }

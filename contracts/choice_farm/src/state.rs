@@ -38,6 +38,12 @@ pub struct State {
     pub last_distributed: u64,
     pub total_bond_amount: Uint128,
     pub global_reward_index: Decimal,
+    /// Reward tokens held by the contract that have not yet been credited to
+    /// any staker. Incremented by `Fund` messages and decremented by
+    /// `compute_reward` when it credits rewards to the global index. The
+    /// schedule defines a cap on the rate; this field defines a cap on the
+    /// total. Distribution is `min(schedule, undistributed_rewards)`.
+    pub undistributed_rewards: Uint128,
 }
 
 /// Save the state into storage.

@@ -24,6 +24,10 @@ pub enum ExecuteMsg {
     },
     /// Withdraw pending rewards
     Withdraw {},
+    /// Deposit reward tokens into the distribution pool (native reward token).
+    /// The caller sends `info.funds` matching the configured reward denom.
+    /// Anyone can call this; the contract distributes only what has been funded.
+    Fund {},
     /// Owner operation to stop distribution on current staking contract
     /// and send remaining tokens to the new contract
     MigrateStaking {
@@ -38,6 +42,9 @@ pub enum ExecuteMsg {
 #[serde(rename_all = "snake_case")]
 pub enum Cw20HookMsg {
     Bond {},
+    /// Deposit reward tokens (CW20) into the distribution pool. The CW20
+    /// sending the tokens must be the configured reward token.
+    Fund {},
 }
 
 /// migrate struct for distribution schedule
@@ -72,6 +79,7 @@ pub struct StateResponse {
     pub last_distributed: u64,
     pub total_bond_amount: Uint128,
     pub global_reward_index: Decimal,
+    pub undistributed_rewards: Uint128,
 }
 
 // We define a custom struct for each query response

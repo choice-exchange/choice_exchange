@@ -30,6 +30,24 @@ pub struct SwapHop {
 pub struct HarvestReplyPayload {
     pub reward_amount_to_compound: Uint128,
     pub tvl_before_compound: Uint128,
+    /// Caller-supplied belief prices, one per swap, in execution order.
+    /// Length is `route.len() + 1` when a route is configured, else `1`.
+    pub belief_prices: Vec<Decimal>,
+    /// If set, reverts the compound when newly-minted LP is below this floor.
+    pub minimum_lp_to_receive: Option<Uint128>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct WithdrawSharesReplyPayload {
+    /// Address receiving the exit proceeds.
+    pub recipient: String,
+    /// Shares being burnt — used to size the exiter's slice of the harvested reward_token.
+    pub shares_burnt: Uint128,
+    /// Total shares at the moment the exiter committed, before the burn was applied.
+    /// Used as the denominator when sizing the reward distribution.
+    pub total_shares_pre_burn: Uint128,
+    /// LP tokens owed to the exiter from their share of bond_amount.
+    pub lp_to_withdraw: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -39,6 +57,8 @@ pub struct CompoundRoutePayload {
     /// For compounding info
     pub reward_amount_to_compound: Uint128,
     pub tvl_before_compound: Uint128,
+    pub belief_prices: Vec<Decimal>,
+    pub minimum_lp_to_receive: Option<Uint128>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -64,21 +84,49 @@ pub enum ExecuteMsg {
     },
 
     /// Triggers the auto-compounding of rewards.
-    Compound {},
+    ///
+    /// `belief_prices` is the caller's expected `offer_pool / ask_pool` for each
+    /// swap in the compound flow, in order. Length must equal the number of
+    /// swaps the contract will perform (`route.len() + 1` when a route is
+    /// configured, else `1`). Combined with the configured
+    /// `slippage_tolerance`, these are what prevent a sandwicher from
+    /// manipulating the AMM price during the compound tx.
+    ///
+    /// `minimum_lp_to_receive`, if set, reverts the tx when the liquidity
+    /// provision mints less than this many LP tokens for the vault.
+    Compound {
+        belief_prices: Vec<Decimal>,
+        minimum_lp_to_receive: Option<Uint128>,
+    },
 
     /// Keeper-only function to activate pending deposits for a batch of users.
     ActivatePendingDeposits {
         users: Vec<String>,
     },
 
+    /// Lets any user activate their own pending deposit without waiting on the keeper.
+    /// Subject to the same dilution guard as `ActivatePendingDeposits` — pending farm
+    /// rewards must be below the compound threshold before activation proceeds.
+    ActivateMyDeposit {},
+
     /// Allows the owner to update the fee configuration.
+    /// Compounder rotation is intentionally excluded — use
+    /// `ProposeCompounder`/`ApplyCompounderRotation` which enforce a timelock.
     UpdateConfig {
-        compounder: Option<String>,
         slippage_tolerance: Option<Decimal>,
         fee_recipient: Option<String>,
         fee_percentage: Option<Decimal>,
         minimum_reward_to_compound: Option<Uint128>,
     },
+    /// Owner proposes a new compounder. The swap cannot take effect until
+    /// `COMPOUNDER_ROTATION_DELAY_SECONDS` have elapsed. Proposing again resets the timer.
+    ProposeCompounder {
+        new_compounder: String,
+    },
+    /// Owner-only. Finalizes a pending compounder rotation once the timelock has expired.
+    ApplyCompounderRotation,
+    /// Owner-only. Clears any pending compounder rotation.
+    CancelCompounderProposal,
     ProposeNewOwner {
         new_owner: String,
     },
@@ -111,6 +159,14 @@ pub enum QueryMsg {
     },
     /// Returns the total amount of LP tokens in pending deposits.
     TotalPendingDeposits {},
+    /// Returns the pending compounder rotation, if any.
+    PendingCompounderRotation {},
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct PendingCompounderRotationResponse {
+    pub pending_compounder: Option<String>,
+    pub effective_at: Option<u64>,
 }
 
 // We define a custom struct for each query response
