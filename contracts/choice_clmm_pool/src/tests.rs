@@ -1016,12 +1016,10 @@ mod tests {
         // FIX: We expect an error here, not success.
         let err = execute(deps.as_mut(), mock_env(), info_b, burn_msg).unwrap_err();
 
-        // 3. Verify Error
+        // 3. Verify Error — user B has no position at this tick range.
         match err {
-            ContractError::Std(StdError::GenericErr { msg, .. }) => {
-                assert_eq!(msg, "Liquidity underflow");
-            }
-            _ => panic!("Expected Liquidity underflow error, got {:?}", err),
+            ContractError::PositionNotFound {} => {}
+            _ => panic!("Expected PositionNotFound, got {:?}", err),
         }
     }
 
@@ -1358,6 +1356,214 @@ mod tests {
     }
 
     #[test]
+    fn burn_zero_rolls_fees_into_tokens_owed() {
+        // Regression: pool.Burn(amount=0) previously short-circuited to
+        // Response::default(), skipping update_position. The NFT manager's
+        // Collect flow fires Burn(0) to roll accrued fees into
+        // position.tokens_owed (V3 pattern) before calling Collect. Without
+        // update_position running, Collect paid out zero and the manager
+        // decremented the NFT's local owed balance anyway — stranding fees.
+        let mut deps = mock_dependencies();
+        standard_pool_setup(&mut deps);
+
+        let lp = deps.api.addr_make("lp");
+        let lp_info = message_info(
+            &lp,
+            &[
+                Coin::new(Uint128::new(1_000_000_000), "inj"),
+                Coin::new(Uint128::new(1_000_000_000), "usdt"),
+            ],
+        );
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            lp_info.clone(),
+            ExecuteMsg::Mint {
+                lower_tick: -200,
+                upper_tick: 200,
+                amount: Uint128::from(1_000_000u128),
+            },
+        )
+        .unwrap();
+
+        let trader = deps.api.addr_make("trader");
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&trader, &[Coin::new(Uint128::new(1000), "inj")]),
+            ExecuteMsg::Swap {
+                recipient: trader.to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(1000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+
+        // Burn(0) must succeed and advance the fee accumulator — principal is 0.
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            lp_info.clone(),
+            ExecuteMsg::Burn {
+                lower_tick: -200,
+                upper_tick: 200,
+                amount: Uint128::zero(),
+            },
+        )
+        .unwrap();
+        let get = |key: &str| {
+            res.attributes
+                .iter()
+                .find(|a| a.key == key)
+                .unwrap()
+                .value
+                .clone()
+        };
+        assert_eq!(get("action"), "burn");
+        assert_eq!(get("liquidity_burned"), "0");
+        assert_eq!(get("amount0_burned"), "0");
+        assert_eq!(get("amount1_burned"), "0");
+
+        // Collect should now drain the fees that Burn(0) rolled into tokens_owed.
+        let collect_res = execute(
+            deps.as_mut(),
+            mock_env(),
+            lp_info,
+            ExecuteMsg::Collect {
+                recipient: "lp".to_string(),
+                lower_tick: -200,
+                upper_tick: 200,
+                amount0_requested: Uint128::MAX,
+                amount1_requested: Uint128::MAX,
+            },
+        )
+        .unwrap();
+        let collected_0: u128 = collect_res
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount0")
+            .unwrap()
+            .value
+            .parse()
+            .unwrap();
+        let collected_1: u128 = collect_res
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount1")
+            .unwrap()
+            .value
+            .parse()
+            .unwrap();
+        // Swap was zero_for_one, so fees accrue in token0.
+        assert!(
+            collected_0 > 0,
+            "Burn(0) should have credited fees; got amount0=0"
+        );
+        assert_eq!(collected_1, 0);
+    }
+
+    #[test]
+    fn burn_clears_ticks_on_final_exit() {
+        // V3 parity: when the last position referencing a tick leaves, the tick
+        // entry should be deleted and the bitmap bit flipped off. Prior code
+        // kept `initialized=true` forever, bloating state and leaking stale
+        // `fee_growth_outside` snapshots into any future re-mint at the same
+        // ticks. Fee math stays consistent because `get_fee_growth_inside`
+        // now treats missing ticks as default (fee_growth_outside = 0).
+        use crate::state::{TICKS, TICK_BITMAP};
+
+        let mut deps = mock_dependencies();
+        standard_pool_setup(&mut deps);
+
+        let lp = deps.api.addr_make("lp");
+        let info = message_info(
+            &lp,
+            &[
+                Coin::new(Uint128::new(10_000_000), "inj"),
+                Coin::new(Uint128::new(10_000_000), "usdt"),
+            ],
+        );
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            info.clone(),
+            ExecuteMsg::Mint {
+                lower_tick: -200,
+                upper_tick: 200,
+                amount: Uint128::from(1_000_000u128),
+            },
+        )
+        .unwrap();
+
+        // Both ticks present and bitmap bit set.
+        assert!(TICKS.may_load(&deps.storage, -200).unwrap().is_some());
+        assert!(TICKS.may_load(&deps.storage, 200).unwrap().is_some());
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::Burn {
+                lower_tick: -200,
+                upper_tick: 200,
+                amount: Uint128::from(1_000_000u128),
+            },
+        )
+        .unwrap();
+
+        // After full burn the tick entries should be gone.
+        assert!(
+            TICKS.may_load(&deps.storage, -200).unwrap().is_none(),
+            "lower tick should be cleared"
+        );
+        assert!(
+            TICKS.may_load(&deps.storage, 200).unwrap().is_none(),
+            "upper tick should be cleared"
+        );
+
+        // Bitmap: flipping twice (init on mint, clear on burn) returns the word
+        // to 0, so the word either doesn't exist or is zero.
+        for word_pos in [-1i16, 0, 1] {
+            let word = TICK_BITMAP.may_load(&deps.storage, word_pos).unwrap();
+            if let Some(w) = word {
+                assert_eq!(
+                    w,
+                    cosmwasm_std::Uint256::zero(),
+                    "bitmap word {} should be zero after clear",
+                    word_pos
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn burn_zero_rejects_unknown_position() {
+        // Without this guard, update_position would create an empty POSITIONS
+        // entry for any caller+tick triple — storage bloat vector.
+        let mut deps = mock_dependencies();
+        standard_pool_setup(&mut deps);
+
+        let stranger = deps.api.addr_make("stranger");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&stranger, &[]),
+            ExecuteMsg::Burn {
+                lower_tick: -200,
+                upper_tick: 200,
+                amount: Uint128::zero(),
+            },
+        )
+        .unwrap_err();
+        match err {
+            ContractError::PositionNotFound {} => {}
+            other => panic!("expected PositionNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn phase2_cw20_receive_refund_on_liquidity_exhaustion() {
         // Regression for HIGH-7 (audit): the CW20 Receive path used to
         // silently strand unconsumed input in the pool on partial fills. The
@@ -1616,20 +1822,15 @@ mod tests {
         let fee_a = res_a
             .attributes
             .iter()
-            .find(|a| a.key == "fee_pips")
+            .find(|a| a.key == "fee_ppm")
             .map(|a| a.value.parse::<u128>().unwrap())
             .unwrap_or(0);
         let fee_b = res_b
             .attributes
             .iter()
-            .find(|a| a.key == "fee_pips")
+            .find(|a| a.key == "fee_ppm")
             .map(|a| a.value.parse::<u128>().unwrap())
             .unwrap_or(0);
-        // fee_pips isn't emitted as an attribute today, but this test still
-        // asserts the outcome: same-block victim pays NO more than whale.
-        // Instead we check amount_out ratios (both are zero_for_one with same
-        // liquidity window, so proportional inputs should yield proportional
-        // outputs iff fee is constant).
         let _ = (fee_a, fee_b);
         let out_a = res_a
             .attributes

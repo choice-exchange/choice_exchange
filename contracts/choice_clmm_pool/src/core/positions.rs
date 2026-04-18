@@ -3,10 +3,17 @@ use std::convert::TryFrom;
 use crate::core::ticks::get_fee_growth_inside;
 use crate::state::{FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POSITIONS};
 use choice_clmm_math::full_math::mul_div;
-use cosmwasm_std::{StdResult, Storage, Uint128, Uint256};
+use cosmwasm_std::{StdError, StdResult, Storage, Uint128, Uint256};
 
 /// Updates a position's fee growth and tokens owed.
 /// This MUST be called before modifying the position's liquidity.
+///
+/// Requires the position to already exist in storage. `execute_mint` is the
+/// sole creator and must save a default `PositionInfo` for the key before
+/// calling this. Silent creation here (the prior `may_load().unwrap_or_default()`
+/// pattern) was a landmine: any caller passing a non-existent key would silently
+/// mint a ghost position with the current fee_growth snapshot, which could then
+/// be drained of cumulative fees on a later `update_position` with positive L.
 pub fn update_position(
     storage: &mut dyn Storage,
     owner: &str,
@@ -16,7 +23,9 @@ pub fn update_position(
     liquidity_delta: i128, // +L for Mint, -L for Burn, 0 for Fee Claim
 ) -> StdResult<(Uint128, Uint128)> {
     let key = (owner, lower_tick, upper_tick);
-    let mut position = POSITIONS.may_load(storage, key)?.unwrap_or_default();
+    let mut position = POSITIONS
+        .may_load(storage, key)?
+        .ok_or_else(|| StdError::not_found("PositionInfo"))?;
 
     // 1. Get Global Fee Growth
     // (In a real app, ensure these are initialized in Instantiate or first Swap)

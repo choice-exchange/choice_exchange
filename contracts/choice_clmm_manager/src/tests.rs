@@ -3,8 +3,8 @@
 mod tests {
     use crate::contract::{execute, instantiate, query, reply};
     use crate::state::{
-        PositionState, POSITIONS, REPLY_DECREASE_LIQUIDITY, REPLY_INCREASE_LIQUIDITY,
-        REPLY_MINT_POSITION,
+        PositionState, PENDING_INCREASE, PENDING_MINT, POSITIONS, REPLY_COLLECT,
+        REPLY_DECREASE_LIQUIDITY, REPLY_INCREASE_LIQUIDITY, REPLY_MINT_POSITION,
     };
     use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
     use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, QueryMsg};
@@ -142,25 +142,74 @@ mod tests {
         }
     }
 
-    fn ok_reply(id: u64) -> Reply {
-        Reply {
-            id,
-            payload: Default::default(),
-            gas_used: 0,
-            result: SubMsgResult::Ok(ok_submsg_response(vec![])),
-        }
-    }
-
     fn ok_reply_with_burn_attrs(
         id: u64,
         amount0: u128,
         amount1: u128,
         emitter: &str,
     ) -> Reply {
+        ok_reply_with_burn_attrs_and_fg(id, amount0, amount1, Uint256::zero(), Uint256::zero(), emitter)
+    }
+
+    /// Build a reply that mimics the pool's `Collect` response — carries
+    /// `amount0` / `amount1` (actual paid amounts) keyed to the emitter.
+    fn ok_reply_with_collect_attrs(id: u64, amount0: u128, amount1: u128, emitter: &str) -> Reply {
+        let ev = Event::new("wasm")
+            .add_attribute("_contract_address", emitter)
+            .add_attribute("amount0", Uint128::new(amount0).to_string())
+            .add_attribute("amount1", Uint128::new(amount1).to_string());
+        Reply {
+            id,
+            payload: Default::default(),
+            gas_used: 0,
+            result: SubMsgResult::Ok(ok_submsg_response(vec![ev])),
+        }
+    }
+
+    fn ok_reply_with_burn_attrs_and_fg(
+        id: u64,
+        amount0: u128,
+        amount1: u128,
+        fg_inside_0: Uint256,
+        fg_inside_1: Uint256,
+        emitter: &str,
+    ) -> Reply {
         let ev = Event::new("wasm")
             .add_attribute("_contract_address", emitter)
             .add_attribute("amount0_burned", Uint128::new(amount0).to_string())
-            .add_attribute("amount1_burned", Uint128::new(amount1).to_string());
+            .add_attribute("amount1_burned", Uint128::new(amount1).to_string())
+            .add_attribute("fee_growth_inside_0_x128", fg_inside_0.to_string())
+            .add_attribute("fee_growth_inside_1_x128", fg_inside_1.to_string());
+        Reply {
+            id,
+            payload: Default::default(),
+            gas_used: 0,
+            result: SubMsgResult::Ok(ok_submsg_response(vec![ev])),
+        }
+    }
+
+    /// Build a reply that mimics the pool's `Mint` response — carries
+    /// `amount0_consumed` / `amount1_consumed` attributes keyed to the emitter,
+    /// matching whatever the manager parked in PENDING_{MINT,INCREASE}. Loads
+    /// from storage so call sites don't need to duplicate the amounts.
+    fn ok_reply_consumed(
+        deps: &OwnedDeps<MockStorage, MockApi, CustomMockQuerier>,
+        id: u64,
+        emitter: &str,
+    ) -> Reply {
+        let (amount0, amount1) = if id == REPLY_MINT_POSITION {
+            let p = PENDING_MINT.load(&deps.storage).unwrap();
+            (p.amount0_sent_to_pool, p.amount1_sent_to_pool)
+        } else if id == REPLY_INCREASE_LIQUIDITY {
+            let p = PENDING_INCREASE.load(&deps.storage).unwrap();
+            (p.amount0_sent_to_pool, p.amount1_sent_to_pool)
+        } else {
+            panic!("ok_reply_consumed only supports mint/increase reply ids");
+        };
+        let ev = Event::new("wasm")
+            .add_attribute("_contract_address", emitter)
+            .add_attribute("amount0_consumed", amount0.to_string())
+            .add_attribute("amount1_consumed", amount1.to_string());
         Reply {
             id,
             payload: Default::default(),
@@ -268,7 +317,9 @@ mod tests {
             .clone();
 
         // 2. simulate the pool submsg having succeeded -> run reply
-        reply(deps.as_mut(), mock_env(), ok_reply(REPLY_MINT_POSITION)).unwrap();
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        let r = ok_reply_consumed(deps, REPLY_MINT_POSITION, &pool_addr);
+        reply(deps.as_mut(), mock_env(), r).unwrap();
 
         token_id
     }
@@ -415,7 +466,9 @@ mod tests {
         .unwrap();
 
         // Reply fires after pool mint.
-        reply(deps.as_mut(), mock_env(), ok_reply(REPLY_INCREASE_LIQUIDITY)).unwrap();
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        let r = ok_reply_consumed(&deps, REPLY_INCREASE_LIQUIDITY, &pool_addr);
+        reply(deps.as_mut(), mock_env(), r).unwrap();
 
         let after = POSITIONS.load(&deps.storage, &token_id).unwrap();
         // fee delta = Q128 - 0 = Q128
@@ -460,11 +513,22 @@ mod tests {
         .unwrap();
 
         // Simulate pool.Burn result: amount0_burned=400, amount1_burned=600 (arbitrary).
+        // Pool emits the post-update fee_growth_inside used when crediting its
+        // own position.tokens_owed — the manager now parses these from the
+        // reply instead of re-querying (which would read zeros if the burn
+        // cleared the ticks).
         let pool_addr = deps.api.addr_make("pool_addr").to_string();
         reply(
             deps.as_mut(),
             mock_env(),
-            ok_reply_with_burn_attrs(REPLY_DECREASE_LIQUIDITY, 400, 600, &pool_addr),
+            ok_reply_with_burn_attrs_and_fg(
+                REPLY_DECREASE_LIQUIDITY,
+                400,
+                600,
+                q128,
+                Uint256::zero(),
+                &pool_addr,
+            ),
         )
         .unwrap();
 
@@ -552,7 +616,7 @@ mod tests {
         )
         .unwrap();
 
-        // Inspect the pool.Collect msg — must request exactly Alice's share.
+        // Inspect the pool.Collect submsg — must request exactly Alice's share.
         let collect_amount_0 = res
             .messages
             .iter()
@@ -574,7 +638,7 @@ mod tests {
                 }
                 _ => None,
             })
-            .expect("expected pool.Collect msg");
+            .expect("expected pool.Collect submsg");
 
         let alice_share = 2 * alice_before.liquidity.u128();
         assert_eq!(
@@ -583,7 +647,17 @@ mod tests {
             "Alice should collect exactly her share, not Bob's"
         );
 
-        // Alice's NFT tokens_owed was zeroed after collect.
+        // Simulate the pool paying out the full requested amount. Reply
+        // decrements tokens_owed by exactly what was paid.
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        reply(
+            deps.as_mut(),
+            mock_env(),
+            ok_reply_with_collect_attrs(REPLY_COLLECT, alice_share, 0, &pool_addr),
+        )
+        .unwrap();
+
+        // Alice's NFT tokens_owed was zeroed after reply.
         let alice_after = POSITIONS.load(&deps.storage, &alice_id).unwrap();
         assert_eq!(alice_after.tokens_owed_0, Uint128::zero());
         assert_eq!(alice_after.fee_growth_inside_0_last_x128, q128 * Uint256::from(2u128));
@@ -592,6 +666,54 @@ mod tests {
         let bob_still = POSITIONS.load(&deps.storage, &bob_id).unwrap();
         assert_eq!(bob_still.tokens_owed_0, Uint128::zero());
         assert_eq!(bob_still.fee_growth_inside_0_last_x128, q128);
+    }
+
+    #[test]
+    fn collect_shortfall_leaves_residue_on_nft() {
+        // If the pool pays less than requested (e.g. because its
+        // position.tokens_owed got out of sync), the manager must leave the
+        // unpaid amount on the NFT for a later retry — not silently zero
+        // tokens_owed as the pre-fix code did.
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+        let token_id = mint_nft(&mut deps, &user, 10_000, 10_000, -100, 100);
+
+        // Accrue Q128 of fee_growth_inside_0 so the NFT's share is nonzero.
+        let q128 = Uint256::one() << 128u32;
+        set_fee_growth_inside(&mut deps, q128, Uint256::zero());
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&user, &[]),
+            ExecuteMsg::Collect {
+                token_id: token_id.clone(),
+                recipient: None,
+            },
+        )
+        .unwrap();
+
+        let after_execute = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        let requested = after_execute.tokens_owed_0;
+        assert!(requested > Uint128::zero(), "expected non-zero request");
+        // Pool pays only half of what was requested.
+        let half = Uint128::new(requested.u128() / 2);
+
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        reply(
+            deps.as_mut(),
+            mock_env(),
+            ok_reply_with_collect_attrs(REPLY_COLLECT, half.u128(), 0, &pool_addr),
+        )
+        .unwrap();
+
+        let after_reply = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        // Residue equals the unpaid portion, available for a later collect.
+        assert_eq!(
+            after_reply.tokens_owed_0,
+            requested.checked_sub(half).unwrap()
+        );
     }
 
     #[test]

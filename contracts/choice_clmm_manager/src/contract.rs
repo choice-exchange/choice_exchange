@@ -6,6 +6,7 @@ use cosmwasm_std::{
 };
 use cw2::set_contract_version;
 use std::convert::TryFrom;
+use std::str::FromStr;
 
 use cw721::msg::NftExtensionMsg;
 use cw721::traits::Cw721Query;
@@ -28,9 +29,11 @@ use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::error::ContractError;
 use crate::state::{
-    next_token_id, q128, Config, PendingDecrease, PendingIncrease, PendingMint, PositionState,
-    CONFIG, PENDING_DECREASE, PENDING_INCREASE, PENDING_MINT, POSITIONS, REPLY_DECREASE_LIQUIDITY,
-    REPLY_INCREASE_LIQUIDITY, REPLY_MINT_POSITION, TOKEN_ID_COUNTER,
+    next_token_id, q128, Config, PendingCollect, PendingDecrease, PendingIncrease, PendingMint,
+    PositionState,
+    CONFIG, PENDING_COLLECT, PENDING_DECREASE, PENDING_INCREASE, PENDING_MINT, POSITIONS,
+    REPLY_COLLECT, REPLY_DECREASE_LIQUIDITY, REPLY_INCREASE_LIQUIDITY, REPLY_MINT_POSITION,
+    TOKEN_ID_COUNTER,
 };
 
 const CONTRACT_NAME: &str = "crates.io:choice-clmm-manager";
@@ -455,9 +458,31 @@ fn execute_mint_position(
     ]))
 }
 
-fn reply_mint_position(deps: DepsMut, env: Env, _reply: Reply) -> Result<Response, ContractError> {
+fn reply_mint_position(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
     let pending = PENDING_MINT.load(deps.storage)?;
     PENDING_MINT.remove(deps.storage);
+
+    // Verify the pool consumed exactly what we sent. Matches the increase-
+    // liquidity reply's invariant — surfaces any future mint-math divergence
+    // between manager and pool rather than stranding pool-refunded native
+    // dust in the manager contract.
+    let (amount0_consumed, amount1_consumed) = parse_amounts_from_reply(
+        &reply,
+        "amount0_consumed",
+        "amount1_consumed",
+        pending.pool_address.as_str(),
+    )?;
+    if amount0_consumed != pending.amount0_sent_to_pool
+        || amount1_consumed != pending.amount1_sent_to_pool
+    {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "pool consumed ({}, {}) but manager sent ({}, {}) — mint math diverged",
+            amount0_consumed,
+            amount1_consumed,
+            pending.amount0_sent_to_pool,
+            pending.amount1_sent_to_pool,
+        ))));
+    }
 
     // Fetch current fee_growth_inside so the NFT's starting snapshot is right.
     // After pool.Mint, ticks at `tick_lower`/`tick_upper` are initialized, so
@@ -649,11 +674,34 @@ fn execute_increase_liquidity(
         .add_attribute("liquidity_added", liquidity_added))
 }
 
-fn reply_increase_liquidity(deps: DepsMut, _env: Env, _reply: Reply) -> Result<Response, ContractError> {
+fn reply_increase_liquidity(deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
     let pending = PENDING_INCREASE.load(deps.storage)?;
     PENDING_INCREASE.remove(deps.storage);
 
     let mut state = POSITIONS.load(deps.storage, &pending.token_id)?;
+
+    // Verify the pool consumed exactly what we sent. Manager and pool use the
+    // same delta math today so this is a tautology — but asymmetry with the
+    // decrease reply (which parses amounts) was fragile: a future rounding
+    // tweak on one side only would silently strand pool-refunded native dust
+    // in the manager contract. Error out on mismatch instead.
+    let (amount0_consumed, amount1_consumed) = parse_amounts_from_reply(
+        &reply,
+        "amount0_consumed",
+        "amount1_consumed",
+        state.pool_address.as_str(),
+    )?;
+    if amount0_consumed != pending.amount0_sent_to_pool
+        || amount1_consumed != pending.amount1_sent_to_pool
+    {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "pool consumed ({}, {}) but manager sent ({}, {}) — mint math diverged",
+            amount0_consumed,
+            amount1_consumed,
+            pending.amount0_sent_to_pool,
+            pending.amount1_sent_to_pool,
+        ))));
+    }
 
     // Accrue pending fees to NFT before modifying liquidity (V3 pattern: any
     // change to L closes the current "fee period" for this NFT).
@@ -678,8 +726,8 @@ fn reply_increase_liquidity(deps: DepsMut, _env: Env, _reply: Reply) -> Result<R
             .add_attribute("token_id", pending.token_id)
             .add_attribute("liquidity_added", pending.liquidity_added)
             .add_attribute("new_liquidity", state.liquidity)
-            .add_attribute("amount0_consumed", pending.amount0_sent_to_pool)
-            .add_attribute("amount1_consumed", pending.amount1_sent_to_pool),
+            .add_attribute("amount0_consumed", amount0_consumed)
+            .add_attribute("amount1_consumed", amount1_consumed),
     ))
 }
 
@@ -776,14 +824,17 @@ fn reply_decrease_liquidity(
         });
     }
 
-    // Accrue pending fees before liquidity change (V3 pattern).
-    let fg: FeeGrowthInsideResponse = deps.querier.query_wasm_smart(
-        state.pool_address.to_string(),
-        &PoolQueryMsg::GetFeeGrowthInside {
-            tick_lower: state.tick_lower,
-            tick_upper: state.tick_upper,
-        },
-    )?;
+    // Accrue pending fees before liquidity change (V3 pattern). Read the
+    // post-update `fee_growth_inside` directly from the burn event attributes
+    // — a post-burn `GetFeeGrowthInside` query would read zeros if this burn
+    // cleared either tick (final-exit case), silently advancing the NFT's
+    // snapshot past fees it never credited.
+    let (fg_inside_0, fg_inside_1) =
+        parse_fg_inside_from_reply(&reply, state.pool_address.as_str())?;
+    let fg = FeeGrowthInsideResponse {
+        fee_growth_inside_0_x128: fg_inside_0,
+        fee_growth_inside_1_x128: fg_inside_1,
+    };
     accrue_fees_to_nft(&mut state, &fg)?;
 
     // Credit burned principal to NFT's tokens_owed.
@@ -880,37 +931,123 @@ fn execute_collect(
         accrue_fees_to_nft(&mut state, &fg)?;
     }
 
-    // Snapshot how much we'll ask the pool for, capped to NFT's owed balance.
+    // Snapshot how much we'll ask the pool for. Persist NFT state WITHOUT
+    // zeroing `tokens_owed_*` — the reply handler decrements by the actual
+    // paid amount so we never strand funds if the pool clamps its payout to
+    // its own `position.tokens_owed` (e.g. after u128::MAX fee saturation
+    // or any future invariant drift between manager and pool).
     let pay0 = state.tokens_owed_0;
     let pay1 = state.tokens_owed_1;
 
-    if !pay0.is_zero() || !pay1.is_zero() {
-        let collect_msg = PoolExecuteMsg::Collect {
-            recipient: dest.clone(),
-            lower_tick: state.tick_lower,
-            upper_tick: state.tick_upper,
+    POSITIONS.save(deps.storage, &token_id, &state)?;
+
+    if pay0.is_zero() && pay1.is_zero() {
+        return Ok(Response::new()
+            .add_messages(messages)
+            .add_attribute("action", "collect")
+            .add_attribute("manager_action", "collect")
+            .add_attribute("token_id", token_id)
+            .add_attribute("recipient", dest)
+            .add_attribute("amount0", pay0)
+            .add_attribute("amount1", pay1));
+    }
+
+    PENDING_COLLECT.save(
+        deps.storage,
+        &PendingCollect {
+            token_id: token_id.clone(),
             amount0_requested: pay0,
             amount1_requested: pay1,
-        };
-        messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+        },
+    )?;
+
+    let collect_msg = PoolExecuteMsg::Collect {
+        recipient: dest.clone(),
+        lower_tick: state.tick_lower,
+        upper_tick: state.tick_upper,
+        amount0_requested: pay0,
+        amount1_requested: pay1,
+    };
+    let collect_submsg = SubMsg::reply_on_success(
+        WasmMsg::Execute {
             contract_addr: state.pool_address.to_string(),
             msg: to_json_binary(&collect_msg)?,
             funds: vec![],
-        }));
-        state.tokens_owed_0 = Uint128::zero();
-        state.tokens_owed_1 = Uint128::zero();
+        },
+        REPLY_COLLECT,
+    );
+
+    let mut response = Response::new();
+    for m in messages {
+        response = response.add_message(m);
     }
-
-    POSITIONS.save(deps.storage, &token_id, &state)?;
-
-    Ok(Response::new()
-        .add_messages(messages)
+    Ok(response
+        .add_submessage(collect_submsg)
         .add_attribute("action", "collect")
         .add_attribute("manager_action", "collect")
         .add_attribute("token_id", token_id)
         .add_attribute("recipient", dest)
-        .add_attribute("amount0", pay0)
-        .add_attribute("amount1", pay1))
+        .add_attribute("amount0_requested", pay0)
+        .add_attribute("amount1_requested", pay1))
+}
+
+fn reply_collect(
+    deps: DepsMut,
+    _env: Env,
+    reply: Reply,
+) -> Result<Response, ContractError> {
+    let pending = PENDING_COLLECT.load(deps.storage)?;
+    PENDING_COLLECT.remove(deps.storage);
+
+    let mut state = POSITIONS.load(deps.storage, &pending.token_id)?;
+
+    // Pool's Collect emits the actual paid amounts as `amount0` / `amount1`
+    // (which equal the request when the pool has enough owed, or clamp to
+    // `pool.position.tokens_owed_*` otherwise).
+    let (amount0_paid, amount1_paid) = parse_amounts_from_reply(
+        &reply,
+        "amount0",
+        "amount1",
+        state.pool_address.as_str(),
+    )?;
+
+    // Defensive: pool is supposed to cap at our request, never exceed it.
+    if amount0_paid > pending.amount0_requested || amount1_paid > pending.amount1_requested {
+        return Err(ContractError::Std(StdError::generic_err(format!(
+            "pool paid ({}, {}) above requested ({}, {}) — invariant violated",
+            amount0_paid,
+            amount1_paid,
+            pending.amount0_requested,
+            pending.amount1_requested,
+        ))));
+    }
+
+    // Decrement NFT's owed by exactly what the pool paid. If the pool paid
+    // less than requested (shortfall), the leftover stays on the NFT for a
+    // later Collect to retry. Surfaces as a loud attribute so it's not
+    // silent — in normal operation paid == requested.
+    state.tokens_owed_0 = state
+        .tokens_owed_0
+        .checked_sub(amount0_paid)
+        .map_err(|_| StdError::generic_err("tokens_owed_0 underflow in collect reply"))?;
+    state.tokens_owed_1 = state
+        .tokens_owed_1
+        .checked_sub(amount1_paid)
+        .map_err(|_| StdError::generic_err("tokens_owed_1 underflow in collect reply"))?;
+
+    POSITIONS.save(deps.storage, &pending.token_id, &state)?;
+
+    let shortfall_0 = pending.amount0_requested.checked_sub(amount0_paid).unwrap_or(Uint128::zero());
+    let shortfall_1 = pending.amount1_requested.checked_sub(amount1_paid).unwrap_or(Uint128::zero());
+
+    Ok(Response::new().add_event(
+        Event::new("collect_complete")
+            .add_attribute("token_id", pending.token_id)
+            .add_attribute("amount0_paid", amount0_paid)
+            .add_attribute("amount1_paid", amount1_paid)
+            .add_attribute("amount0_shortfall", shortfall_0)
+            .add_attribute("amount1_shortfall", shortfall_1),
+    ))
 }
 
 // =========================================================================
@@ -963,6 +1100,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         REPLY_MINT_POSITION => reply_mint_position(deps, env, reply),
         REPLY_INCREASE_LIQUIDITY => reply_increase_liquidity(deps, env, reply),
         REPLY_DECREASE_LIQUIDITY => reply_decrease_liquidity(deps, env, reply),
+        REPLY_COLLECT => reply_collect(deps, env, reply),
         other => Err(ContractError::InvalidReply {
             reason: format!("unknown reply id {}", other),
         }),
@@ -1181,13 +1319,27 @@ fn parse_amounts_from_reply(
             continue;
         }
         for attr in &event.attributes {
-            if attr.key == key0 && v0.is_none() {
+            // Reject duplicate attribute keys from the trusted emitter. Pool
+            // today emits each key exactly once; a future pool change that
+            // emits multiple would otherwise silently bind the first value
+            // and discard the rest, giving wrong amounts.
+            if attr.key == key0 {
+                if v0.is_some() {
+                    return Err(ContractError::InvalidReply {
+                        reason: format!("duplicate attribute {key0} from {emitter}"),
+                    });
+                }
                 v0 = Some(Uint128::from_str_checked(&attr.value).map_err(|e| {
                     ContractError::InvalidReply {
                         reason: format!("parse {key0} = {} : {e}", attr.value),
                     }
                 })?);
-            } else if attr.key == key1 && v1.is_none() {
+            } else if attr.key == key1 {
+                if v1.is_some() {
+                    return Err(ContractError::InvalidReply {
+                        reason: format!("duplicate attribute {key1} from {emitter}"),
+                    });
+                }
                 v1 = Some(Uint128::from_str_checked(&attr.value).map_err(|e| {
                     ContractError::InvalidReply {
                         reason: format!("parse {key1} = {} : {e}", attr.value),
@@ -1217,6 +1369,78 @@ impl Uint128FromStr for Uint128 {
             .map(Uint128::new)
             .map_err(|e| e.to_string())
     }
+}
+
+/// Extract post-update `fee_growth_inside` as Uint256 from a pool.Burn reply.
+/// Used instead of `GetFeeGrowthInside` query because the burn may have cleared
+/// the ticks (final-exit case), which would make a post-burn query read 0 from
+/// now-default tick entries instead of the value the pool actually used when
+/// crediting fees.
+fn parse_fg_inside_from_reply(
+    reply: &Reply,
+    emitter: &str,
+) -> Result<(Uint256, Uint256), ContractError> {
+    let result = match &reply.result {
+        cosmwasm_std::SubMsgResult::Ok(r) => r,
+        cosmwasm_std::SubMsgResult::Err(e) => {
+            return Err(ContractError::InvalidReply {
+                reason: format!("pool submsg failed: {e}"),
+            });
+        }
+    };
+
+    let key0 = "fee_growth_inside_0_x128";
+    let key1 = "fee_growth_inside_1_x128";
+    let mut v0: Option<Uint256> = None;
+    let mut v1: Option<Uint256> = None;
+
+    for event in &result.events {
+        if !event.ty.starts_with("wasm") {
+            continue;
+        }
+        let event_emitter = event
+            .attributes
+            .iter()
+            .find(|a| a.key == "_contract_address")
+            .map(|a| a.value.as_str());
+        if event_emitter != Some(emitter) {
+            continue;
+        }
+        for attr in &event.attributes {
+            if attr.key == key0 {
+                if v0.is_some() {
+                    return Err(ContractError::InvalidReply {
+                        reason: format!("duplicate attribute {key0} from {emitter}"),
+                    });
+                }
+                v0 = Some(Uint256::from_str(&attr.value).map_err(|e| {
+                    ContractError::InvalidReply {
+                        reason: format!("parse {key0} = {} : {e}", attr.value),
+                    }
+                })?);
+            } else if attr.key == key1 {
+                if v1.is_some() {
+                    return Err(ContractError::InvalidReply {
+                        reason: format!("duplicate attribute {key1} from {emitter}"),
+                    });
+                }
+                v1 = Some(Uint256::from_str(&attr.value).map_err(|e| {
+                    ContractError::InvalidReply {
+                        reason: format!("parse {key1} = {} : {e}", attr.value),
+                    }
+                })?);
+            }
+        }
+    }
+
+    Ok((
+        v0.ok_or_else(|| ContractError::InvalidReply {
+            reason: format!("missing attribute {key0}"),
+        })?,
+        v1.ok_or_else(|| ContractError::InvalidReply {
+            reason: format!("missing attribute {key1}"),
+        })?,
+    ))
 }
 
 // =========================================================================

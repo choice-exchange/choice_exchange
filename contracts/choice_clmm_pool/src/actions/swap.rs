@@ -210,6 +210,7 @@ fn apply_swap(
     zero_for_one: bool,
     recipient: &str,
     result: &SwapComputation,
+    fee_pips: u32,
 ) -> Result<Response, ContractError> {
     // Save tick updates
     for (tick, tick_info) in &result.tick_updates {
@@ -310,6 +311,7 @@ fn apply_swap(
         .add_attribute("amount_in", result.amount_in)
         .add_attribute("amount_out", result.amount_out)
         .add_attribute("fee_amount", result.fee_amount)
+        .add_attribute("fee_ppm", fee_pips.to_string())
         .add_attribute("zero_for_one", zero_for_one.to_string())
         .add_attribute("final_price", result.sqrt_price_after.to_string())
         .add_attribute("final_tick", result.tick_after.to_string()))
@@ -390,6 +392,7 @@ pub fn execute_swap(
         zero_for_one,
         &recipient,
         &result,
+        fee_pips,
     )
 }
 
@@ -467,6 +470,7 @@ pub fn execute_swap_exact_input(
         zero_for_one,
         &recipient,
         &result,
+        fee_pips,
     )
 }
 
@@ -546,6 +550,7 @@ pub fn execute_swap_exact_input_cw20(
         zero_for_one,
         &recipient,
         &result,
+        fee_pips,
     )
 }
 

@@ -6,7 +6,8 @@ use crate::core::bitmap::flip_tick;
 use crate::core::positions::update_position;
 use crate::error::ContractError;
 use crate::state::{
-    PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, TICKS,
+    PoolConfig, PositionInfo, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE,
+    POSITIONS, TICKS,
 };
 use choice_clmm_common::types::AssetInfo;
 use choice_clmm_math::sqrt_price_math::{get_amount0_delta, get_amount1_delta};
@@ -166,6 +167,14 @@ pub fn execute_mint(
     // parameter here — it enables attackers to mint onto arbitrary keys,
     // overwrite `fee_growth_inside_last` on victims, and strand liquidity
     // under the manager's shared key with no NFT attached.
+    //
+    // `update_position` requires the position to already exist, so initialize
+    // an empty `PositionInfo` on first mint. Never overwrite an existing entry
+    // (it may carry non-zero `tokens_owed_*` from a prior fully-burned cycle).
+    let position_key = (info.sender.as_str(), lower_tick, upper_tick);
+    if POSITIONS.may_load(deps.storage, position_key)?.is_none() {
+        POSITIONS.save(deps.storage, position_key, &PositionInfo::default())?;
+    }
     update_position(
         deps.storage,
         info.sender.as_str(),

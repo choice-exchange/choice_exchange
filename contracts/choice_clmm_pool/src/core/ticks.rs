@@ -9,8 +9,13 @@ pub fn get_fee_growth_inside(
     fee_growth_global_0: Uint256,
     fee_growth_global_1: Uint256,
 ) -> StdResult<(Uint256, Uint256)> {
-    let lower = TICKS.load(storage, lower_tick)?;
-    let upper = TICKS.load(storage, upper_tick)?;
+    // V3 parity: uninitialized ticks default to `fee_growth_outside = 0`. We
+    // actively clear ticks on final-position exit (see `execute_burn`), so any
+    // post-exit query — e.g. the manager's decrease-liquidity reply querying
+    // `GetFeeGrowthInside` after the last NFT in a range is burned — must
+    // succeed rather than error on missing ticks.
+    let lower = TICKS.may_load(storage, lower_tick)?.unwrap_or_default();
+    let upper = TICKS.may_load(storage, upper_tick)?.unwrap_or_default();
 
     // Calculate fee growth below lower tick
     let fee_growth_below_0 = if current_tick >= lower_tick {

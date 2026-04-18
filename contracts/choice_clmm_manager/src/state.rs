@@ -103,14 +103,27 @@ pub struct PendingDecrease {
     pub amount1_min: Uint128,
 }
 
+#[cw_serde]
+pub struct PendingCollect {
+    pub token_id: String,
+    // Amount the manager asked the pool for. The pool silently clamps to
+    // `pool.position.tokens_owed`, so the actual payout may be less. The
+    // reply handler decrements the NFT's `tokens_owed_*` by exactly what
+    // the pool paid.
+    pub amount0_requested: Uint128,
+    pub amount1_requested: Uint128,
+}
+
 pub const PENDING_MINT: Item<PendingMint> = Item::new("pending_mint");
 pub const PENDING_INCREASE: Item<PendingIncrease> = Item::new("pending_increase");
 pub const PENDING_DECREASE: Item<PendingDecrease> = Item::new("pending_decrease");
+pub const PENDING_COLLECT: Item<PendingCollect> = Item::new("pending_collect");
 
 // Reply IDs
 pub const REPLY_MINT_POSITION: u64 = 1;
 pub const REPLY_INCREASE_LIQUIDITY: u64 = 2;
 pub const REPLY_DECREASE_LIQUIDITY: u64 = 3;
+pub const REPLY_COLLECT: u64 = 4;
 
 /// Returns the V3 Q128 constant (2^128) used for fee-growth scaling.
 pub fn q128() -> Uint256 {

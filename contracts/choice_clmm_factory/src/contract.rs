@@ -69,6 +69,13 @@ pub fn execute(
             if tick_spacing == 0 {
                 return Err(StdError::generic_err("Tick spacing must be > 0"));
             }
+            // Reject silent overwrite: existing pools captured `tick_spacing`
+            // at instantiate time so they survive unchanged, but indexers and
+            // integrators observing the factory would misinterpret historical
+            // pools' spacing after a repoint. Fee tiers are meant to be stable.
+            if FEE_TIERS.has(deps.storage, fee) {
+                return Err(StdError::generic_err("Fee tier already enabled"));
+            }
             FEE_TIERS.save(deps.storage, fee, &tick_spacing)?;
             Ok(Response::new()
                 .add_attribute("action", "enable_fee_amount")
