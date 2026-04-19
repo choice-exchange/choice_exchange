@@ -386,11 +386,15 @@ dependencies = [
 name = "choice-clmm-common"
 version = "1.1.2"
 dependencies = [
+ "choice",
+ "choice-farm",
+ "choice-vault",
  "cosmwasm-schema 2.2.2",
  "cosmwasm-std 2.2.2",
  "cw-utils 2.0.0",
  "cw2 2.0.0",
  "cw20",
+ "cw20-base",
  "cw721 0.20.0",
  "cw721-base",
  "cw721-metadata-onchain",
@@ -1083,6 +1087,32 @@ dependencies = [
  "cw-utils 2.0.0",
  "schemars 0.8.22",
  "serde",
+]
+
+[[package]]
+name = "cw20-base"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6de8c32e100f1fca306972d86b617234a5e6b00594ea2b48716fd6804d4d95d"
+dependencies = [
+ "cosmwasm-schema 2.2.2",
+ "cosmwasm-std 2.2.2",
+ "cw-storage-plus 2.0.0",
+ "cw2 2.0.0",
+ "cw20",
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "cw20-base-build"
+version = "2.0.0"
+dependencies = [
+ "cosmwasm-std 2.2.2",
+ "cw20-base",
+ "ed25519-zebra 4.1.0",
 ]
 
 [[package]]
@@ -2390,7 +2420,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.90",
@@ -3858,7 +3888,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

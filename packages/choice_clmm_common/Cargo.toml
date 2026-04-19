@@ -34,13 +34,24 @@ serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 injective-test-tube = { version = "1.16.3-1" }
+choice = { path = "../choice" }
+choice-farm = { path = "../../contracts/choice_farm" }
+choice-vault = { path = "../../contracts/choice_vault" }
+# Types only — the WASM artifact for the on-chain CW20 lives in
+# `contracts/cw20_base_build/` and is produced by `./build_release.sh`.
+cw20-base = { version = "2.0.0", features = ["library"] }
 
 [[test]]
 name = "integration"
 path = "../../tests/integration.rs"
 harness = true
 
-[[test]] 
+[[test]]
 name = "visualization"
 path = "../../tests/visualization.rs"
+harness = true
+
+[[test]]
+name = "vault_integration"
+path = "../../tests/vault_integration.rs"
 harness = true

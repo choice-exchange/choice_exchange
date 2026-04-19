@@ -9,13 +9,14 @@ use cosmwasm_std::{
 use choice::asset::AssetInfo;
 
 use choice::staking::{
-    ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg,
-    StakerInfoResponse, StateResponse,
+    ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, PendingMigrationResponse,
+    PendingOwnerRotationResponse, QueryMsg, StakerInfoResponse, StateResponse,
 };
 
 use crate::state::{
     read_config, read_staker_info, read_state, remove_staker_info, store_config, store_staker_info,
-    store_state, Config, StakerInfo, State,
+    store_state, Config, PendingMigration, StakerInfo, State, PENDING_MIGRATION,
+    TIMELOCK_DELAY_SECONDS,
 };
 
 use cw2::{get_contract_version, set_contract_version};
@@ -25,6 +26,12 @@ use std::collections::BTreeMap;
 const CONTRACT_NAME: &str = "crates.io:choice-farm";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Deployment hygiene note (H-4 follow-through): the wasm `admin` address on
+/// this contract instance should be a timelocked multisig, not an EOA. An
+/// unrestricted admin can call `MigrateContract` to swap the code ID out from
+/// under users, which bypasses the `ProposeMigrateStaking` timelock added
+/// below. Owner-role rotation + migrate_staking delay only protect against a
+/// compromised *owner* key; code migration is a separate attack surface.
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
@@ -45,6 +52,8 @@ pub fn instantiate(
             reward_token: msg.reward_token,
             staking_token: msg.staking_token,
             distribution_schedule: msg.distribution_schedule,
+            pending_owner: None,
+            pending_owner_effective_at: None,
         },
     )?;
 
@@ -90,12 +99,19 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
         ExecuteMsg::Unbond { amount } => unbond(deps, env, info, amount),
         ExecuteMsg::Withdraw {} => withdraw(deps, env, info),
         ExecuteMsg::Fund {} => fund_native(deps, env, info),
-        ExecuteMsg::MigrateStaking {
+        ExecuteMsg::ProposeMigrateStaking {
             new_staking_contract,
-        } => migrate_staking(deps, env, info, new_staking_contract),
+        } => propose_migrate_staking(deps, env, info, new_staking_contract),
+        ExecuteMsg::ApplyMigrateStaking {} => apply_migrate_staking(deps, env, info),
+        ExecuteMsg::CancelMigrateStakingProposal {} => cancel_migrate_staking_proposal(deps, info),
         ExecuteMsg::UpdateConfig {
             distribution_schedule,
         } => update_config(deps, env, info, distribution_schedule),
+        ExecuteMsg::ProposeNewOwner { new_owner } => {
+            propose_new_owner(deps, env, info, new_owner)
+        }
+        ExecuteMsg::ApplyOwnerRotation {} => apply_owner_rotation(deps, env, info),
+        ExecuteMsg::CancelOwnerProposal {} => cancel_owner_proposal(deps, info),
     }
 }
 
@@ -346,13 +362,19 @@ pub fn update_config(
         reward_token: config.reward_token,
         staking_token: config.staking_token,
         distribution_schedule,
+        pending_owner: config.pending_owner,
+        pending_owner_effective_at: config.pending_owner_effective_at,
     };
     store_config(deps.storage, &new_config)?;
 
     Ok(Response::new().add_attributes(vec![("action", "update_config")]))
 }
 
-pub fn migrate_staking(
+/// Owner proposes a migration target. The actual fund-forwarding is gated
+/// behind `apply_migrate_staking`, which requires `TIMELOCK_DELAY_SECONDS`
+/// to have elapsed. Proposing again overwrites the pending proposal and
+/// resets the timer.
+pub fn propose_migrate_staking(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
@@ -360,26 +382,65 @@ pub fn migrate_staking(
 ) -> StdResult<Response> {
     let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
     let config: Config = read_config(deps.storage)?;
-    let mut state: State = read_state(deps.storage)?;
-
     if sender_addr_raw != config.owner {
         return Err(StdError::generic_err("unauthorized"));
     }
 
-    let new_staking_contract = deps.api.addr_validate(&new_staking_contract)?.into_string();
+    let new_staking_addr = deps.api.addr_validate(&new_staking_contract)?;
+    let new_staking_raw = deps.api.addr_canonicalize(new_staking_addr.as_str())?;
+    let effective_at = env.block.time.seconds() + TIMELOCK_DELAY_SECONDS;
 
-    // Flush any pending credits first, then forward the entire undistributed
-    // pool. No more schedule re-math: `undistributed_rewards` is the source of
-    // truth for what hasn't been credited. Tokens backing already-credited
-    // pending rewards stay in the contract so stakers can still withdraw.
+    PENDING_MIGRATION.save(
+        deps.storage,
+        &PendingMigration {
+            new_staking_contract: new_staking_raw,
+            effective_at,
+        },
+    )?;
+
+    Ok(Response::new().add_attributes(vec![
+        ("action", "propose_migrate_staking"),
+        ("new_staking_contract", new_staking_addr.as_str()),
+        ("effective_at", effective_at.to_string().as_str()),
+    ]))
+}
+
+/// Owner finalizes a pending migration. Flushes accrued credits, then
+/// forwards the entire `undistributed_rewards` pool to the proposed
+/// destination. Tokens backing already-credited pending rewards stay
+/// in the contract so stakers can still `Withdraw`.
+pub fn apply_migrate_staking(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> StdResult<Response> {
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    let config: Config = read_config(deps.storage)?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+
+    let pending = PENDING_MIGRATION
+        .may_load(deps.storage)?
+        .ok_or_else(|| StdError::generic_err("no pending migration"))?;
+
+    if env.block.time.seconds() < pending.effective_at {
+        return Err(StdError::generic_err("migration timelock has not elapsed"));
+    }
+
+    let new_staking_contract = deps.api.addr_humanize(&pending.new_staking_contract)?;
+    let mut state: State = read_state(deps.storage)?;
+
     compute_reward(&config, &mut state, env.block.time.seconds());
 
     let remaining_tokens = state.undistributed_rewards;
     state.undistributed_rewards = Uint128::zero();
     store_state(deps.storage, &state)?;
+    PENDING_MIGRATION.remove(deps.storage);
 
     let mut response = Response::new().add_attributes(vec![
-        ("action", "migrate_staking"),
+        ("action", "apply_migrate_staking"),
+        ("new_staking_contract", new_staking_contract.as_str()),
         ("remaining_amount", remaining_tokens.to_string().as_str()),
     ]);
 
@@ -388,13 +449,13 @@ pub fn migrate_staking(
             AssetInfo::Token { ref contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: contract_addr.clone(),
                 msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                    recipient: new_staking_contract,
+                    recipient: new_staking_contract.to_string(),
                     amount: remaining_tokens,
                 })?,
                 funds: vec![],
             }),
             AssetInfo::NativeToken { ref denom } => CosmosMsg::Bank(BankMsg::Send {
-                to_address: new_staking_contract,
+                to_address: new_staking_contract.to_string(),
                 amount: coins(remaining_tokens.u128(), denom),
             }),
         };
@@ -402,6 +463,113 @@ pub fn migrate_staking(
     }
 
     Ok(response)
+}
+
+/// Owner clears a pending migration. No-op if no proposal exists.
+pub fn cancel_migrate_staking_proposal(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> StdResult<Response> {
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    let config: Config = read_config(deps.storage)?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+
+    if PENDING_MIGRATION.may_load(deps.storage)?.is_none() {
+        return Err(StdError::generic_err("no pending migration"));
+    }
+
+    PENDING_MIGRATION.remove(deps.storage);
+
+    Ok(Response::new().add_attribute("action", "cancel_migrate_staking_proposal"))
+}
+
+/// Owner proposes a new owner. The rotation cannot take effect until
+/// `TIMELOCK_DELAY_SECONDS` have elapsed; the delay is the user exit window.
+/// Re-proposing overwrites the pending proposal and resets the timer.
+pub fn propose_new_owner(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    new_owner: String,
+) -> StdResult<Response> {
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    let mut config: Config = read_config(deps.storage)?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+
+    let new_owner_addr = deps.api.addr_validate(&new_owner)?;
+    let new_owner_raw = deps.api.addr_canonicalize(new_owner_addr.as_str())?;
+    let effective_at = env.block.time.seconds() + TIMELOCK_DELAY_SECONDS;
+
+    config.pending_owner = Some(new_owner_raw);
+    config.pending_owner_effective_at = Some(effective_at);
+    store_config(deps.storage, &config)?;
+
+    Ok(Response::new().add_attributes(vec![
+        ("action", "propose_new_owner"),
+        ("pending_owner", new_owner_addr.as_str()),
+        ("effective_at", effective_at.to_string().as_str()),
+    ]))
+}
+
+/// Owner finalizes a pending owner rotation once the timelock has expired.
+pub fn apply_owner_rotation(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> StdResult<Response> {
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    let mut config: Config = read_config(deps.storage)?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+
+    let pending = config
+        .pending_owner
+        .take()
+        .ok_or_else(|| StdError::generic_err("no pending owner rotation"))?;
+    let effective_at = config
+        .pending_owner_effective_at
+        .take()
+        .ok_or_else(|| StdError::generic_err("no pending owner rotation"))?;
+
+    if env.block.time.seconds() < effective_at {
+        return Err(StdError::generic_err("owner rotation timelock has not elapsed"));
+    }
+
+    let new_owner_addr = deps.api.addr_humanize(&pending)?;
+    config.owner = pending;
+    store_config(deps.storage, &config)?;
+
+    Ok(Response::new().add_attributes(vec![
+        ("action", "apply_owner_rotation"),
+        ("new_owner", new_owner_addr.as_str()),
+    ]))
+}
+
+/// Owner clears a pending owner proposal.
+pub fn cancel_owner_proposal(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> StdResult<Response> {
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    let mut config: Config = read_config(deps.storage)?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+
+    if config.pending_owner.is_none() {
+        return Err(StdError::generic_err("no pending owner rotation"));
+    }
+
+    config.pending_owner = None;
+    config.pending_owner_effective_at = None;
+    store_config(deps.storage, &config)?;
+
+    Ok(Response::new().add_attribute("action", "cancel_owner_proposal"))
 }
 
 fn increase_bond_amount(state: &mut State, staker_info: &mut StakerInfo, amount: Uint128) {
@@ -524,11 +692,17 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::StakerInfo { staker, block_time } => {
             to_json_binary(&query_staker_info(deps, staker, block_time)?)
         }
+        QueryMsg::PendingOwnerRotation {} => {
+            to_json_binary(&query_pending_owner_rotation(deps)?)
+        }
+        QueryMsg::PendingMigration {} => to_json_binary(&query_pending_migration(deps)?),
     }
 }
 
 pub fn query_config(deps: Deps) -> StdResult<ConfigResponse> {
     let config = read_config(deps.storage)?;
+
+    let owner_str = deps.api.addr_humanize(&config.owner)?.to_string();
 
     let reward_token_str = match config.reward_token {
         AssetInfo::Token { ref contract_addr } => contract_addr.clone(),
@@ -541,12 +715,42 @@ pub fn query_config(deps: Deps) -> StdResult<ConfigResponse> {
     };
 
     let resp = ConfigResponse {
+        owner: owner_str,
         reward_token: reward_token_str,
         staking_token: staking_token_str,
         distribution_schedule: config.distribution_schedule,
     };
 
     Ok(resp)
+}
+
+pub fn query_pending_owner_rotation(deps: Deps) -> StdResult<PendingOwnerRotationResponse> {
+    let config = read_config(deps.storage)?;
+    let pending_owner = match config.pending_owner {
+        Some(raw) => Some(deps.api.addr_humanize(&raw)?.to_string()),
+        None => None,
+    };
+    Ok(PendingOwnerRotationResponse {
+        pending_owner,
+        effective_at: config.pending_owner_effective_at,
+    })
+}
+
+pub fn query_pending_migration(deps: Deps) -> StdResult<PendingMigrationResponse> {
+    match PENDING_MIGRATION.may_load(deps.storage)? {
+        Some(pending) => Ok(PendingMigrationResponse {
+            new_staking_contract: Some(
+                deps.api
+                    .addr_humanize(&pending.new_staking_contract)?
+                    .to_string(),
+            ),
+            effective_at: Some(pending.effective_at),
+        }),
+        None => Ok(PendingMigrationResponse {
+            new_staking_contract: None,
+            effective_at: None,
+        }),
+    }
 }
 
 pub fn query_state(deps: Deps, block_time: Option<u64>) -> StdResult<StateResponse> {

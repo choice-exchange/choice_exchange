@@ -1,45 +1,17 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ConfigResponse",
+  "title": "UserInfoResponse",
   "type": "object",
   "required": [
-    "distribution_schedule",
-    "owner",
-    "reward_token",
-    "staking_token"
+    "pending_deposit",
+    "shares"
   ],
   "properties": {
-    "distribution_schedule": {
-      "type": "array",
-      "items": {
-        "type": "array",
-        "items": [
-          {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0.0
-          },
-          {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0.0
-          },
-          {
-            "$ref": "#/definitions/Uint128"
-          }
-        ],
-        "maxItems": 3,
-        "minItems": 3
-      }
+    "pending_deposit": {
+      "$ref": "#/definitions/Uint128"
     },
-    "owner": {
-      "type": "string"
-    },
-    "reward_token": {
-      "type": "string"
-    },
-    "staking_token": {
-      "type": "string"
+    "shares": {
+      "$ref": "#/definitions/Uint128"
     }
   },
   "additionalProperties": false,

@@ -15,12 +15,38 @@ pub const STATE: Item<State> = Item::new("state");
 /// Store staker info using the prefix "reward"
 pub const STAKER_INFO: Map<&[u8], StakerInfo> = Map::new("reward");
 
+/// Pending migrate_staking proposal. Absent when no migration is queued.
+/// H-4 follow-through: migration is now two-step — `ProposeMigrateStaking`
+/// sets this item, `ApplyMigrateStaking` clears it and forwards funds once
+/// the timelock has elapsed.
+pub const PENDING_MIGRATION: Item<PendingMigration> = Item::new("pending_migration");
+
+/// Delay between proposing and applying either an owner rotation or a
+/// `migrate_staking`. 48 hours gives stakers a window to unbond + withdraw
+/// if they distrust the proposal.
+pub const TIMELOCK_DELAY_SECONDS: u64 = 48 * 60 * 60;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Config {
     pub owner: CanonicalAddr,
     pub reward_token: AssetInfo,
     pub staking_token: AssetInfo,
     pub distribution_schedule: Vec<(u64, u64, Uint128)>,
+    /// Owner rotation that has been proposed but cannot take effect until the
+    /// timelock expires. `#[serde(default)]` so pre-hardening stored configs
+    /// read as "no pending rotation" without a migration.
+    #[serde(default)]
+    pub pending_owner: Option<CanonicalAddr>,
+    /// Unix timestamp (seconds) at which `pending_owner` may be applied.
+    #[serde(default)]
+    pub pending_owner_effective_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct PendingMigration {
+    pub new_staking_contract: CanonicalAddr,
+    /// Unix timestamp (seconds) at which the migration may be applied.
+    pub effective_at: u64,
 }
 
 /// Save the configuration into storage.

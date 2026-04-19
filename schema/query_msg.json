@@ -123,20 +123,6 @@
         }
       },
       "additionalProperties": false
-    },
-    {
-      "description": "Returns the pending `max_slippage_tolerance` raise, if any.",
-      "type": "object",
-      "required": [
-        "pending_max_slippage_raise"
-      ],
-      "properties": {
-        "pending_max_slippage_raise": {
-          "type": "object",
-          "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
     }
   ]
 }

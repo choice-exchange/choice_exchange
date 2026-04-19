@@ -41,11 +41,45 @@ pub struct Config {
     /// If this route is empty, the contract assumes the reward token
     /// is already one of the LP's assets.
     pub reward_to_lp_token_route: Vec<SwapHop>,
+
+    /// H-4: when true, every entry path (deposit, compound, activation) rejects.
+    /// Exit paths (`WithdrawPending`, `WithdrawShares`) are *not* gated so users
+    /// can always unwind. `#[serde(default)]` so pre-H-4 stored configs read as
+    /// unpaused without a migration step.
+    #[serde(default)]
+    pub paused: bool,
+
+    /// Upper bound on operational `slippage_tolerance`. Tightening is instant;
+    /// raising requires the timelocked propose/apply flow (see
+    /// `MAX_SLIPPAGE_RAISE_DELAY_SECONDS`). Defaults via `#[serde(default)]` so
+    /// pre-governance stored configs read the initial ceiling without a
+    /// migration.
+    #[serde(default = "default_max_slippage_tolerance")]
+    pub max_slippage_tolerance: Decimal,
+
+    /// Pending raise of `max_slippage_tolerance`; applies after
+    /// `pending_max_slippage_effective_at`. Lets depositors exit in the
+    /// 48h window before a cap raise takes effect.
+    #[serde(default)]
+    pub pending_max_slippage: Option<Decimal>,
+    #[serde(default)]
+    pub pending_max_slippage_effective_at: Option<u64>,
+}
+
+fn default_max_slippage_tolerance() -> Decimal {
+    // Mirrors `DEFAULT_MAX_SLIPPAGE_TOLERANCE` in `contract.rs` — kept local so
+    // serde can reference it without pulling contract.rs as a dep.
+    Decimal::percent(25)
 }
 
 /// Minimum delay between proposing and applying a compounder rotation.
 /// 48 hours gives users time to withdraw before the new operator gains the key.
 pub const COMPOUNDER_ROTATION_DELAY_SECONDS: u64 = 48 * 60 * 60;
+
+/// Minimum delay between proposing and applying a raise of
+/// `max_slippage_tolerance`. Mirrors `COMPOUNDER_ROTATION_DELAY_SECONDS` —
+/// depositors get 48h to exit before the new ceiling takes effect.
+pub const MAX_SLIPPAGE_RAISE_DELAY_SECONDS: u64 = 48 * 60 * 60;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SwapHop {

@@ -14,6 +14,20 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "description": "Deposit reward tokens (CW20) into the distribution pool. The CW20 sending the tokens must be the configured reward token.",
+      "type": "object",
+      "required": [
+        "fund"
+      ],
+      "properties": {
+        "fund": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }

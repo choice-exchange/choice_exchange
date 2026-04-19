@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PendingDepositsResponse",
+  "type": "object",
+  "required": [
+    "users"
+  ],
+  "properties": {
+    "last_user": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

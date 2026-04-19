@@ -28,14 +28,32 @@ pub enum ExecuteMsg {
     /// The caller sends `info.funds` matching the configured reward denom.
     /// Anyone can call this; the contract distributes only what has been funded.
     Fund {},
-    /// Owner operation to stop distribution on current staking contract
-    /// and send remaining tokens to the new contract
-    MigrateStaking {
+    /// H-4 follow-through: owner proposes a migration target. The actual
+    /// `undistributed_rewards` forward only happens when the owner later calls
+    /// `ApplyMigrateStaking` after `TIMELOCK_DELAY_SECONDS` have elapsed. The
+    /// delay is the user exit window — stakers who distrust the incoming
+    /// contract can `Unbond` + `Withdraw` before the move.
+    ProposeMigrateStaking {
         new_staking_contract: String,
     },
+    /// Owner-only. Finalizes a pending migration once the timelock has expired.
+    ApplyMigrateStaking {},
+    /// Owner-only. Clears any pending migration.
+    CancelMigrateStakingProposal {},
     UpdateConfig {
         distribution_schedule: Vec<(u64, u64, Uint128)>,
     },
+    /// H-4 follow-through: owner proposes a new owner. The rotation cannot
+    /// take effect until `TIMELOCK_DELAY_SECONDS` have elapsed, giving users
+    /// a window to exit if they distrust the incoming operator. Proposing
+    /// again resets the timer.
+    ProposeNewOwner {
+        new_owner: String,
+    },
+    /// Owner-only. Finalizes a pending owner rotation once the timelock has expired.
+    ApplyOwnerRotation {},
+    /// Owner-only. Clears any pending owner proposal.
+    CancelOwnerProposal {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -63,14 +81,31 @@ pub enum QueryMsg {
         staker: String,
         block_time: Option<u64>,
     },
+    /// Pending owner rotation, if any.
+    PendingOwnerRotation {},
+    /// Pending migrate_staking proposal, if any.
+    PendingMigration {},
 }
 
 // We define a custom struct for each query response
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct ConfigResponse {
+    pub owner: String,
     pub reward_token: String,
     pub staking_token: String,
     pub distribution_schedule: Vec<(u64, u64, Uint128)>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct PendingOwnerRotationResponse {
+    pub pending_owner: Option<String>,
+    pub effective_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct PendingMigrationResponse {
+    pub new_staking_contract: Option<String>,
+    pub effective_at: Option<u64>,
 }
 
 // We define a custom struct for each query response
