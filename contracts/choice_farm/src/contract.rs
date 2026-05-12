@@ -45,6 +45,10 @@ pub fn instantiate(
     validate_asset_info(deps.as_ref(), &msg.staking_token)?;
     validate_distribution_schedule(&msg.distribution_schedule)?;
 
+    let (reward_token_kind, reward_token_addr) = asset_info_event_parts(&msg.reward_token);
+    let (staking_token_kind, staking_token_addr) = asset_info_event_parts(&msg.staking_token);
+    let (start_time, end_time, total_reward) = distribution_schedule_summary(&msg.distribution_schedule);
+
     store_config(
         deps.storage,
         &Config {
@@ -67,7 +71,30 @@ pub fn instantiate(
         },
     )?;
 
-    Ok(Response::default())
+    Ok(Response::new()
+        .add_attribute("action", "instantiate_farm")
+        .add_attribute("owner", info.sender.as_str())
+        .add_attribute("reward_token", reward_token_addr)
+        .add_attribute("reward_token_kind", reward_token_kind)
+        .add_attribute("staking_token", staking_token_addr)
+        .add_attribute("staking_token_kind", staking_token_kind)
+        .add_attribute("start_time", start_time.to_string())
+        .add_attribute("end_time", end_time.to_string())
+        .add_attribute("total_reward", total_reward.to_string()))
+}
+
+fn asset_info_event_parts(info: &AssetInfo) -> (&'static str, String) {
+    match info {
+        AssetInfo::NativeToken { denom } => ("native", denom.clone()),
+        AssetInfo::Token { contract_addr } => ("cw20", contract_addr.clone()),
+    }
+}
+
+fn distribution_schedule_summary(schedule: &[(u64, u64, Uint128)]) -> (u64, u64, Uint128) {
+    let start = schedule.iter().map(|(s, _, _)| *s).min().unwrap_or(0);
+    let end = schedule.iter().map(|(_, e, _)| *e).max().unwrap_or(0);
+    let total = schedule.iter().fold(Uint128::zero(), |acc, (_, _, amt)| acc + *amt);
+    (start, end, total)
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
