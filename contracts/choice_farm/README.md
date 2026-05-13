@@ -1,75 +1,167 @@
-# Staking Contract
+# choice_farm — Staking & Rewards
 
-This staking contract is forked from the Anchor protocol. It enables users to bond tokens (either native or CW20) in order to earn rewards over time according to a predefined distribution schedule.
+LP staking contract that distributes a reward token to bonded stakers over a
+time-based `distribution_schedule`. Forked from the Anchor protocol staking
+contract; hardened in the v1.1.2 security pass.
 
-## Key Features
+This README is a quick orientation. For the deep dive — reward-index math,
+overflow protection (H-1), the empty-window pause behavior (M-2), CW20
+self-balance reconciliation (M-1), apply_migrate_staking dust sweep (L-1) —
+see [`docs/farm.md`](../../docs/farm.md).
 
-- **Bonding & Unbonding:**  
-  Users can bond tokens to participate in staking and unbond when desired. The contract tracks each staker’s bond amount.
+## Role in the system
 
-- **Reward Distribution:**  
-  Rewards are distributed over time based on a schedule. The contract computes a global reward index and allocates rewards proportionally to stakers based on their bond amounts.
+```text
+                  ┌────────────────────────┐
+                  │ choice_admin_timelock  │  ← wasm admin (factory + farms)
+                  │  (48 h delay on        │
+                  │   MsgMigrateContract)  │
+                  └────────────┬───────────┘
+                               │ admin =
+                               │
+                  ┌────────────▼───────────┐
+                  │  choice_farm_factory   │  ← spawns farms, holds registry
+                  │  CreateFarm fee 1 INJ  │
+                  └────────────┬───────────┘
+                               │ instantiates with
+                               │ admin = farm_owner
+                               │ owner = farm_owner
+                  ┌────────────▼───────────┐
+                  │      choice_farm       │  ← this contract
+                  │  bond/unbond/withdraw  │
+                  └────────────────────────┘
+```
 
-- **Reward Withdrawal:**  
-  Stakers can withdraw their accumulated (pending) rewards via a dedicated execution function. Rewards can be sent as native tokens or via CW20 transfers.
+A `choice_farm` is **always** spawned by the factory in production —
+instantiating it standalone is supported for testing only. Both the
+factory's wasm admin and each farm's wasm admin are the
+`choice_admin_timelock` contract, so any code migration is delayed by the
+same window users get from `ProposeMigrateStaking`.
 
-- **CW20 Integration:**  
-  The contract supports CW20 hook messages. This ensures that if the staking token is a CW20 token, only the designated token contract can trigger bonding.
+## Lifecycle
 
-- **Configurable Parameters:**  
-  Upon instantiation, the contract is configured with:
-  - `reward_token`: The token used for rewards.
-  - `staking_token`: The token users stake.
-  - `distribution_schedule`: A list of reward distribution slots defined as tuples `(start_time, end_time, amount)`.
-  - `owner`: The contract owner (set during instantiation).
+1. **Spawn** (via factory): `CreateFarm` on the factory pays a 1 INJ launch
+   fee + the full reward budget, then instantiates this contract with
+   `admin = farm_owner` and `Config.owner = farm_owner`. The factory
+   forwards the reward in the reply via `ExecuteMsg::Fund {}` so
+   `undistributed_rewards` is credited atomically.
 
-- **Administration:**  
-  The owner can update the distribution schedule via `update_config` and can also trigger a migration of staking if needed.
+2. **Operation**:
+   - Stakers call `Bond { amount }` (native) or `Cw20::Send + HookMsg::Bond`
+     (CW20). The farm reconciles its self-balance against
+     `LAST_SEEN_CW20_BALANCE` before crediting — a CW20 that fires
+     `Receive` without actually moving tokens is rejected.
+   - `Withdraw {}` claims pending rewards; `Unbond { amount }` decrements
+     stake and sweeps rewards first.
+   - Rewards accrue lazily on every state-changing call. No cron.
 
-## How It Works
+3. **Schedule update** (timelocked, 48 h):
+   - `ProposeUpdateConfig { distribution_schedule }` → owner queues.
+   - `ApplyUpdateConfig {}` → owner installs after the timelock elapses.
+     Re-validates the schedule against current block time so a slot that
+     started during the wait window is rejected.
+   - `CancelUpdateConfigProposal {}` clears the queue.
+   - There is no instant `UpdateConfig` — it was removed in the security
+     pass.
 
-1. **Instantiation:**  
-   The contract is initialized with a configuration and state:
-   - **Configuration:** Contains the owner, reward token, staking token, and distribution schedule.
-   - **State:** Starts with no bonded tokens, a global reward index of zero, and records the last distribution timestamp.
+4. **Migration to a new staking contract** (timelocked, 48 h):
+   - `ProposeMigrateStaking { new_staking_contract }` → owner queues.
+   - `ApplyMigrateStaking {}` → owner sweeps the farm's actual reward-token
+     balance (Bank or `Cw20::Balance` query), subtracts
+     `total_bond_amount` (when reward denom == staking denom) and
+     `unclaimed_pending`, forwards the rest to `new_staking_contract`.
+     Emits a `migration_notice` event attribute telling stakers to
+     `Unbond` + `Withdraw` from the old farm.
+   - `CancelMigrateStakingProposal {}` clears the queue.
 
-2. **Bonding:**  
-   - Users bond tokens either by sending native tokens or via a CW20 message (which is validated to ensure it comes from the proper staking token contract).
-   - On bonding, the contract:
-     - Updates the global reward index.
-     - Computes and accumulates rewards for the staker.
-     - Increases the staker’s bond amount.
+5. **Owner rotation** (timelocked, 48 h):
+   `ProposeNewOwner` → `ApplyOwnerRotation` → `CancelOwnerProposal`.
 
-3. **Unbonding:**  
-   - Users may unbond a portion of their staked tokens.
-   - The contract computes pending rewards before decreasing the bond amount.
-   - If the staker’s bond and pending rewards drop to zero, their staking information is removed from storage.
+6. **Code migration** (timelocked at the admin-timelock contract):
+   The farm's wasm admin is the `choice_admin_timelock`. Any
+   `MsgMigrateContract` against this farm must be proposed at the timelock
+   contract, wait `timelock_seconds` (48 h in production), and then be
+   applied. The same window applies to the factory and to every other farm
+   spawned under the same timelock.
 
-4. **Reward Withdrawal:**  
-   - Stakers can withdraw their pending rewards. The contract transfers rewards based on whether the reward token is native or a CW20 token.
+## Messages — quick reference
 
-5. **Reward Calculation:**  
-   - Rewards are calculated using a distribution schedule and the passage of time.
-   - The global reward index is updated based on the total bond amount and the amount distributed.
-   - Each staker’s reward is computed as the difference between the product of their bond amount and the current global reward index, and their previously recorded reward index.
+### Execute
 
-6. **Queries:**  
-   The contract provides query endpoints to fetch:
-   - Configuration details.
-   - Current state (last distribution time, total bond amount, global reward index).
-   - Individual staker information (bond amount, pending rewards, reward index).
+| Message | Auth | Timelock | Notes |
+| --- | --- | --- | --- |
+| `Bond { amount }` | anyone | — | Native: include `amount` of `staking_token.denom` in funds. |
+| `Receive(HookMsg::Bond {})` | CW20 staking token | — | CW20 path; self-balance reconciled (M-1). |
+| `Unbond { amount }` | staker | — | Sweeps pending reward first; cleans `STAKER_INFO` row when both fields hit zero. |
+| `Withdraw {}` | staker | — | Sends `pending_reward` of `reward_token`; zeros `staker.pending_reward`; decrements `unclaimed_pending`. |
+| `Fund {}` / `Receive(HookMsg::Fund {})` | anyone | — | Top up `undistributed_rewards`. |
+| `ProposeUpdateConfig { distribution_schedule }` | owner | queues | Re-validated at `Apply`. |
+| `ApplyUpdateConfig {}` | owner | 48 h | Rejects schedules whose earliest slot has already started. |
+| `CancelUpdateConfigProposal {}` | owner | — | |
+| `ProposeMigrateStaking { new_staking_contract }` | owner | queues | |
+| `ApplyMigrateStaking {}` | owner | 48 h | Sweeps reward balance minus bonded + unclaimed. |
+| `CancelMigrateStakingProposal {}` | owner | — | |
+| `ProposeNewOwner { new_owner }` | owner | queues | |
+| `ApplyOwnerRotation {}` | owner | 48 h | |
+| `CancelOwnerProposal {}` | owner | — | |
 
-## Deployment Steps
+### Query
 
-1. **Instantiate the Contract:**  
-   Deploy the contract with the required parameters (owner, reward token, staking token, and distribution schedule).
+| Query | Returns |
+| --- | --- |
+| `Config {}` | owner, reward/staking token, distribution_schedule |
+| `State { block_time }` | last_distributed, total_bond_amount, global_reward_index, undistributed_rewards, unclaimed_pending |
+| `StakerInfo { staker, block_time }` | bond_amount, pending_reward (projected to `block_time`), reward_index |
+| `PendingOwnerRotation {}` | pending_owner, effective_at |
+| `PendingMigration {}` | new_staking_contract, effective_at |
+| `PendingConfigUpdate {}` | distribution_schedule, effective_at |
 
-2. **Bonding:**  
-   Users can bond tokens to start earning rewards.
+## Constants
 
-3. **Administration:**  
-   The owner can update the distribution schedule using `update_config` and can migrate staking if required.
+- `TIMELOCK_DELAY_SECONDS = 48 h` — Propose → Apply window for **every** of
+  the farm's three timelocked paths (config update, migrate staking, owner
+  rotation). Hard-coded; not a config field.
+- `MAX_SCHEDULE_SLOTS = 20` — Bounds `compute_reward` gas.
+- `MAX_SCHEDULE_SLOT_DURATION_SECONDS = 4 years` — Bounds how far a
+  compromised owner can stretch a single emission slot.
 
-4. **Withdrawal:**  
-   Stakers can unbond their tokens and withdraw rewards as needed.
+## Behavioral surprises worth knowing
 
+- **Empty-window pause (M-2):** if `total_bond_amount` drops to zero,
+  `last_distributed` does *not* advance. The schedule pauses; the next
+  staker to bond sweeps up the missed window. The full advertised budget
+  is honoured, but the schedule's effective end can extend past its
+  published `end_time` while the farm sits empty.
+- **Lazy accrual:** rewards are only computed on bond/unbond/withdraw/fund.
+  A passive farm with no calls will show stale `last_distributed`;
+  `Query::State` and `Query::StakerInfo` accept a `block_time` arg and
+  project forward for read-only callers.
+- **CW20 honesty:** `LAST_SEEN_CW20_BALANCE` is the contract's source of
+  truth for what a CW20 reward/staking token has actually delivered.
+  A `Receive` whose claimed amount doesn't match the on-chain balance
+  delta is rejected (M-1). Outbound CW20 transfers (Withdraw, Unbond,
+  apply_migrate_staking) decrement this cache *before* dispatching.
+- **Unclaimed pending obligations:** `state.unclaimed_pending` mirrors how
+  much credit has been moved from `undistributed_rewards` into staker
+  `pending_reward` but not yet withdrawn (L-1). `apply_migrate_staking`
+  forwards `reward_balance - bonded - unclaimed_pending`, so dust from
+  floor-truncation is swept out by this path; users still see the rewards
+  the index already credited them.
+
+## Build
+
+```bash
+cargo build -p choice-farm
+cargo test  -p choice-farm
+```
+
+## See also
+
+- [`docs/farm.md`](../../docs/farm.md) — deep dive on reward math + security
+  notes.
+- [`contracts/choice_farm_factory/`](../choice_farm_factory/) — factory
+  README.
+- [`contracts/choice_admin_timelock/`](../choice_admin_timelock/) — admin
+  timelock README.
+- [`deploy/guide.md`](../../deploy/guide.md) — operator flow for deploying
+  the timelock + factory + farms together.

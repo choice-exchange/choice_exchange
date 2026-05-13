@@ -29,7 +29,7 @@ Read these for deeper context on specific contract systems:
 
 ## Project Structure
 
-```
+```text
 contracts/
   choice_clmm_pool/       # CLMM concentrated liquidity pool (mint, swap, burn, collect)
   choice_clmm_factory/    # Creates CLMM pools with fee tiers
@@ -38,6 +38,8 @@ contracts/
   choice_factory/         # Legacy pair factory
   choice_router/          # Multi-hop swap routing
   choice_farm/            # LP staking and reward distribution
+  choice_farm_factory/    # Spawns farms; registry + INJ launch fee
+  choice_admin_timelock/  # Holds wasm-admin powers; delays MsgMigrateContract
   choice_vault/           # Auto-compounding vault
   choice_send_to_auction/ # Sends 0.05% swap fees to Injective burn auction
 packages/

@@ -259,6 +259,7 @@ fn setup_native_native() -> VaultEnv {
         .instantiate(
             farm_code_id,
             &FarmInstantiateMsg {
+                owner: admin.address(),
                 reward_token: native(DENOM_ATOM),
                 staking_token: native(&lp_denom),
                 distribution_schedule: vec![(
@@ -276,7 +277,7 @@ fn setup_native_native() -> VaultEnv {
         .data
         .address;
 
-    // Fund the farm with the reward tokens it will pay out.
+    // Fund the farm with the full schedule total so rewards can be distributed.
     wasm.execute(
         &farm_addr,
         &FarmExecuteMsg::Fund {},
@@ -1059,6 +1060,7 @@ fn native_cw20_deposit_activate_compound_withdraw() {
         .instantiate(
             farm_code,
             &FarmInstantiateMsg {
+                owner: admin.address(),
                 reward_token: native(DENOM_ATOM),
                 staking_token: native(&lp_denom),
                 distribution_schedule: vec![(
@@ -1075,6 +1077,7 @@ fn native_cw20_deposit_activate_compound_withdraw() {
         .unwrap()
         .data
         .address;
+    // Fund the farm with the full schedule total so rewards can be distributed.
     wasm.execute(
         &farm_addr,
         &FarmExecuteMsg::Fund {},
@@ -1455,6 +1458,7 @@ fn cw20_cw20_deposit_activate_compound_withdraw() {
         .instantiate(
             farm_code,
             &FarmInstantiateMsg {
+                owner: admin.address(),
                 reward_token: info_a.clone(),
                 staking_token: native(&lp_denom),
                 distribution_schedule: vec![(

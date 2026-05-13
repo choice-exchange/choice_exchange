@@ -1,10 +1,10 @@
 use crate::contract::{execute, instantiate, query};
 use crate::mock_querier::{mock_dependencies, WasmMockQuerier};
 use choice::asset::AssetInfo;
-use choice::staking::ExecuteMsg::UpdateConfig;
 use choice::staking::{
-    ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, PendingMigrationResponse,
-    PendingOwnerRotationResponse, QueryMsg, StakerInfoResponse, StateResponse,
+    ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, PendingConfigUpdateResponse,
+    PendingMigrationResponse, PendingOwnerRotationResponse, QueryMsg, StakerInfoResponse,
+    StateResponse,
 };
 use cosmwasm_std::testing::{message_info, mock_env, MockApi, MockStorage};
 use cosmwasm_std::{
@@ -17,9 +17,18 @@ type TestDeps = OwnedDeps<MockStorage, MockApi, WasmMockQuerier>;
 
 /// Fund the farm's reward pool via a Cw20 Send hook from the configured reward
 /// token "reward0000". Tests that use a CW20 reward token share this helper.
+///
+/// The mock CW20 balance is bumped BEFORE executing so the M-1 reconcile
+/// inside `receive_cw20` sees the correct post-transfer balance. Tests that
+/// subsequently dispatch outgoing Cw20::Transfer messages of the reward
+/// token don't need to manually decrement — the contract's `decrement_last_seen_cw20`
+/// handles the bookkeeping (but the *mock* balance still needs to be kept
+/// in sync, via `decrement_reward_cw20_balance`).
 fn fund_via_reward_cw20(deps: &mut TestDeps, amount: Uint128) {
     let reward_addr = deps.api.addr_make("reward0000");
     let funder = deps.api.addr_make("funder").to_string();
+    // Bump first so the reconcile inside receive_cw20 sees the delta.
+    bump_reward_cw20_balance(deps, amount);
     let info = message_info(&reward_addr, &[]);
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: funder,
@@ -27,6 +36,50 @@ fn fund_via_reward_cw20(deps: &mut TestDeps, amount: Uint128) {
         msg: to_json_binary(&Cw20HookMsg::Fund {}).unwrap(),
     });
     execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+}
+
+fn bump_cw20_balance(deps: &mut TestDeps, label: &str, delta: Uint128) {
+    let cw20_addr = deps.api.addr_make(label).to_string();
+    let contract_addr = mock_env().contract.address.to_string();
+    let current = deps
+        .querier
+        .get_cw20_balance(&cw20_addr, &contract_addr);
+    deps.querier.set_cw20_balance(
+        cw20_addr,
+        contract_addr,
+        current.checked_add(delta).unwrap(),
+    );
+}
+
+/// Sum-up helper for the reward-CW20 mock balance fixture so `+=` reads cleanly
+/// across multiple Fund calls in a single test.
+fn bump_reward_cw20_balance(deps: &mut TestDeps, delta: Uint128) {
+    let reward_addr = deps.api.addr_make("reward0000").to_string();
+    let contract_addr = mock_env().contract.address.to_string();
+    let current = deps
+        .querier
+        .get_cw20_balance(&reward_addr, &contract_addr);
+    deps.querier.set_cw20_balance(
+        reward_addr,
+        contract_addr,
+        current.checked_add(delta).unwrap(),
+    );
+}
+
+/// Mirror an outgoing Cw20::Transfer of the reward token (Withdraw / Migrate)
+/// in the mock balance fixture.
+#[allow(dead_code)]
+fn decrement_reward_cw20_balance(deps: &mut TestDeps, delta: Uint128) {
+    let reward_addr = deps.api.addr_make("reward0000").to_string();
+    let contract_addr = mock_env().contract.address.to_string();
+    let current = deps
+        .querier
+        .get_cw20_balance(&reward_addr, &contract_addr);
+    deps.querier.set_cw20_balance(
+        reward_addr,
+        contract_addr,
+        current.checked_sub(delta).unwrap(),
+    );
 }
 
 /// Fund the farm's reward pool with a native reward token (e.g. "inj").
@@ -47,6 +100,7 @@ fn proper_initialization() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -92,11 +146,165 @@ fn proper_initialization() {
     );
 }
 
+/// Native reward + matching instantiate funds: `undistributed_rewards` is
+/// credited atomically. This is the path the factory takes in its reply.
+#[test]
+fn instantiate_native_with_funds_credits_undistributed_rewards() {
+    let mut deps = mock_dependencies(&[]);
+    let total_reward = Uint128::from(1_000_000u128);
+
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(100, 200, total_reward)],
+    };
+
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[Coin::new(total_reward.u128(), "uatom")],
+    );
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    let state: StateResponse = from_json(
+        query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::State { block_time: None },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state.undistributed_rewards, total_reward);
+}
+
+/// Native reward + empty funds: legal (factory will fund via reply, or caller
+/// will Fund{} later). `undistributed_rewards` stays at zero.
+#[test]
+fn instantiate_native_with_empty_funds_ok() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(100, 200, Uint128::from(1_000_000u128))],
+    };
+    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    let state: StateResponse = from_json(
+        query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::State { block_time: None },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state.undistributed_rewards, Uint128::zero());
+}
+
+#[test]
+fn instantiate_native_wrong_denom_rejected() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(100, 200, Uint128::from(1_000_000u128))],
+    };
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[Coin::new(1_000_000u128, "inj")],
+    );
+    let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    assert!(err.to_string().contains("denom mismatch"), "got: {}", err);
+}
+
+#[test]
+fn instantiate_native_wrong_amount_rejected() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(100, 200, Uint128::from(1_000_000u128))],
+    };
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[Coin::new(999_999u128, "uatom")],
+    );
+    let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    assert!(err.to_string().contains("amount mismatch"), "got: {}", err);
+}
+
+#[test]
+fn instantiate_native_multiple_coins_rejected() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(100, 200, Uint128::from(1_000_000u128))],
+    };
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[
+            Coin::new(1_000_000u128, "uatom"),
+            Coin::new(1u128, "inj"),
+        ],
+    );
+    let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    assert!(err.to_string().contains("at most one coin"), "got: {}", err);
+}
+
+#[test]
+fn instantiate_cw20_with_funds_rejected() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
+        reward_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(100, 200, Uint128::from(1_000_000u128))],
+    };
+    let info = message_info(
+        &deps.api.addr_make("addr0000"),
+        &[Coin::new(1_000_000u128, "uatom")],
+    );
+    let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    assert!(err.to_string().contains("cw20 reward farms"), "got: {}", err);
+}
+
 #[test]
 fn test_bond_tokens() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -123,6 +331,7 @@ fn test_bond_tokens() {
     // Fund the distribution pool so rewards can actually be distributed.
     fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
 
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -173,6 +382,7 @@ fn test_bond_tokens() {
     );
 
     // bond 100 more tokens
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -241,6 +451,7 @@ fn test_unbond() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -257,6 +468,7 @@ fn test_unbond() {
     let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
 
     // bond 100 tokens
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -305,6 +517,7 @@ fn test_compute_reward() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -331,6 +544,7 @@ fn test_compute_reward() {
     fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
 
     // bond 100 tokens
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -345,6 +559,7 @@ fn test_compute_reward() {
     env.block.time = env.block.time.plus_seconds(100);
 
     // bond 100 more tokens
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -432,6 +647,7 @@ fn test_withdraw() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -458,6 +674,7 @@ fn test_withdraw() {
     fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
 
     // bond 100 tokens
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -495,6 +712,7 @@ fn test_migrate_staking() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -521,6 +739,7 @@ fn test_migrate_staking() {
     fund_via_reward_cw20(&mut deps, Uint128::from(11_000_000u128));
 
     // bond 100 tokens
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -672,499 +891,307 @@ fn test_migrate_staking() {
     assert_eq!(state.undistributed_rewards, Uint128::zero());
 }
 
-#[test]
-fn test_update_config() {
+/// Helper: instantiate a CW20-staked / CW20-reward farm whose schedule starts
+/// `+1000` seconds in the future. Future-only so it doesn't collide with
+/// `assert_new_schedules` when later tests propose replacements.
+fn instantiate_for_update_config_tests() -> (TestDeps, cosmwasm_std::Addr) {
     let mut deps = mock_dependencies(&[]);
-
+    let owner = deps.api.addr_make("gov0000");
+    let start = mock_env().block.time.seconds();
     let msg = InstantiateMsg {
+        owner: owner.to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
         staking_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("staking0000").to_string(),
         },
-        distribution_schedule: vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(10000000u128),
-            ),
-        ],
-    };
-
-    let info = message_info(&deps.api.addr_make("gov0000"), &[]);
-    let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-    // Fund with the full schedule total so distribution math matches the
-    // original expectations of this test.
-    fund_via_reward_cw20(&mut deps, Uint128::from(41_000_000u128));
-
-    let update_config = UpdateConfig {
         distribution_schedule: vec![(
-            mock_env().block.time.seconds() + 300,
-            mock_env().block.time.seconds() + 400,
-            Uint128::from(10000000u128),
+            start + 1000,
+            start + 1100,
+            Uint128::from(1_000_000u128),
         )],
     };
+    instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
+    (deps, owner)
+}
 
-    let info = message_info(&deps.api.addr_make("notgov0000"), &[]);
-    let res = execute(deps.as_mut(), mock_env(), info, update_config);
-    match res {
-        Err(StdError::GenericErr { msg, .. }) => assert_eq!(msg, "unauthorized"),
-        _ => panic!("Must return unauthorized error"),
-    }
-
-    // do some bond and update rewards
-    // bond 100 tokens
-    let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
-        sender: deps.api.addr_make("addr0000").to_string(),
-        amount: Uint128::from(100u128),
-        msg: to_json_binary(&Cw20HookMsg::Bond {}).unwrap(),
-    });
-    let info = message_info(&deps.api.addr_make("staking0000"), &[]);
+/// H-2 happy path: propose + wait the timelock + apply installs the new
+/// schedule. Outsiders rejected at every step; premature apply rejected.
+#[test]
+fn test_update_config_timelocked_happy_path() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let outsider = deps.api.addr_make("outsider");
     let mut env = mock_env();
-    let _res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
+    let start = env.block.time.seconds();
 
-    // 100 seconds is passed
-    // 1,000,000 rewards distributed
-    env.block.time = env.block.time.plus_seconds(100);
-    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    let new_schedule = vec![(start + 2000, start + 2100, Uint128::from(2_000_000u128))];
 
-    let msg = ExecuteMsg::Withdraw {};
-    let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
-    assert_eq!(
-        res.messages,
-        vec![SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: deps.api.addr_make("reward0000").to_string(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: deps.api.addr_make("addr0000").to_string(),
-                amount: Uint128::from(1000000u128),
-            })
-            .unwrap(),
-            funds: vec![],
-        }))]
-    );
-
-    let update_config = UpdateConfig {
-        distribution_schedule: vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(5000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(10000000u128),
-            ),
-        ],
-    };
-
-    let info = message_info(&deps.api.addr_make("gov0000"), &[]);
-    let res = execute(deps.as_mut(), mock_env(), info, update_config);
-    match res {
-        Err(StdError::GenericErr { msg, .. }) => {
-            assert_eq!(msg, "new schedule removes already started distribution")
-        }
-        _ => panic!("Must return unauthorized error"),
+    // Outsider can't propose.
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&outsider, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: new_schedule.clone(),
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert_eq!(msg, "unauthorized"),
+        _ => panic!("expected unauthorized"),
     }
 
-    // do some bond and update rewards
-    // bond 100 tokens
-    let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
-        sender: deps.api.addr_make("addr0000").to_string(),
-        amount: Uint128::from(100u128),
-        msg: to_json_binary(&Cw20HookMsg::Bond {}).unwrap(),
-    });
-    let info = message_info(&deps.api.addr_make("staking0000"), &[]);
-    let _res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
+    // Owner proposes.
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: new_schedule.clone(),
+        },
+    )
+    .unwrap();
 
-    // 100 seconds is passed
-    // 1,000,000 rewards distributed
-    env.block.time = env.block.time.plus_seconds(100);
+    // Query surfaces the pending update.
+    let res = query(deps.as_ref(), env.clone(), QueryMsg::PendingConfigUpdate {}).unwrap();
+    let pending: PendingConfigUpdateResponse = from_json(&res).unwrap();
+    assert_eq!(pending.distribution_schedule, Some(new_schedule.clone()));
+    assert_eq!(
+        pending.effective_at,
+        Some(env.block.time.seconds() + crate::state::TIMELOCK_DELAY_SECONDS),
+    );
 
-    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
-
-    let msg = ExecuteMsg::Withdraw {};
-    let _res = execute(deps.as_mut(), env, info, msg).unwrap();
-
-    //cannot update previous schedule
-    let update_config = UpdateConfig {
-        distribution_schedule: vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(5000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(10000000u128),
-            ),
-        ],
-    };
-
-    deps.querier
-        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
-
-    let info = message_info(&deps.api.addr_make("gov0000"), &[]);
-    let res = execute(deps.as_mut(), mock_env(), info, update_config);
-    match res {
-        Err(StdError::GenericErr { msg, .. }) => {
-            assert_eq!(msg, "new schedule removes already started distribution")
+    // Premature apply rejected.
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ApplyUpdateConfig {},
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => {
+            assert_eq!(msg, "config update timelock has not elapsed")
         }
-        _ => panic!("Must return unauthorized error"),
+        _ => panic!("expected timelock rejection"),
     }
 
-    //successful one
-    let update_config = UpdateConfig {
-        distribution_schedule: vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(20000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(10000000u128),
-            ),
-        ],
-    };
+    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
 
-    deps.querier
-        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    // Outsider still can't apply.
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&outsider, &[]),
+        ExecuteMsg::ApplyUpdateConfig {},
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert_eq!(msg, "unauthorized"),
+        _ => panic!("expected unauthorized"),
+    }
 
-    let info = message_info(&deps.api.addr_make("gov0000"), &[]);
-    let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
-
-    assert_eq!(res.attributes, vec![("action", "update_config")]);
-
-    // query config
-    let res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
-    let config: ConfigResponse = from_json(&res).unwrap();
+    // Owner applies — schedule installed, pending cleared.
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ApplyUpdateConfig {},
+    )
+    .unwrap();
     assert_eq!(
-        config.distribution_schedule,
-        vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(20000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(10000000u128),
-            ),
-        ]
+        res.attributes
+            .iter()
+            .find(|a| a.key == "action")
+            .map(|a| a.value.as_str()),
+        Some("apply_update_config"),
     );
 
-    //successful one
-    let update_config = UpdateConfig {
-        distribution_schedule: vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(20000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(50000000u128),
-            ),
-        ],
-    };
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), env.clone(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.distribution_schedule, new_schedule);
 
-    deps.querier
-        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    let pending: PendingConfigUpdateResponse =
+        from_json(query(deps.as_ref(), env, QueryMsg::PendingConfigUpdate {}).unwrap()).unwrap();
+    assert_eq!(pending.distribution_schedule, None);
+}
 
-    let info = message_info(&deps.api.addr_make("gov0000"), &[]);
-    let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
+/// Cancel clears the pending proposal. Re-proposing resets the timer.
+#[test]
+fn test_update_config_cancel_and_repropose() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let mut env = mock_env();
+    let start = env.block.time.seconds();
 
-    assert_eq!(res.attributes, vec![("action", "update_config")]);
+    let first = vec![(start + 2000, start + 2100, Uint128::from(2_000_000u128))];
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: first,
+        },
+    )
+    .unwrap();
 
-    // query config
-    let res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
-    let config: ConfigResponse = from_json(&res).unwrap();
+    // Cancel — pending now empty.
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::CancelUpdateConfigProposal {},
+    )
+    .unwrap();
+    let pending: PendingConfigUpdateResponse =
+        from_json(query(deps.as_ref(), env.clone(), QueryMsg::PendingConfigUpdate {}).unwrap())
+            .unwrap();
+    assert_eq!(pending.distribution_schedule, None);
+
+    // Re-cancel with nothing pending errors.
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::CancelUpdateConfigProposal {},
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert_eq!(msg, "no pending config update"),
+        _ => panic!("expected no pending"),
+    }
+
+    // Re-propose; advance ~47h (just under timelock); re-propose again should
+    // reset the deadline to (now + TIMELOCK).
+    let second = vec![(start + 3000, start + 3100, Uint128::from(3_000_000u128))];
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: second.clone(),
+        },
+    )
+    .unwrap();
+    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS - 60);
+
+    let third = vec![(start + 4000, start + 4100, Uint128::from(4_000_000u128))];
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: third.clone(),
+        },
+    )
+    .unwrap();
+
+    let pending: PendingConfigUpdateResponse =
+        from_json(query(deps.as_ref(), env.clone(), QueryMsg::PendingConfigUpdate {}).unwrap())
+            .unwrap();
+    assert_eq!(pending.distribution_schedule, Some(third));
     assert_eq!(
-        config.distribution_schedule,
-        vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(20000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(50000000u128),
-            ),
-        ]
+        pending.effective_at,
+        Some(env.block.time.seconds() + crate::state::TIMELOCK_DELAY_SECONDS),
     );
+}
 
-    let update_config = UpdateConfig {
-        distribution_schedule: vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(90000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(80000000u128),
-            ),
-        ],
-    };
+/// `assert_new_schedules` runs at apply time so a schedule that was valid at
+/// propose can be rejected if a slot has started during the timelock wait.
+/// Requires a bonder so `compute_reward` actually advances `last_distributed`
+/// (M-2: zero-bond freezes time).
+#[test]
+fn test_update_config_assert_at_apply() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let mut env = mock_env();
+    let start = env.block.time.seconds();
 
-    deps.querier
-        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
+    // Bond once so M-2's zero-bond pause doesn't keep last_distributed at `start`.
+    let staker = deps.api.addr_make("staker");
+    let staking_addr = deps.api.addr_make("staking0000");
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&staking_addr, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: staker.to_string(),
+            amount: Uint128::from(100u128),
+            msg: to_json_binary(&Cw20HookMsg::Bond {}).unwrap(),
+        }),
+    )
+    .unwrap();
 
-    let info = message_info(&deps.api.addr_make("gov0000"), &[]);
-    let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
+    // Empty schedule rejected at propose by validate_distribution_schedule.
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: vec![],
+        },
+    )
+    .unwrap_err();
 
-    assert_eq!(res.attributes, vec![("action", "update_config")]);
+    // Propose a schedule that drops the original slot. With a bonder present,
+    // compute_reward at apply advances last_distributed past the original
+    // (start+1000, start+1100) slot, so removing it is forbidden.
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: vec![(start + 5000, start + 5100, Uint128::from(1u128))],
+        },
+    )
+    .unwrap();
 
-    // query config
-    let res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
-    let config: ConfigResponse = from_json(&res).unwrap();
-    assert_eq!(
-        config.distribution_schedule,
-        vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(90000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(80000000u128),
-            ),
-        ]
-    );
+    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
 
-    let update_config = UpdateConfig {
-        distribution_schedule: vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(90000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(80000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 500,
-                mock_env().block.time.seconds() + 600,
-                Uint128::from(60000000u128),
-            ),
-        ],
-    };
-
-    deps.querier
-        .with_anc_minter(deps.api.addr_make("gov0000").to_string());
-
-    let info = message_info(&deps.api.addr_make("gov0000"), &[]);
-    let res = execute(deps.as_mut(), mock_env(), info, update_config).unwrap();
-
-    assert_eq!(res.attributes, vec![("action", "update_config")]);
-
-    // query config
-    let res = query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap();
-    let config: ConfigResponse = from_json(&res).unwrap();
-    assert_eq!(
-        config.distribution_schedule,
-        vec![
-            (
-                mock_env().block.time.seconds(),
-                mock_env().block.time.seconds() + 100,
-                Uint128::from(1000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 100,
-                mock_env().block.time.seconds() + 200,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 200,
-                mock_env().block.time.seconds() + 300,
-                Uint128::from(10000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 300,
-                mock_env().block.time.seconds() + 400,
-                Uint128::from(90000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 400,
-                mock_env().block.time.seconds() + 500,
-                Uint128::from(80000000u128),
-            ),
-            (
-                mock_env().block.time.seconds() + 500,
-                mock_env().block.time.seconds() + 600,
-                Uint128::from(60000000u128),
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::ApplyUpdateConfig {},
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => {
+            assert!(
+                msg.contains("new schedule removes already started distribution"),
+                "got: {}",
+                msg
             )
-        ]
-    );
+        }
+        _ => panic!("expected schedule-validation rejection"),
+    }
+}
+
+/// Per-slot duration cap rejects schedules with slot length exceeding 4 years.
+#[test]
+fn test_update_config_slot_duration_cap_rejected() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    let too_long = crate::state::MAX_SCHEDULE_SLOT_DURATION_SECONDS + 1;
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: vec![(start + 1000, start + 1000 + too_long, Uint128::one())],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("slot duration exceeds max"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected slot-duration rejection"),
+    }
 }
 
 #[test]
@@ -1177,6 +1204,7 @@ fn test_instantiate_and_query_native_reward_token() {
 
     // Instantiate the contract with a native reward token (e.g., "inj")
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::NativeToken {
             denom: "inj".to_string(),
         },
@@ -1193,9 +1221,12 @@ fn test_instantiate_and_query_native_reward_token() {
         ],
     };
 
-    // Use "addr0000" as the instantiator (owner)
+    // Use "addr0000" as the instantiator (owner).
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
+
+    // Fund the distribution pool so rewards can actually be distributed.
+    fund_via_reward_native(&mut deps, "inj", Uint128::from(11_000_000u128));
 
     // Query config and verify that the reward token returns the native denom.
     let res = query(deps.as_ref(), env.clone(), QueryMsg::Config {}).unwrap();
@@ -1215,6 +1246,7 @@ fn test_withdraw_native_reward_token() {
 
     // Instantiate with a native reward token ("inj")
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::NativeToken {
             denom: "inj".to_string(),
         },
@@ -1234,10 +1266,11 @@ fn test_withdraw_native_reward_token() {
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let _res = instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
 
-    // Fund the reward pool with native "inj".
+    // Fund the distribution pool so rewards can actually be distributed.
     fund_via_reward_native(&mut deps, "inj", Uint128::from(11_000_000u128));
 
     // Bond 100 tokens.
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let bond_msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -1271,6 +1304,7 @@ fn test_bond_native() {
     let mut deps = mock_dependencies(&[]);
 
     let instantiate_msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -1338,6 +1372,7 @@ fn test_unbond_native() {
 
     // Instantiate contract with a native staking token.
     let instantiate_msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -1408,6 +1443,7 @@ fn test_fund_cw20() {
     let mut deps = mock_dependencies(&[]);
 
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -1465,6 +1501,7 @@ fn test_fund_cw20() {
 fn test_fund_native() {
     let mut deps = mock_dependencies(&[]);
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::NativeToken {
             denom: "inj".to_string(),
         },
@@ -1519,6 +1556,7 @@ fn test_fund_native() {
 fn test_compute_reward_capped_by_funding() {
     let mut deps = mock_dependencies(&[]);
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -1539,6 +1577,7 @@ fn test_compute_reward_capped_by_funding() {
     fund_via_reward_cw20(&mut deps, Uint128::from(300_000u128));
 
     // Bond.
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let bond = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: deps.api.addr_make("addr0000").to_string(),
         amount: Uint128::from(100u128),
@@ -1587,6 +1626,7 @@ fn test_zero_bond_period_preserves_funds_through_migrate() {
     let mut deps = mock_dependencies(&[]);
     let start = mock_env().block.time.seconds();
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -1639,14 +1679,18 @@ fn test_zero_bond_period_preserves_funds_through_migrate() {
 
 fn instantiate_for_rotation_tests() -> TestDeps {
     let mut deps = mock_dependencies(&[]);
+    let start = mock_env().block.time.seconds();
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
         staking_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("staking0000").to_string(),
         },
-        distribution_schedule: vec![],
+        // 1-slot schedule satisfies the non-empty check; these rotation tests
+        // don't exercise reward math so the magnitudes are arbitrary.
+        distribution_schedule: vec![(start, start + 100, Uint128::from(1_000_000u128))],
     };
     let owner = deps.api.addr_make("addr0000");
     let info = message_info(&owner, &[]);
@@ -2110,6 +2154,7 @@ fn test_migrate_staking_preserves_bonded_stake() {
     let mut deps = mock_dependencies(&[]);
     let start = mock_env().block.time.seconds();
     let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
         reward_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("reward0000").to_string(),
         },
@@ -2132,6 +2177,7 @@ fn test_migrate_staking_preserves_bonded_stake() {
     // Bond early so there's a staker to credit against.
     let staker = deps.api.addr_make("staker");
     let staking_token_addr = deps.api.addr_make("staking0000");
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
     let bond_msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: staker.to_string(),
         amount: Uint128::from(100u128),
@@ -2194,4 +2240,253 @@ fn test_migrate_staking_preserves_bonded_stake() {
     let info: StakerInfoResponse = from_json(&res).unwrap();
     assert_eq!(info.bond_amount, Uint128::from(100u128));
     assert_eq!(info.pending_reward, Uint128::from(1_000_000u128));
+}
+
+/// H-1 regression: a single bonder with bond_amount=1 must not be able to brick
+/// the farm by waiting for a high-emission schedule to push
+/// `distributed / total_bond_amount` past Decimal::MAX (~3.4e20). Before the
+/// fix, `Decimal::from_ratio(distributed, 1)` panicked in `compute_reward`,
+/// freezing bond/unbond/withdraw/migrate. The fix caps the index increment at
+/// `Decimal::MAX` and rolls the rest back into `undistributed_rewards`.
+#[test]
+fn h1_tiny_bond_huge_emission_does_not_brick() {
+    let mut deps = mock_dependencies(&[Coin {
+        denom: "uatom".to_string(),
+        amount: Uint128::new(u128::MAX / 4),
+    }]);
+    let start = mock_env().block.time.seconds();
+    // Emit ~u128::MAX/8 over 100s — per-second rate is far past Decimal::MAX
+    // when divided by total_bond_amount=1.
+    let total_reward = Uint128::new(u128::MAX / 8);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("owner").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::NativeToken {
+            denom: "ustake".to_string(),
+        },
+        distribution_schedule: vec![(start, start + 100, total_reward)],
+    };
+    let info = message_info(
+        &deps.api.addr_make("owner"),
+        &[Coin {
+            denom: "uatom".to_string(),
+            amount: total_reward,
+        }],
+    );
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Attacker bonds exactly 1 raw unit.
+    let attacker = deps.api.addr_make("attacker");
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(
+            &attacker,
+            &[Coin {
+                denom: "ustake".to_string(),
+                amount: Uint128::one(),
+            }],
+        ),
+        ExecuteMsg::Bond {
+            amount: Uint128::one(),
+        },
+    )
+    .unwrap();
+
+    // Advance 50 seconds — at rate u128::MAX/8 / 100, this is way past
+    // Decimal::MAX. Before the fix this Withdraw panics inside compute_reward.
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(50);
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&attacker, &[]),
+        ExecuteMsg::Withdraw {},
+    );
+    assert!(res.is_ok(), "withdraw must not panic after H-1 fix: {:?}", res);
+
+    // Further interactions also stay healthy — the contract is alive.
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(
+            &attacker,
+            &[Coin {
+                denom: "ustake".to_string(),
+                amount: Uint128::one(),
+            }],
+        ),
+        ExecuteMsg::Bond {
+            amount: Uint128::one(),
+        },
+    );
+    assert!(res.is_ok(), "subsequent bond must not panic: {:?}", res);
+}
+
+/// M-2 regression: when no one is bonded, `last_distributed` does not advance.
+/// The first staker to show up after a long empty window sweeps the entire
+/// emission budget — the schedule is "paused" while there are no stakers.
+#[test]
+fn m2_zero_bond_window_preserves_full_emission() {
+    let mut deps = mock_dependencies(&[Coin {
+        denom: "uatom".to_string(),
+        amount: Uint128::from(1_000_000u128),
+    }]);
+    let start = mock_env().block.time.seconds();
+    let total_reward = Uint128::from(1_000_000u128);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("owner").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::NativeToken {
+            denom: "ustake".to_string(),
+        },
+        // Schedule runs (start, start+100). No bonder until much later.
+        distribution_schedule: vec![(start, start + 100, total_reward)],
+    };
+    let info = message_info(
+        &deps.api.addr_make("owner"),
+        &[Coin {
+            denom: "uatom".to_string(),
+            amount: total_reward,
+        }],
+    );
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // 300 seconds pass with nobody bonded — schedule is fully past its end.
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(300);
+
+    // First bonder arrives. compute_reward runs but bails early (total_bond=0)
+    // without bumping last_distributed.
+    let staker = deps.api.addr_make("staker");
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(
+            &staker,
+            &[Coin {
+                denom: "ustake".to_string(),
+                amount: Uint128::from(100u128),
+            }],
+        ),
+        ExecuteMsg::Bond {
+            amount: Uint128::from(100u128),
+        },
+    )
+    .unwrap();
+
+    // One more second passes; staker withdraws. compute_reward now sees
+    // total_bond > 0 with last_distributed still at `start`, so it sweeps the
+    // entire slot (start → start+100) into the global index in one shot.
+    env.block.time = env.block.time.plus_seconds(1);
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&staker, &[]),
+        ExecuteMsg::Withdraw {},
+    )
+    .unwrap();
+
+    // Bank-send for the full 1M.
+    assert_eq!(
+        res.messages,
+        vec![SubMsg::new(CosmosMsg::Bank(BankMsg::Send {
+            to_address: staker.to_string(),
+            amount: coins(1_000_000u128, "uatom"),
+        }))]
+    );
+}
+
+/// M-1 regression: a malicious staking CW20 that calls farm.Receive directly
+/// without actually transferring any tokens is rejected by the balance
+/// reconcile. Before the fix, the farm credited the staker's bond_amount
+/// based on the unverified `cw20_msg.amount`, letting the malicious CW20
+/// inflate bonds and siphon rewards.
+#[test]
+fn m1_malicious_cw20_bond_without_transfer_rejected() {
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("owner").to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(
+            mock_env().block.time.seconds(),
+            mock_env().block.time.seconds() + 100,
+            Uint128::from(1_000_000u128),
+        )],
+    };
+    let owner = deps.api.addr_make("owner");
+    instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
+
+    // Note: NO bump_cw20_balance here — simulating a malicious CW20 that
+    // calls farm.Receive without actually moving any tokens.
+    let staking_addr = deps.api.addr_make("staking0000");
+    let attacker_str = deps.api.addr_make("attacker").to_string();
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&staking_addr, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: attacker_str.clone(),
+            amount: Uint128::from(1_000_000_000u128),
+            msg: to_json_binary(&Cw20HookMsg::Bond {}).unwrap(),
+        }),
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("cw20 balance reconcile"),
+            "expected reconcile rejection, got: {}",
+            msg
+        ),
+        _ => panic!("expected reconcile rejection"),
+    }
+
+    // Same shape for the malicious reward CW20 inflating undistributed_rewards.
+    let mut deps = mock_dependencies(&[]);
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("owner").to_string(),
+        reward_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+        },
+        staking_token: AssetInfo::NativeToken {
+            denom: "ustake".to_string(),
+        },
+        distribution_schedule: vec![(
+            mock_env().block.time.seconds(),
+            mock_env().block.time.seconds() + 100,
+            Uint128::from(1_000_000u128),
+        )],
+    };
+    let owner = deps.api.addr_make("owner");
+    instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
+    let reward_addr = deps.api.addr_make("reward0000");
+    let attacker_str = deps.api.addr_make("attacker").to_string();
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&reward_addr, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: attacker_str,
+            amount: Uint128::from(1_000_000_000u128),
+            msg: to_json_binary(&Cw20HookMsg::Fund {}).unwrap(),
+        }),
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("cw20 balance reconcile"),
+            "expected reconcile rejection, got: {}",
+            msg
+        ),
+        _ => panic!("expected reconcile rejection"),
+    }
 }

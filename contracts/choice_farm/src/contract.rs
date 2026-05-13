@@ -9,14 +9,16 @@ use cosmwasm_std::{
 use choice::asset::AssetInfo;
 
 use choice::staking::{
-    ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, PendingMigrationResponse,
-    PendingOwnerRotationResponse, QueryMsg, StakerInfoResponse, StateResponse,
+    ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg,
+    PendingConfigUpdateResponse, PendingMigrationResponse, PendingOwnerRotationResponse, QueryMsg,
+    StakerInfoResponse, StateResponse,
 };
 
 use crate::state::{
     read_config, read_staker_info, read_state, remove_staker_info, store_config, store_staker_info,
-    store_state, Config, PendingMigration, StakerInfo, State, PENDING_MIGRATION,
-    TIMELOCK_DELAY_SECONDS,
+    store_state, Config, PendingConfigUpdate, PendingMigration, StakerInfo, State,
+    LAST_SEEN_CW20_BALANCE, MAX_SCHEDULE_SLOTS, MAX_SCHEDULE_SLOT_DURATION_SECONDS,
+    PENDING_CONFIG_UPDATE, PENDING_MIGRATION, TIMELOCK_DELAY_SECONDS,
 };
 
 use cw2::{get_contract_version, set_contract_version};
@@ -26,12 +28,13 @@ use std::collections::BTreeMap;
 const CONTRACT_NAME: &str = "crates.io:choice-farm";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Deployment hygiene note (H-4 follow-through): the wasm `admin` address on
-/// this contract instance should be a timelocked multisig, not an EOA. An
-/// unrestricted admin can call `MigrateContract` to swap the code ID out from
-/// under users, which bypasses the `ProposeMigrateStaking` timelock added
-/// below. Owner-role rotation + migrate_staking delay only protect against a
-/// compromised *owner* key; code migration is a separate attack surface.
+/// Deployment hygiene: the wasm `admin` address on this contract instance
+/// should be the same Choice governance multisig that is passed as `msg.owner`.
+/// An unrestricted admin can call `MigrateContract` to swap the code ID out
+/// from under users, which bypasses the `ProposeMigrateStaking` timelock below.
+/// The factory enforces both (admin and Config.owner are set to the same
+/// configured governance address). When instantiating directly outside the
+/// factory, the deployer is responsible for matching them.
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
@@ -41,18 +44,61 @@ pub fn instantiate(
 ) -> StdResult<Response> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
+    let owner = deps.api.addr_validate(&msg.owner)?;
     validate_asset_info(deps.as_ref(), &msg.reward_token)?;
     validate_asset_info(deps.as_ref(), &msg.staking_token)?;
     validate_distribution_schedule(&msg.distribution_schedule)?;
 
     let (reward_token_kind, reward_token_addr) = asset_info_event_parts(&msg.reward_token);
     let (staking_token_kind, staking_token_addr) = asset_info_event_parts(&msg.staking_token);
-    let (start_time, end_time, total_reward) = distribution_schedule_summary(&msg.distribution_schedule);
+    let (start_time, end_time, total_reward) = distribution_schedule_summary(&msg.distribution_schedule)?;
+
+    // Accept reward pre-funding atomically with creation. Two valid shapes:
+    //   1) native reward + info.funds == [{reward_denom: total_reward}] → credit now
+    //   2) info.funds empty → credit later via Fund{} (factory's reply, or hand-call)
+    // CW20 rewards must use shape 2 — funds attached to instantiate can't be a CW20.
+    // Any other shape (wrong denom, wrong amount, multiple coins, funds-with-cw20)
+    // is rejected here so stranded-balance bugs can't slip through.
+    let undistributed_rewards = match &msg.reward_token {
+        AssetInfo::NativeToken { denom } => match info.funds.len() {
+            0 => Uint128::zero(),
+            1 => {
+                let c = &info.funds[0];
+                if c.denom != *denom {
+                    return Err(StdError::generic_err(format!(
+                        "instantiate funds denom mismatch: expected {}, got {}",
+                        denom, c.denom
+                    )));
+                }
+                if c.amount != total_reward {
+                    return Err(StdError::generic_err(format!(
+                        "instantiate funds amount mismatch: expected {} (total_reward), got {}",
+                        total_reward, c.amount
+                    )));
+                }
+                total_reward
+            }
+            _ => {
+                return Err(StdError::generic_err(
+                    "instantiate accepts at most one coin (the reward token)",
+                ));
+            }
+        },
+        AssetInfo::Token { .. } => {
+            if !info.funds.is_empty() {
+                return Err(StdError::generic_err(
+                    "cw20 reward farms must be instantiated with empty funds; \
+                     funding is delivered via the Cw20 Send→Fund hook",
+                ));
+            }
+            Uint128::zero()
+        }
+    };
 
     store_config(
         deps.storage,
         &Config {
-            owner: deps.api.addr_canonicalize(info.sender.as_str())?,
+            owner: deps.api.addr_canonicalize(owner.as_str())?,
             reward_token: msg.reward_token,
             staking_token: msg.staking_token,
             distribution_schedule: msg.distribution_schedule,
@@ -67,20 +113,23 @@ pub fn instantiate(
             last_distributed: env.block.time.seconds(),
             total_bond_amount: Uint128::zero(),
             global_reward_index: Decimal::zero(),
-            undistributed_rewards: Uint128::zero(),
+            undistributed_rewards,
+            unclaimed_pending: Uint128::zero(),
         },
     )?;
 
     Ok(Response::new()
         .add_attribute("action", "instantiate_farm")
-        .add_attribute("owner", info.sender.as_str())
+        .add_attribute("instantiator", info.sender.as_str())
+        .add_attribute("owner", owner.as_str())
         .add_attribute("reward_token", reward_token_addr)
         .add_attribute("reward_token_kind", reward_token_kind)
         .add_attribute("staking_token", staking_token_addr)
         .add_attribute("staking_token_kind", staking_token_kind)
         .add_attribute("start_time", start_time.to_string())
         .add_attribute("end_time", end_time.to_string())
-        .add_attribute("total_reward", total_reward.to_string()))
+        .add_attribute("total_reward", total_reward.to_string())
+        .add_attribute("undistributed_rewards", undistributed_rewards.to_string()))
 }
 
 fn asset_info_event_parts(info: &AssetInfo) -> (&'static str, String) {
@@ -90,11 +139,13 @@ fn asset_info_event_parts(info: &AssetInfo) -> (&'static str, String) {
     }
 }
 
-fn distribution_schedule_summary(schedule: &[(u64, u64, Uint128)]) -> (u64, u64, Uint128) {
+fn distribution_schedule_summary(schedule: &[(u64, u64, Uint128)]) -> StdResult<(u64, u64, Uint128)> {
     let start = schedule.iter().map(|(s, _, _)| *s).min().unwrap_or(0);
     let end = schedule.iter().map(|(_, e, _)| *e).max().unwrap_or(0);
-    let total = schedule.iter().fold(Uint128::zero(), |acc, (_, _, amt)| acc + *amt);
-    (start, end, total)
+    let total = schedule
+        .iter()
+        .try_fold(Uint128::zero(), |acc, (_, _, amt)| acc.checked_add(*amt))?;
+    Ok((start, end, total))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -131,9 +182,11 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
         } => propose_migrate_staking(deps, env, info, new_staking_contract),
         ExecuteMsg::ApplyMigrateStaking {} => apply_migrate_staking(deps, env, info),
         ExecuteMsg::CancelMigrateStakingProposal {} => cancel_migrate_staking_proposal(deps, info),
-        ExecuteMsg::UpdateConfig {
+        ExecuteMsg::ProposeUpdateConfig {
             distribution_schedule,
-        } => update_config(deps, env, info, distribution_schedule),
+        } => propose_update_config(deps, env, info, distribution_schedule),
+        ExecuteMsg::ApplyUpdateConfig {} => apply_update_config(deps, env, info),
+        ExecuteMsg::CancelUpdateConfigProposal {} => cancel_update_config_proposal(deps, info),
         ExecuteMsg::ProposeNewOwner { new_owner } => {
             propose_new_owner(deps, env, info, new_owner)
         }
@@ -143,7 +196,7 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
 }
 
 pub fn receive_cw20(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     cw20_msg: Cw20ReceiveMsg,
@@ -166,6 +219,15 @@ pub fn receive_cw20(
                 }
             }
 
+            // M-1: verify the CW20 actually moved the tokens it claims to have
+            // before crediting the bond.
+            reconcile_cw20_receive(
+                deps.branch(),
+                &env,
+                info.sender.as_str(),
+                cw20_msg.amount,
+            )?;
+
             let cw20_sender = deps.api.addr_validate(&cw20_msg.sender)?;
             bond(deps, env, cw20_sender, cw20_msg.amount)
         }
@@ -183,6 +245,13 @@ pub fn receive_cw20(
                     )));
                 }
             }
+            // M-1: same reconcile for Fund flow.
+            reconcile_cw20_receive(
+                deps.branch(),
+                &env,
+                info.sender.as_str(),
+                cw20_msg.amount,
+            )?;
             fund(deps, cw20_msg.amount, &cw20_msg.sender)
         }
         Err(_) => Err(StdError::generic_err("data should be given")),
@@ -201,7 +270,7 @@ pub fn bond(deps: DepsMut, env: Env, sender_addr: Addr, amount: Uint128) -> StdR
     let mut staker_info: StakerInfo = read_staker_info(deps.storage, &sender_addr_raw)?;
 
     compute_reward(&config, &mut state, env.block.time.seconds());
-    compute_staker_reward(&state, &mut staker_info)?;
+    compute_staker_reward(&mut state, &mut staker_info)?;
 
     increase_bond_amount(&mut state, &mut staker_info, amount);
 
@@ -215,7 +284,7 @@ pub fn bond(deps: DepsMut, env: Env, sender_addr: Addr, amount: Uint128) -> StdR
     ]))
 }
 
-pub fn unbond(deps: DepsMut, env: Env, info: MessageInfo, amount: Uint128) -> StdResult<Response> {
+pub fn unbond(mut deps: DepsMut, env: Env, info: MessageInfo, amount: Uint128) -> StdResult<Response> {
     if amount.is_zero() {
         return Err(StdError::generic_err("Cannot unbond zero amount"));
     }
@@ -231,7 +300,7 @@ pub fn unbond(deps: DepsMut, env: Env, info: MessageInfo, amount: Uint128) -> St
     }
 
     compute_reward(&config, &mut state, env.block.time.seconds());
-    compute_staker_reward(&state, &mut staker_info)?;
+    compute_staker_reward(&mut state, &mut staker_info)?;
 
     decrease_bond_amount(&mut state, &mut staker_info, amount)?;
 
@@ -244,14 +313,19 @@ pub fn unbond(deps: DepsMut, env: Env, info: MessageInfo, amount: Uint128) -> St
     store_state(deps.storage, &state)?;
 
     let unbond_msg = match config.staking_token {
-        AssetInfo::Token { ref contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: contract_addr.clone(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: info.sender.to_string(),
-                amount,
-            })?,
-            funds: vec![],
-        }),
+        AssetInfo::Token { ref contract_addr } => {
+            // M-1: shrink the last-seen ledger to match the post-transfer
+            // balance before the message dispatches.
+            decrement_last_seen_cw20(deps.branch(), contract_addr, amount)?;
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: contract_addr.clone(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: info.sender.to_string(),
+                    amount,
+                })?,
+                funds: vec![],
+            })
+        }
         AssetInfo::NativeToken { ref denom } => CosmosMsg::Bank(BankMsg::Send {
             to_address: info.sender.to_string(),
             amount: coins(amount.u128(), denom),
@@ -267,7 +341,7 @@ pub fn unbond(deps: DepsMut, env: Env, info: MessageInfo, amount: Uint128) -> St
         ]))
 }
 
-pub fn withdraw(deps: DepsMut, env: Env, info: MessageInfo) -> StdResult<Response> {
+pub fn withdraw(mut deps: DepsMut, env: Env, info: MessageInfo) -> StdResult<Response> {
     let sender_addr_raw = deps.api.addr_canonicalize(info.sender.as_str())?;
 
     let config: Config = read_config(deps.storage)?;
@@ -275,13 +349,15 @@ pub fn withdraw(deps: DepsMut, env: Env, info: MessageInfo) -> StdResult<Respons
     let mut staker_info = read_staker_info(deps.storage, &sender_addr_raw)?;
 
     compute_reward(&config, &mut state, env.block.time.seconds());
-    compute_staker_reward(&state, &mut staker_info)?;
+    compute_staker_reward(&mut state, &mut staker_info)?;
 
     let amount = staker_info.pending_reward;
     if amount.is_zero() {
         return Err(StdError::generic_err("Nothing to withdraw"));
     }
     staker_info.pending_reward = Uint128::zero();
+    // L-1: shrink the global pending-reserve mirror by what's being paid out.
+    state.unclaimed_pending = state.unclaimed_pending.saturating_sub(amount);
 
     if staker_info.bond_amount.is_zero() {
         remove_staker_info(deps.storage, &sender_addr_raw);
@@ -292,14 +368,17 @@ pub fn withdraw(deps: DepsMut, env: Env, info: MessageInfo) -> StdResult<Respons
     store_state(deps.storage, &state)?;
 
     let reward_msg: CosmosMsg = match config.reward_token {
-        AssetInfo::Token { ref contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: contract_addr.clone(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: info.sender.to_string(),
-                amount,
-            })?,
-            funds: vec![],
-        }),
+        AssetInfo::Token { ref contract_addr } => {
+            decrement_last_seen_cw20(deps.branch(), contract_addr, amount)?;
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: contract_addr.clone(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: info.sender.to_string(),
+                    amount,
+                })?,
+                funds: vec![],
+            })
+        }
         AssetInfo::NativeToken { ref denom } => CosmosMsg::Bank(BankMsg::Send {
             to_address: info.sender.to_string(),
             amount: coins(amount.u128(), denom),
@@ -359,14 +438,17 @@ fn fund(deps: DepsMut, amount: Uint128, funder: &str) -> StdResult<Response> {
     ]))
 }
 
-pub fn update_config(
+/// H-2: owner proposes a new `distribution_schedule`. The actual install is
+/// gated behind `apply_update_config`, which requires `TIMELOCK_DELAY_SECONDS`
+/// to have elapsed. Re-proposing overwrites the pending proposal and resets
+/// the timer.
+pub fn propose_update_config(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
     distribution_schedule: Vec<(u64, u64, Uint128)>,
 ) -> StdResult<Response> {
     let config: Config = read_config(deps.storage)?;
-
     let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
     if sender_addr_raw != config.owner {
         return Err(StdError::generic_err("unauthorized"));
@@ -374,27 +456,90 @@ pub fn update_config(
 
     validate_distribution_schedule(&distribution_schedule)?;
 
-    // Flush pending rewards into global_reward_index so assert_new_schedules
-    // compares the new schedule against the current real block time, not a
-    // stale last_distributed. Without this, the owner could retroactively add
-    // or remove slots in the window (last_distributed, now].
+    let effective_at = env.block.time.seconds() + TIMELOCK_DELAY_SECONDS;
+    PENDING_CONFIG_UPDATE.save(
+        deps.storage,
+        &PendingConfigUpdate {
+            distribution_schedule,
+            effective_at,
+        },
+    )?;
+
+    Ok(Response::new().add_attributes(vec![
+        ("action", "propose_update_config"),
+        ("effective_at", effective_at.to_string().as_str()),
+    ]))
+}
+
+/// Owner finalizes a pending schedule update once the timelock has expired.
+/// Flushes accrued credits at the OLD schedule first so `assert_new_schedules`
+/// compares the new schedule against the current real block time, not a
+/// stale `last_distributed`.
+pub fn apply_update_config(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> StdResult<Response> {
+    let config: Config = read_config(deps.storage)?;
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+
+    let pending = PENDING_CONFIG_UPDATE
+        .may_load(deps.storage)?
+        .ok_or_else(|| StdError::generic_err("no pending config update"))?;
+
+    if env.block.time.seconds() < pending.effective_at {
+        return Err(StdError::generic_err(
+            "config update timelock has not elapsed",
+        ));
+    }
+
+    // Re-validate at apply time — the proposal was validated at propose, but
+    // the per-slot duration cap is a safety net so the schedule that lands
+    // satisfies the invariant.
+    validate_distribution_schedule(&pending.distribution_schedule)?;
+
+    // Flush rewards against the OLD schedule before swapping.
     let mut state: State = read_state(deps.storage)?;
     compute_reward(&config, &mut state, env.block.time.seconds());
     store_state(deps.storage, &state)?;
 
-    assert_new_schedules(&config, &state, distribution_schedule.clone())?;
+    assert_new_schedules(&config, &state, pending.distribution_schedule.clone())?;
 
     let new_config = Config {
         owner: config.owner,
         reward_token: config.reward_token,
         staking_token: config.staking_token,
-        distribution_schedule,
+        distribution_schedule: pending.distribution_schedule,
         pending_owner: config.pending_owner,
         pending_owner_effective_at: config.pending_owner_effective_at,
     };
     store_config(deps.storage, &new_config)?;
+    PENDING_CONFIG_UPDATE.remove(deps.storage);
 
-    Ok(Response::new().add_attributes(vec![("action", "update_config")]))
+    Ok(Response::new().add_attributes(vec![("action", "apply_update_config")]))
+}
+
+/// Owner clears a pending schedule update.
+pub fn cancel_update_config_proposal(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> StdResult<Response> {
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    let config: Config = read_config(deps.storage)?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+
+    if PENDING_CONFIG_UPDATE.may_load(deps.storage)?.is_none() {
+        return Err(StdError::generic_err("no pending config update"));
+    }
+
+    PENDING_CONFIG_UPDATE.remove(deps.storage);
+
+    Ok(Response::new().add_attribute("action", "cancel_update_config_proposal"))
 }
 
 /// Owner proposes a migration target. The actual fund-forwarding is gated
@@ -433,11 +578,14 @@ pub fn propose_migrate_staking(
 }
 
 /// Owner finalizes a pending migration. Flushes accrued credits, then
-/// forwards the entire `undistributed_rewards` pool to the proposed
-/// destination. Tokens backing already-credited pending rewards stay
-/// in the contract so stakers can still `Withdraw`.
+/// forwards every reward-token unit that isn't earmarked for an existing
+/// staker claim or for the bonded balance (when the staking and reward
+/// tokens are the same denom/contract). This includes `undistributed_rewards`
+/// AND any per-call floor dust that compute_reward rolled back. Tokens
+/// backing already-credited `pending_reward` stay in the contract so stakers
+/// can still `Withdraw`.
 pub fn apply_migrate_staking(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
 ) -> StdResult<Response> {
@@ -460,7 +608,24 @@ pub fn apply_migrate_staking(
 
     compute_reward(&config, &mut state, env.block.time.seconds());
 
-    let remaining_tokens = state.undistributed_rewards;
+    // L-1: query the contract's actual reward-token balance and forward
+    // everything that isn't reserved for staker withdrawals or bonded stake.
+    // This catches the per-call floor-truncation dust that lives in the
+    // contract balance but isn't tracked in `undistributed_rewards`.
+    let actual_balance = query_self_balance(deps.as_ref(), &env, &config.reward_token)?;
+    let reserved_for_bonded = if config.reward_token.equal(&config.staking_token) {
+        state.total_bond_amount
+    } else {
+        Uint128::zero()
+    };
+    let reserved_for_pending = state.unclaimed_pending;
+    let remaining_tokens = actual_balance
+        .saturating_sub(reserved_for_bonded)
+        .saturating_sub(reserved_for_pending);
+
+    // The schedule's emission pool is fully drained at this point — any
+    // future compute_reward calls will see undistributed_rewards == 0 and
+    // credit nothing further to the global index.
     state.undistributed_rewards = Uint128::zero();
     store_state(deps.storage, &state)?;
     PENDING_MIGRATION.remove(deps.storage);
@@ -469,18 +634,30 @@ pub fn apply_migrate_staking(
         ("action", "apply_migrate_staking"),
         ("new_staking_contract", new_staking_contract.as_str()),
         ("remaining_amount", remaining_tokens.to_string().as_str()),
+        // I-1: surface the post-migration UX expectation as a chain attribute
+        // so indexers / UIs can flag it: this farm's reward pool has been
+        // forwarded; existing stakers must Unbond + Withdraw here to access
+        // their bonded tokens and already-credited pending rewards.
+        (
+            "migration_notice",
+            "reward pool forwarded; stakers must Unbond + Withdraw from this \
+             farm to access bonded tokens and pending rewards",
+        ),
     ]);
 
     if !remaining_tokens.is_zero() {
         let reward_token_msg = match config.reward_token {
-            AssetInfo::Token { ref contract_addr } => CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: contract_addr.clone(),
-                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                    recipient: new_staking_contract.to_string(),
-                    amount: remaining_tokens,
-                })?,
-                funds: vec![],
-            }),
+            AssetInfo::Token { ref contract_addr } => {
+                decrement_last_seen_cw20(deps.branch(), contract_addr, remaining_tokens)?;
+                CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: contract_addr.clone(),
+                    msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                        recipient: new_staking_contract.to_string(),
+                        amount: remaining_tokens,
+                    })?,
+                    funds: vec![],
+                })
+            }
             AssetInfo::NativeToken { ref denom } => CosmosMsg::Bank(BankMsg::Send {
                 to_address: new_staking_contract.to_string(),
                 amount: coins(remaining_tokens.u128(), denom),
@@ -490,6 +667,84 @@ pub fn apply_migrate_staking(
     }
 
     Ok(response)
+}
+
+/// Query this contract's own balance of the reward token.
+fn query_self_balance(deps: Deps, env: &Env, reward_token: &AssetInfo) -> StdResult<Uint128> {
+    match reward_token {
+        AssetInfo::NativeToken { denom } => {
+            let coin = deps
+                .querier
+                .query_balance(env.contract.address.clone(), denom)?;
+            Ok(coin.amount)
+        }
+        AssetInfo::Token { contract_addr } => query_cw20_self_balance(deps, env, contract_addr),
+    }
+}
+
+fn query_cw20_self_balance(deps: Deps, env: &Env, cw20_contract: &str) -> StdResult<Uint128> {
+    let resp: cw20::BalanceResponse = deps.querier.query_wasm_smart(
+        cw20_contract,
+        &cw20::Cw20QueryMsg::Balance {
+            address: env.contract.address.to_string(),
+        },
+    )?;
+    Ok(resp.balance)
+}
+
+/// M-1: verify that the CW20 at `cw20_addr_raw` (the calling contract on a
+/// Receive hook) has actually moved at least `claimed_amount` units to this
+/// farm since the last seen balance. Returns Ok on a healthy reconcile and
+/// updates the stored ledger to the current balance (silently absorbing any
+/// out-of-band donation surplus into the contract's untracked balance —
+/// preferred over rejecting, which would let an attacker grief by dust-
+/// donating before each legitimate Receive).
+fn reconcile_cw20_receive(
+    deps: DepsMut,
+    env: &Env,
+    cw20_contract: &str,
+    claimed_amount: Uint128,
+) -> StdResult<()> {
+    let cw20_raw = deps.api.addr_canonicalize(cw20_contract)?;
+    let last_seen = LAST_SEEN_CW20_BALANCE
+        .may_load(deps.storage, cw20_raw.as_slice())?
+        .unwrap_or_default();
+    let current = query_cw20_self_balance(deps.as_ref(), env, cw20_contract)?;
+    let delta = current.checked_sub(last_seen).map_err(|_| {
+        // current < last_seen would mean the CW20 lied about a previous
+        // transfer or some external mechanism drained the balance. Either
+        // way: refuse this Receive so the staker isn't credited.
+        StdError::generic_err("cw20 balance reconcile: current < last_seen")
+    })?;
+    if delta < claimed_amount {
+        return Err(StdError::generic_err(format!(
+            "cw20 balance reconcile: claimed {} but only {} arrived",
+            claimed_amount, delta
+        )));
+    }
+    LAST_SEEN_CW20_BALANCE.save(deps.storage, cw20_raw.as_slice(), &current)?;
+    Ok(())
+}
+
+/// M-1: mirror an outgoing Cw20::Transfer of `amount` from this contract by
+/// decrementing the last-seen ledger before the message dispatches. The
+/// reconcile on the next inbound Receive of this CW20 will then see a delta
+/// that correctly equals (new_inbound + any_residual).
+fn decrement_last_seen_cw20(
+    deps: DepsMut,
+    cw20_contract: &str,
+    amount: Uint128,
+) -> StdResult<()> {
+    let cw20_raw = deps.api.addr_canonicalize(cw20_contract)?;
+    let last_seen = LAST_SEEN_CW20_BALANCE
+        .may_load(deps.storage, cw20_raw.as_slice())?
+        .unwrap_or_default();
+    LAST_SEEN_CW20_BALANCE.save(
+        deps.storage,
+        cw20_raw.as_slice(),
+        &last_seen.saturating_sub(amount),
+    )?;
+    Ok(())
 }
 
 /// Owner clears a pending migration. No-op if no proposal exists.
@@ -623,11 +878,14 @@ fn compute_reward(config: &Config, state: &mut State, block_time: u64) {
         return;
     }
 
+    // M-2: with no stakers, the schedule effectively pauses. We deliberately
+    // do NOT advance `last_distributed` here — emission units that would have
+    // accrued during the gap stay in `undistributed_rewards` and get credited
+    // to the next compute_reward call once `total_bond_amount > 0`. This means
+    // a late-arriving first bonder collects the post-instantiate / post-empty
+    // emission window in one sweep, which is acceptable: the schedule's full
+    // budget is honored, biased toward whoever shows up.
     if state.total_bond_amount.is_zero() {
-        // Nobody is staking; skip crediting. undistributed_rewards is left
-        // untouched so the tokens remain in the pool for future stakers or
-        // for `migrate_staking` to forward.
-        state.last_distributed = block_time;
         return;
     }
 
@@ -651,31 +909,72 @@ fn compute_reward(config: &Config, state: &mut State, block_time: u64) {
 
     // The actual amount distributed is capped by what's been funded. This is
     // the solvency invariant: we never credit rewards the contract cannot pay.
-    // Any shortfall vs. the schedule is lost for that window — the owner must
-    // fund ahead of time.
     let distributed = std::cmp::min(theoretical, state.undistributed_rewards);
 
     state.last_distributed = block_time;
-    if !distributed.is_zero() {
-        state.undistributed_rewards -= distributed;
-        state.global_reward_index +=
-            Decimal::from_ratio(distributed, state.total_bond_amount);
+    if distributed.is_zero() {
+        return;
     }
+
+    // H-1: compute the index increment with overflow protection. With a tiny
+    // `total_bond_amount`, `distributed / total_bond` can exceed Decimal::MAX
+    // (~3.4e20) and panic. We instead cap the increment at the remaining
+    // headroom on `global_reward_index`, credit only what fits, and leave the
+    // rest in `undistributed_rewards` for a future call (with a healthier
+    // ratio, or after a Withdraw resets index_delta).
+    let raw_increment =
+        Decimal::checked_from_ratio(distributed, state.total_bond_amount)
+            .unwrap_or(Decimal::MAX);
+    let headroom = Decimal::MAX
+        .checked_sub(state.global_reward_index)
+        .unwrap_or(Decimal::zero());
+    let applied_increment = std::cmp::min(raw_increment, headroom);
+
+    // Convert the applied index increment back to raw token units. mul_floor
+    // can only fail for extreme `total_bond * applied_increment` combinations;
+    // if it does, fall back to `distributed` (safe upper bound) but cap the
+    // deduction so we never decrement below zero.
+    let credited = state
+        .total_bond_amount
+        .checked_mul_floor(applied_increment)
+        .unwrap_or(distributed);
+    let credited = std::cmp::min(credited, state.undistributed_rewards);
+
+    state.undistributed_rewards -= credited;
+    // L-1: `unclaimed_pending` tracks "tokens owed via the schedule" — every
+    // unit credited to `global_reward_index` here is implicitly promised to
+    // whichever staker bonded during this period, even though it hasn't been
+    // swept into any specific user's `pending_reward` yet. Decremented in
+    // `withdraw` when a user actually claims.
+    state.unclaimed_pending = state.unclaimed_pending.saturating_add(credited);
+    state.global_reward_index = state
+        .global_reward_index
+        .checked_add(applied_increment)
+        .unwrap_or(Decimal::MAX);
 }
 
 // withdraw reward to pending reward
-fn compute_staker_reward(state: &State, staker_info: &mut StakerInfo) -> StdResult<()> {
+fn compute_staker_reward(state: &mut State, staker_info: &mut StakerInfo) -> StdResult<()> {
     // Compute the per-user reward as bond * (global_index - user_index).
-    // The earlier formulation `floor(bond * global) - floor(bond * user)`
-    // accumulated a floor-truncation error each call.
     let index_delta = state
         .global_reward_index
         .checked_sub(staker_info.reward_index)
         .map_err(|e| StdError::generic_err(e.to_string()))?;
-    let pending_reward = staker_info.bond_amount.mul_floor(index_delta);
+
+    // L-3: saturate rather than panic on `bond * index_delta` overflow. Only
+    // reachable for an extreme combination of a very large `bond_amount` and a
+    // long-unsettled index_delta. The user can recover by calling Withdraw
+    // (which resets `reward_index`) before the next interaction.
+    let pending_reward = staker_info
+        .bond_amount
+        .checked_mul_floor(index_delta)
+        .unwrap_or(Uint128::MAX);
 
     staker_info.reward_index = state.global_reward_index;
-    staker_info.pending_reward += pending_reward;
+    staker_info.pending_reward = staker_info.pending_reward.saturating_add(pending_reward);
+    // No state mutation: this just moves credit from "implicit pending"
+    // (captured globally in state.unclaimed_pending via compute_reward) into
+    // the user's explicit pending bucket — the total owed is unchanged.
     Ok(())
 }
 
@@ -696,6 +995,18 @@ fn validate_asset_info(deps: Deps, asset: &AssetInfo) -> StdResult<()> {
 }
 
 fn validate_distribution_schedule(schedule: &[(u64, u64, Uint128)]) -> StdResult<()> {
+    if schedule.is_empty() {
+        return Err(StdError::generic_err(
+            "distribution schedule must have at least one slot",
+        ));
+    }
+    if schedule.len() > MAX_SCHEDULE_SLOTS {
+        return Err(StdError::generic_err(format!(
+            "distribution schedule: at most {} slots (got {})",
+            MAX_SCHEDULE_SLOTS,
+            schedule.len()
+        )));
+    }
     for (start, end, amount) in schedule {
         if start >= end {
             return Err(StdError::generic_err(
@@ -706,6 +1017,15 @@ fn validate_distribution_schedule(schedule: &[(u64, u64, Uint128)]) -> StdResult
             return Err(StdError::generic_err(
                 "distribution schedule: amount must be non-zero",
             ));
+        }
+        // H-2: bound per-slot duration so even a compromised owner who
+        // pushes a propose-update through can't stretch a single slot out
+        // to a horizon beyond MAX_SCHEDULE_SLOT_DURATION_SECONDS.
+        if end - start > MAX_SCHEDULE_SLOT_DURATION_SECONDS {
+            return Err(StdError::generic_err(format!(
+                "distribution schedule: slot duration exceeds max ({} seconds)",
+                MAX_SCHEDULE_SLOT_DURATION_SECONDS
+            )));
         }
     }
     Ok(())
@@ -723,6 +1043,20 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
             to_json_binary(&query_pending_owner_rotation(deps)?)
         }
         QueryMsg::PendingMigration {} => to_json_binary(&query_pending_migration(deps)?),
+        QueryMsg::PendingConfigUpdate {} => to_json_binary(&query_pending_config_update(deps)?),
+    }
+}
+
+pub fn query_pending_config_update(deps: Deps) -> StdResult<PendingConfigUpdateResponse> {
+    match PENDING_CONFIG_UPDATE.may_load(deps.storage)? {
+        Some(pending) => Ok(PendingConfigUpdateResponse {
+            distribution_schedule: Some(pending.distribution_schedule),
+            effective_at: Some(pending.effective_at),
+        }),
+        None => Ok(PendingConfigUpdateResponse {
+            distribution_schedule: None,
+            effective_at: None,
+        }),
     }
 }
 
@@ -808,7 +1142,7 @@ pub fn query_staker_info(
         let mut state = read_state(deps.storage)?;
 
         compute_reward(&config, &mut state, block_time);
-        compute_staker_reward(&state, &mut staker_info)?;
+        compute_staker_reward(&mut state, &mut staker_info)?;
     }
 
     Ok(StakerInfoResponse {

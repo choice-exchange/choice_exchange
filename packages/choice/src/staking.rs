@@ -7,6 +7,11 @@ use cw20::Cw20ReceiveMsg;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
+    /// Address that holds owner privileges (`UpdateConfig`,
+    /// `ProposeMigrateStaking`, `ProposeNewOwner`). For factory-spawned farms
+    /// this is the Choice governance multisig — NOT the user who paid the
+    /// launch fee, who is treated as a one-shot operator with no on-chain role.
+    pub owner: String,
     pub reward_token: AssetInfo,
     pub staking_token: AssetInfo,
     pub distribution_schedule: Vec<(u64, u64, Uint128)>,
@@ -40,9 +45,18 @@ pub enum ExecuteMsg {
     ApplyMigrateStaking {},
     /// Owner-only. Clears any pending migration.
     CancelMigrateStakingProposal {},
-    UpdateConfig {
+    /// H-2: owner proposes a new `distribution_schedule`. Like
+    /// `ProposeMigrateStaking`, the change cannot take effect until
+    /// `TIMELOCK_DELAY_SECONDS` have elapsed so stakers have an exit window if
+    /// they distrust the new schedule. Re-proposing overwrites the pending
+    /// proposal and resets the timer.
+    ProposeUpdateConfig {
         distribution_schedule: Vec<(u64, u64, Uint128)>,
     },
+    /// Owner-only. Finalizes a pending schedule update once the timelock has expired.
+    ApplyUpdateConfig {},
+    /// Owner-only. Clears a pending schedule update proposal.
+    CancelUpdateConfigProposal {},
     /// H-4 follow-through: owner proposes a new owner. The rotation cannot
     /// take effect until `TIMELOCK_DELAY_SECONDS` have elapsed, giving users
     /// a window to exit if they distrust the incoming operator. Proposing
@@ -85,6 +99,8 @@ pub enum QueryMsg {
     PendingOwnerRotation {},
     /// Pending migrate_staking proposal, if any.
     PendingMigration {},
+    /// Pending schedule update, if any.
+    PendingConfigUpdate {},
 }
 
 // We define a custom struct for each query response
@@ -105,6 +121,12 @@ pub struct PendingOwnerRotationResponse {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct PendingMigrationResponse {
     pub new_staking_contract: Option<String>,
+    pub effective_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct PendingConfigUpdateResponse {
+    pub distribution_schedule: Option<Vec<(u64, u64, Uint128)>>,
     pub effective_at: Option<u64>,
 }
 

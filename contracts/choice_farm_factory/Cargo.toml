@@ -1,0 +1,39 @@
+[package]
+name = "choice-farm-factory"
+version = "1.1.2"
+authors = ["Dan Van Eijck"]
+edition = "2018"
+description = "Gateway factory that instantiates choice-farm contracts, collects the INJ launch fee, and maintains the on-chain registry of UI-launched farms"
+license = "MIT"
+
+exclude = [
+  "contract.wasm",
+  "hash.txt",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+library = []
+
+[dependencies]
+choice              = { path = "../../packages/choice", default-features = false, version = "1.1.2" }
+
+cw2                 = { version = "2.0.0" }
+cw20                = { version = "2.0.0" }
+cosmwasm-std        = { version = "2.2.2", features = [
+    "abort",
+    "cosmwasm_1_2",
+    "cosmwasm_1_3",
+    "cosmwasm_1_4",
+    "cosmwasm_2_0",
+    "iterator",
+    "stargate"
+] }
+cw-storage-plus     = { version = "2.0.0" }
+cw-utils            = { version = "2.0.0" }
+cosmwasm-schema     = { version = "2.2.2" }
+
+schemars            = "0.8.22"
+serde               = { version = "1.0.219", default-features = false, features = ["derive"] }
