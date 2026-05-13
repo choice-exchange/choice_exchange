@@ -24,8 +24,9 @@ use choice::staking::{
 
 use crate::state::{
     Config, FarmRecord, FundAfter, PendingFarm, PendingFarmCodeIdUpdate, CONFIG, DEFAULT_LIMIT,
-    FARMS, FARM_BY_ADDR, INJ_DENOM, INSTANTIATE_FARM_REPLY_ID, MAX_LIMIT, MAX_SCHEDULE_SLOTS,
-    NEXT_FARM_ID, PENDING_FARM, PENDING_FARM_CODE_ID, TIMELOCK_DELAY_SECONDS,
+    FARMS, FARM_BY_ADDR, INJ_DENOM, INSTANTIATE_FARM_REPLY_ID, MAX_LIMIT,
+    MAX_SCHEDULE_SLOT_DURATION_SECONDS, MAX_SCHEDULE_SLOTS, NEXT_FARM_ID, PENDING_FARM,
+    PENDING_FARM_CODE_ID, TIMELOCK_DELAY_SECONDS,
 };
 
 const CONTRACT_NAME: &str = "crates.io:choice-farm-factory";
@@ -671,6 +672,15 @@ fn validate_distribution_schedule(schedule: &[(u64, u64, Uint128)]) -> StdResult
             return Err(StdError::generic_err(
                 "distribution schedule: amount must be non-zero",
             ));
+        }
+        // M-2: mirror the farm's per-slot duration cap. The farm enforces it
+        // too, but rejecting here avoids dispatching the fee BankSend / cw20
+        // TransferFrom only to revert in the instantiate reply.
+        if end - start > MAX_SCHEDULE_SLOT_DURATION_SECONDS {
+            return Err(StdError::generic_err(format!(
+                "distribution schedule: slot duration exceeds max ({} seconds)",
+                MAX_SCHEDULE_SLOT_DURATION_SECONDS
+            )));
         }
     }
     Ok(())

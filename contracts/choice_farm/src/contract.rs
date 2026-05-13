@@ -272,7 +272,7 @@ pub fn bond(deps: DepsMut, env: Env, sender_addr: Addr, amount: Uint128) -> StdR
     compute_reward(&config, &mut state, env.block.time.seconds());
     compute_staker_reward(&mut state, &mut staker_info)?;
 
-    increase_bond_amount(&mut state, &mut staker_info, amount);
+    increase_bond_amount(&mut state, &mut staker_info, amount)?;
 
     store_staker_info(deps.storage, &sender_addr_raw, &staker_info)?;
     store_state(deps.storage, &state)?;
@@ -854,9 +854,16 @@ pub fn cancel_owner_proposal(
     Ok(Response::new().add_attribute("action", "cancel_owner_proposal"))
 }
 
-fn increase_bond_amount(state: &mut State, staker_info: &mut StakerInfo, amount: Uint128) {
-    state.total_bond_amount += amount;
-    staker_info.bond_amount += amount;
+fn increase_bond_amount(
+    state: &mut State,
+    staker_info: &mut StakerInfo,
+    amount: Uint128,
+) -> StdResult<()> {
+    // M-3: use checked_add so an absurd-supply edge case surfaces as a clean
+    // error rather than a panic.
+    state.total_bond_amount = state.total_bond_amount.checked_add(amount)?;
+    staker_info.bond_amount = staker_info.bond_amount.checked_add(amount)?;
+    Ok(())
 }
 
 fn decrease_bond_amount(
@@ -910,6 +917,18 @@ fn compute_reward(config: &Config, state: &mut State, block_time: u64) {
     // The actual amount distributed is capped by what's been funded. This is
     // the solvency invariant: we never credit rewards the contract cannot pay.
     let distributed = std::cmp::min(theoretical, state.undistributed_rewards);
+
+    // M-1 follow-up: if the schedule said tokens should have been emitted
+    // during [last_distributed, block_time] but the pool is empty, do NOT
+    // advance `last_distributed`. Otherwise a later `Fund` cannot backfill
+    // the under-funded window — emissions vanish from the schedule.
+    //
+    // Mirrors the M-2 zero-stakers pause logic above. When `theoretical` is
+    // zero (schedule outside its active window), advancing is safe and saves
+    // gas on subsequent calls.
+    if state.undistributed_rewards.is_zero() && !theoretical.is_zero() {
+        return;
+    }
 
     state.last_distributed = block_time;
     if distributed.is_zero() {

@@ -1099,12 +1099,19 @@ fn test_update_config_cancel_and_repropose() {
 /// `assert_new_schedules` runs at apply time so a schedule that was valid at
 /// propose can be rejected if a slot has started during the timelock wait.
 /// Requires a bonder so `compute_reward` actually advances `last_distributed`
-/// (M-2: zero-bond freezes time).
+/// (M-2: zero-bond freezes time) AND a funded pool so M-1's zero-funding
+/// pause doesn't also freeze it.
 #[test]
 fn test_update_config_assert_at_apply() {
     let (mut deps, owner) = instantiate_for_update_config_tests();
     let mut env = mock_env();
     let start = env.block.time.seconds();
+
+    // Fund the pool: M-1 pauses `last_distributed` when the schedule has
+    // theoretical emissions but `undistributed_rewards == 0`. Without
+    // funding, the slot would never count as "started" and the assertion
+    // path under test would not trigger.
+    fund_via_reward_cw20(&mut deps, Uint128::from(1_000_000u128));
 
     // Bond once so M-2's zero-bond pause doesn't keep last_distributed at `start`.
     let staker = deps.api.addr_make("staker");
@@ -1617,6 +1624,87 @@ fn test_compute_reward_capped_by_funding() {
     )
     .unwrap();
     assert_eq!(state.undistributed_rewards, Uint128::zero());
+}
+
+/// M-1 follow-up: if there are bonded stakers but the pool is unfunded,
+/// `compute_reward` must NOT advance `last_distributed` past schedule
+/// emissions that couldn't be credited. A later `Fund` is then able to
+/// backfill the gap instead of forfeiting the entire window.
+#[test]
+fn test_compute_reward_pauses_when_pool_empty() {
+    let mut deps = mock_dependencies(&[]);
+    let start = mock_env().block.time.seconds();
+    let msg = InstantiateMsg {
+        owner: deps.api.addr_make("addr0000").to_string(),
+        reward_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("reward0000").to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        // Schedule promises 1,000,000 over 100 seconds — never funded up front.
+        distribution_schedule: vec![(start, start + 100, Uint128::from(1_000_000u128))],
+    };
+    let info = message_info(&deps.api.addr_make("addr0000"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+    // Bond immediately — there IS a staker during the unfunded window.
+    bump_cw20_balance(&mut deps, "staking0000", Uint128::from(100u128));
+    let staking_addr = deps.api.addr_make("staking0000");
+    let staker_addr = deps.api.addr_make("addr0000").to_string();
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&staking_addr, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: staker_addr,
+            amount: Uint128::from(100u128),
+            msg: to_json_binary(&Cw20HookMsg::Bond {}).unwrap(),
+        }),
+    )
+    .unwrap();
+
+    // Fast-forward past the schedule end. With no funding, `compute_reward`
+    // should pause: querying state should NOT have advanced last_distributed.
+    let state: StateResponse = from_json(
+        query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::State {
+                block_time: Some(start + 200),
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        state.last_distributed, start,
+        "last_distributed must stay frozen while the pool is empty"
+    );
+
+    // Now fund the full schedule amount. compute_reward (triggered indirectly
+    // via a query at the same future time) should credit the entire 1_000_000.
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(200);
+    fund_via_reward_cw20(&mut deps, Uint128::from(1_000_000u128));
+
+    let withdrawer = deps.api.addr_make("addr0000");
+    let reward_addr = deps.api.addr_make("reward0000").to_string();
+    let recipient = withdrawer.to_string();
+    let withdraw_info = message_info(&withdrawer, &[]);
+    let res = execute(deps.as_mut(), env, withdraw_info, ExecuteMsg::Withdraw {}).unwrap();
+    assert_eq!(
+        res.messages,
+        vec![SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: reward_addr,
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient,
+                amount: Uint128::from(1_000_000u128),
+            })
+            .unwrap(),
+            funds: vec![],
+        }))]
+    );
 }
 
 /// Rewards accrued during a period when nobody is staked stay in the pool and

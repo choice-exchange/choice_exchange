@@ -30,6 +30,12 @@ pub const MAX_LIMIT: u32 = 100;
 /// multi-phase emission plan.
 pub const MAX_SCHEDULE_SLOTS: usize = 20;
 
+/// Mirror of `choice_farm::MAX_SCHEDULE_SLOT_DURATION_SECONDS`. Without this,
+/// the factory would dispatch the launch-fee `BankSend` and (for cw20 rewards)
+/// `TransferFrom` before the farm's instantiate rejects the schedule — the tx
+/// still reverts atomically, but partial events confuse indexers and waste gas.
+pub const MAX_SCHEDULE_SLOT_DURATION_SECONDS: u64 = 4 * 365 * 24 * 60 * 60;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Config {
     pub owner: CanonicalAddr,
