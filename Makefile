@@ -54,6 +54,10 @@ build-manager:
 	RUSTFLAGS=$(RUST_FLAGS) cargo build --release --lib --target wasm32-unknown-unknown -p choice_clmm_manager
 	cp target/wasm32-unknown-unknown/release/choice_clmm_manager.wasm artifacts/
 
+build-zap-lp:
+	RUSTFLAGS=$(RUST_FLAGS) cargo build --release --lib --target wasm32-unknown-unknown -p choice-zap-lp
+	cp target/wasm32-unknown-unknown/release/choice_zap_lp.wasm artifacts/
+
 build-all: build-factory build-pool build-manager
 
 # Full optimised build of every workspace contract via the Docker

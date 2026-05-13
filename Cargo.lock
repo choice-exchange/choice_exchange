@@ -402,6 +402,7 @@ dependencies = [
  "choice",
  "choice-farm",
  "choice-vault",
+ "choice-zap-lp",
  "cosmwasm-schema 2.2.2",
  "cosmwasm-std 2.2.2",
  "cw-utils 2.0.0",
@@ -554,6 +555,25 @@ dependencies = [
  "cw20",
  "schemars 0.8.22",
  "serde",
+ "thiserror 2.0.12",
+]
+
+[[package]]
+name = "choice-zap-lp"
+version = "1.1.2"
+dependencies = [
+ "choice",
+ "cosmwasm-schema 2.2.2",
+ "cosmwasm-std 2.2.2",
+ "cw-storage-plus 2.0.0",
+ "cw2 2.0.0",
+ "cw20",
+ "injective-cosmwasm",
+ "injective-math",
+ "schemars 0.8.22",
+ "serde",
+ "serde-json-wasm 1.0.1",
+ "serde_json",
  "thiserror 2.0.12",
 ]
 
