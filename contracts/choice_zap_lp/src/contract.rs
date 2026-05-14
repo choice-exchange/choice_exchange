@@ -35,6 +35,12 @@ const DEFAULT_SLIPPAGE_PERMILLE: u64 = 10;
 /// Hard cap on `tip_bps` (1%). Belt-and-suspenders against a misclick on
 /// UpdateConfig draining royalties to keepers.
 pub const MAX_TIP_BPS: u16 = 100;
+/// Hard cap on caller-supplied `max_spread` and `slippage_tolerance`. The
+/// pair contract imposes no upper bound of its own, so a 100% value would
+/// silently disable MEV protection. Capping at 50% matches the standard
+/// Cosmos AMM router default and rejects obviously-broken UI inputs without
+/// blocking unusual but legitimate volatile-asset zaps.
+const MAX_TOLERANCE_PERMILLE: u64 = 500;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -184,6 +190,7 @@ fn execute_zap(
     deadline: Option<u64>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     assert_deadline(env.block.time.seconds(), deadline)?;
+    assert_tolerance_caps(max_spread, slippage_tolerance)?;
 
     if info.funds.len() != 1 {
         return Err(ContractError::InvalidInputFunds {
@@ -250,6 +257,7 @@ fn execute_receive(
             deadline,
         } => {
             assert_deadline(env.block.time.seconds(), deadline)?;
+            assert_tolerance_caps(max_spread, slippage_tolerance)?;
 
             let pair_addr = deps.api.addr_validate(&pair)?;
             let original_sender = deps.api.addr_validate(&cw20_msg.sender)?;
@@ -352,6 +360,7 @@ fn execute_zap_balance(
     deadline: Option<u64>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     assert_deadline(env.block.time.seconds(), deadline)?;
+    assert_tolerance_caps(max_spread, slippage_tolerance)?;
 
     let config = CONFIG.load(deps.storage)?;
 
@@ -395,15 +404,21 @@ fn execute_zap_balance(
         messages.push(transfer_asset_msg(&input, &info.sender, tip)?);
     }
 
-    // Drain mode: no snapshots. The contract is dedicated to one royalty
-    // stream, so any pre-existing balance of the non-input side belongs to a
-    // prior in-flight zap's dust and is fine to bundle into this LP step. The
-    // user-facing `Zap`/`Receive` paths still use snapshot isolation via the
-    // `pre_*` fields; only `ZapBalance` drains.
+    // Drain mode for the INPUT side only. Asset_b and LP are snapshotted so
+    // that an accidental transfer (mis-sent royalty, airdrop, leftover from
+    // an earlier in-flight zap) doesn't get bundled into the deposit and
+    // trip the pair's `MaxSlippageAssertion`. Pre-existing asset_b stays
+    // untouched and can be rescued by the owner via `Sweep`.
     let pair_info: PairInfo = deps
         .querier
         .query_wasm_smart(&pair_addr, &PairQueryMsg::Pair {})?;
     let (asset_a, asset_b) = orient_assets(&pair_info, &input)?;
+
+    let pre_b = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &asset_b)?;
+    let pre_lp = deps
+        .querier
+        .query_balance(&env.contract.address, pair_info.liquidity_token.clone())?
+        .amount;
 
     let plan = plan_zap(
         deps.as_ref(),
@@ -415,8 +430,8 @@ fn execute_zap_balance(
         input_amount,
         &recipient_addr,
         Uint128::zero(),
-        Uint128::zero(),
-        Uint128::zero(),
+        pre_b,
+        pre_lp,
         max_spread,
         slippage_tolerance,
         min_lp_out,
@@ -969,8 +984,8 @@ fn query_simulate(
 
 /// Subset of v1 `Config` used to read pre-migration bytes. v1 had no
 /// `input` / `pair`, so we deserialize what's present and supply the route
-/// from `MigrateMsg`. The orphaned `ROUTES` map entries from v1 are left in
-/// storage — unreachable from v2 code, no functional impact.
+/// from `MigrateMsg::FromV1`. The orphaned `ROUTES` map entries from v1 are
+/// left in storage — unreachable from v2 code, no functional impact.
 #[derive(serde::Deserialize)]
 struct LegacyConfigV1 {
     owner: Addr,
@@ -979,39 +994,72 @@ struct LegacyConfigV1 {
     min_zap_amount: Uint128,
 }
 
+/// Migrate dispatch. The variant must match the cw2 version recorded in
+/// storage — `FromV1` requires `1.x.x`, `Patch` requires `2.x.x`. This is
+/// what blocks an on-chain admin from rewriting the supposedly-immutable
+/// `(input, pair)` route via a v2 → v2 migration with a v1-shaped payload.
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(
     deps: DepsMut<InjectiveQueryWrapper>,
     _env: Env,
     msg: MigrateMsg,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    let current = cw2::get_contract_version(deps.storage)?;
 
-    let raw = deps
-        .storage
-        .get(b"config")
-        .ok_or(ContractError::Unauthorized {})?;
-    let legacy: LegacyConfigV1 = cosmwasm_std::from_json(&raw)?;
+    match msg {
+        MigrateMsg::FromV1 { input, pair } => {
+            if !current.version.starts_with("1.") {
+                return Err(ContractError::InvalidMigration {
+                    from: current.version,
+                    requested: "from_v1".to_string(),
+                });
+            }
 
-    let pair = deps.api.addr_validate(&msg.pair)?;
-    let input = validate_asset_info(deps.api, &msg.input)?;
+            let raw = deps
+                .storage
+                .get(b"config")
+                .ok_or(ContractError::MigrationStateMissing {})?;
+            let legacy: LegacyConfigV1 = cosmwasm_std::from_json(&raw)?;
 
-    CONFIG.save(
-        deps.storage,
-        &Config {
-            owner: legacy.owner,
-            default_recipient: legacy.default_recipient,
-            tip_bps: legacy.tip_bps,
-            min_zap_amount: legacy.min_zap_amount,
-            input: input.clone(),
-            pair: pair.clone(),
-        },
-    )?;
+            let pair = deps.api.addr_validate(&pair)?;
+            let input = validate_asset_info(deps.api, &input)?;
 
-    Ok(Response::new()
-        .add_attribute("action", "migrate")
-        .add_attribute("input", input.to_string())
-        .add_attribute("pair", pair))
+            CONFIG.save(
+                deps.storage,
+                &Config {
+                    owner: legacy.owner,
+                    default_recipient: legacy.default_recipient,
+                    tip_bps: legacy.tip_bps,
+                    min_zap_amount: legacy.min_zap_amount,
+                    input: input.clone(),
+                    pair: pair.clone(),
+                },
+            )?;
+
+            set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+            Ok(Response::new()
+                .add_attribute("action", "migrate")
+                .add_attribute("variant", "from_v1")
+                .add_attribute("from_version", current.version)
+                .add_attribute("to_version", CONTRACT_VERSION)
+                .add_attribute("input", input.to_string())
+                .add_attribute("pair", pair))
+        }
+        MigrateMsg::Patch {} => {
+            if !current.version.starts_with("2.") {
+                return Err(ContractError::InvalidMigration {
+                    from: current.version,
+                    requested: "patch".to_string(),
+                });
+            }
+            set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+            Ok(Response::new()
+                .add_attribute("action", "migrate")
+                .add_attribute("variant", "patch")
+                .add_attribute("from_version", current.version)
+                .add_attribute("to_version", CONTRACT_VERSION))
+        }
+    }
 }
 
 // ---------- helpers ----------
@@ -1106,6 +1154,30 @@ fn assert_deadline(blocktime: u64, deadline: Option<u64>) -> Result<(), Contract
     if let Some(d) = deadline {
         if blocktime >= d {
             return Err(ContractError::ExpiredDeadline {});
+        }
+    }
+    Ok(())
+}
+
+fn assert_tolerance_caps(
+    max_spread: Option<Decimal>,
+    slippage_tolerance: Option<Decimal>,
+) -> Result<(), ContractError> {
+    let cap = Decimal::permille(MAX_TOLERANCE_PERMILLE);
+    if let Some(v) = max_spread {
+        if v > cap {
+            return Err(ContractError::MaxSpreadTooHigh {
+                value: v.to_string(),
+                max: cap.to_string(),
+            });
+        }
+    }
+    if let Some(v) = slippage_tolerance {
+        if v > cap {
+            return Err(ContractError::SlippageToleranceTooHigh {
+                value: v.to_string(),
+                max: cap.to_string(),
+            });
         }
     }
     Ok(())

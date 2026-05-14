@@ -204,11 +204,19 @@ pub struct IsKeeperResponse {
     pub is_keeper: bool,
 }
 
-/// v1 → v2 migration payload. Pins the royalty route into the new `Config`
-/// shape (`input`, `pair`) and drops the legacy `ROUTES` map. Without these
-/// fields the new code cannot deserialize the old Config.
+/// Migration payload. Two distinct paths so a v2 → v2 patch cannot
+/// accidentally rewrite the immutable `(input, pair)` route by re-using the
+/// v1-shaped JSON.
+///
+/// `FromV1` requires the on-chain cw2 version to be `1.x.x` (legacy ROUTES
+/// map config). It pins the new immutable route from the message.
+///
+/// `Patch` requires the on-chain cw2 version to be `2.x.x`. It bumps
+/// CONTRACT_VERSION but never touches Config — so a future v2.y → v2.z
+/// migration cannot smuggle a route change in via `MsgMigrateContract`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct MigrateMsg {
-    pub input: AssetInfo,
-    pub pair: String,
+#[serde(rename_all = "snake_case")]
+pub enum MigrateMsg {
+    FromV1 { input: AssetInfo, pair: String },
+    Patch {},
 }

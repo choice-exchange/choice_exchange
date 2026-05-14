@@ -602,6 +602,56 @@ fn update_config_rejects_tip_over_cap() {
     assert!(matches!(err, ContractError::TipTooHigh { value: 500, .. }));
 }
 
+// -------- callback ProvideLiquidity skip path --------
+
+/// Replaces the integration coverage that was lost when the per-call
+/// `max_spread` cap (50%) made it unreachable from the user-facing `Zap`
+/// entry point. The skip behaviour itself still matters: if either delta
+/// lands ≤ 1 wei, the haircut would underflow the pair's `desired - deposit`
+/// invariant, so the callback must short-circuit and let the sweep refund
+/// the dust instead of forwarding a zero-deposit ProvideLiquidity.
+#[test]
+fn callback_provide_skips_when_delta_le_one() {
+    let mut deps = mock_deps_simple();
+    do_instantiate(&mut deps);
+    let env = mock_env();
+
+    // Stage balances such that delta_b after subtracting `pre_b` is exactly 1.
+    let pre_a = Uint128::new(100);
+    let pre_b = Uint128::new(50);
+    deps.querier.bank.update_balance(
+        env.contract.address.clone(),
+        vec![
+            coin(pre_a.u128() + 5, "inj"),  // delta_a = 5
+            coin(pre_b.u128() + 1, "usdt"), // delta_b = 1 → trigger skip
+        ],
+    );
+
+    let pair_str = deps.api.addr_make("pair").to_string();
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&env.contract.address, &[]),
+        ExecuteMsg::Callback(CallbackMsg::ProvideLiquidity {
+            pair: pair_str,
+            asset_a: native("inj"),
+            asset_b: native("usdt"),
+            pre_a,
+            pre_b,
+            slippage_tolerance: cosmwasm_std::Decimal::percent(1),
+            deadline: None,
+        }),
+    )
+    .unwrap();
+
+    // No sub-messages emitted — the LP step is skipped.
+    assert!(res.messages.is_empty(), "skip path must not emit messages");
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "action" && a.value == "zap_provide_skip"));
+}
+
 // -------- callback Sweep with mocked balances --------
 
 #[test]
@@ -815,24 +865,29 @@ fn update_config_empty_default_clears() {
 
 // -------- migrate v1 → v2 --------
 
-#[test]
-fn migrate_v1_to_v2_preserves_config_and_pins_route() {
+/// Stage a v1-shaped Config blob and the cw2 version record so a `FromV1`
+/// migrate can find both. Returns the (owner, treasury) pair the test set up.
+fn stage_v1_state(
+    deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier<Empty>, InjectiveQueryWrapper>,
+) -> (Addr, Addr) {
     use cosmwasm_std::Storage;
-
-    let mut deps = mock_deps_simple();
     let owner = owner_addr(&deps.api);
     let treasury = deps.api.addr_make("treasury");
-
-    // Stage a v1-shaped Config directly under the `b"config"` key (the v2
-    // Config struct adds `input`/`pair`, which weren't present in v1).
     let v1_json = serde_json::json!({
         "owner": owner.to_string(),
         "default_recipient": treasury.to_string(),
         "tip_bps": 25u16,
         "min_zap_amount": "1000",
     });
-    deps.storage
-        .set(b"config", v1_json.to_string().as_bytes());
+    deps.storage.set(b"config", v1_json.to_string().as_bytes());
+    cw2::set_contract_version(&mut deps.storage, "crates.io:choice-zap-lp", "1.1.2").unwrap();
+    (owner, treasury)
+}
+
+#[test]
+fn migrate_v1_to_v2_preserves_config_and_pins_route() {
+    let mut deps = mock_deps_simple();
+    let (owner, treasury) = stage_v1_state(&mut deps);
 
     let pair = deps.api.addr_make("royalty_pair");
     let token = deps.api.addr_make("royalty_cw20");
@@ -840,7 +895,7 @@ fn migrate_v1_to_v2_preserves_config_and_pins_route() {
     migrate(
         deps.as_mut(),
         mock_env(),
-        MigrateMsg {
+        MigrateMsg::FromV1 {
             input: cw20(&token),
             pair: pair.to_string(),
         },
@@ -856,6 +911,157 @@ fn migrate_v1_to_v2_preserves_config_and_pins_route() {
     // v2 fields come from MigrateMsg.
     assert_eq!(config.input, cw20(&token));
     assert_eq!(config.pair, pair);
+    // cw2 version bumped.
+    assert_eq!(
+        cw2::get_contract_version(&deps.storage).unwrap().version,
+        env!("CARGO_PKG_VERSION"),
+    );
+}
+
+#[test]
+fn migrate_from_v1_rejected_on_v2_contract() {
+    // Regression: `FromV1` against an already-v2 contract was the route-rewrite
+    // backdoor — serde would silently accept a v2-shaped JSON as a v1 payload
+    // and overwrite `(input, pair)`. The cw2-version gate now blocks that.
+    let mut deps = mock_deps_simple();
+    do_instantiate(&mut deps);
+
+    let new_pair = deps.api.addr_make("new_pair");
+    let new_token = deps.api.addr_make("new_token");
+
+    let err = migrate(
+        deps.as_mut(),
+        mock_env(),
+        MigrateMsg::FromV1 {
+            input: cw20(&new_token),
+            pair: new_pair.to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::InvalidMigration { .. }));
+
+    // Config untouched.
+    let config = crate::state::CONFIG.load(&deps.storage).unwrap();
+    assert_eq!(config.input, native("inj"));
+    assert_ne!(config.pair, new_pair);
+}
+
+#[test]
+fn migrate_patch_on_v2_preserves_route() {
+    let mut deps = mock_deps_simple();
+    do_instantiate(&mut deps);
+    let before = crate::state::CONFIG.load(&deps.storage).unwrap();
+
+    migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap();
+
+    let after = crate::state::CONFIG.load(&deps.storage).unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn migrate_patch_rejected_on_v1_contract() {
+    let mut deps = mock_deps_simple();
+    stage_v1_state(&mut deps);
+
+    let err = migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap_err();
+    assert!(matches!(err, ContractError::InvalidMigration { .. }));
+}
+
+#[test]
+fn migrate_from_v1_with_no_legacy_state_errors_clearly() {
+    // No prior config bytes — should surface as MigrationStateMissing, not as
+    // the misleading Unauthorized that the v1 implementation returned.
+    let mut deps = mock_deps_simple();
+    cw2::set_contract_version(&mut deps.storage, "crates.io:choice-zap-lp", "1.1.2").unwrap();
+
+    let pair = deps.api.addr_make("royalty_pair");
+    let err = migrate(
+        deps.as_mut(),
+        mock_env(),
+        MigrateMsg::FromV1 {
+            input: native("inj"),
+            pair: pair.to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::MigrationStateMissing {}));
+}
+
+// -------- per-call tolerance caps (max_spread / slippage_tolerance) --------
+
+#[test]
+fn zap_rejects_max_spread_over_cap() {
+    use cosmwasm_std::Decimal;
+    let mut deps = mock_deps_simple();
+    do_instantiate(&mut deps);
+    let caller = deps.api.addr_make("caller");
+    let pair = deps.api.addr_make("pair").to_string();
+
+    // Querier has no real pair wired up, so the call would normally fail at
+    // the WasmQuery for Pair {}. `assert_tolerance_caps` runs FIRST inside
+    // `plan_zap`, after the pair query, so we need to short-circuit before
+    // that. We exercise the cap via a value comfortably above 50%.
+    deps.querier.bank.update_balance(
+        cosmwasm_std::testing::MOCK_CONTRACT_ADDR,
+        vec![coin(1_000_000, "inj")],
+    );
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &coins(1_000_000, "inj")),
+        ExecuteMsg::Zap {
+            pair,
+            recipient: None,
+            max_spread: Some(Decimal::percent(60)),
+            slippage_tolerance: None,
+            min_lp_out: None,
+            deadline: None,
+        },
+    )
+    .unwrap_err();
+    // Either MaxSpreadTooHigh (cap hit cleanly) or a Std error from the
+    // missing pair query. Assert the cap variant fires at all.
+    let msg = format!("{:?}", err);
+    assert!(
+        matches!(err, ContractError::MaxSpreadTooHigh { .. }),
+        "expected MaxSpreadTooHigh, got {}",
+        msg
+    );
+}
+
+#[test]
+fn zap_rejects_slippage_over_cap() {
+    use cosmwasm_std::Decimal;
+    let mut deps = mock_deps_simple();
+    do_instantiate(&mut deps);
+    let caller = deps.api.addr_make("caller");
+    let pair = deps.api.addr_make("pair").to_string();
+    deps.querier.bank.update_balance(
+        cosmwasm_std::testing::MOCK_CONTRACT_ADDR,
+        vec![coin(1_000_000, "inj")],
+    );
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &coins(1_000_000, "inj")),
+        ExecuteMsg::Zap {
+            pair,
+            recipient: None,
+            max_spread: None,
+            slippage_tolerance: Some(Decimal::percent(75)),
+            min_lp_out: None,
+            deadline: None,
+        },
+    )
+    .unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(
+        matches!(err, ContractError::SlippageToleranceTooHigh { .. }),
+        "expected SlippageToleranceTooHigh, got {}",
+        msg
+    );
 }
 
 // -------- admin Sweep with CW20 --------

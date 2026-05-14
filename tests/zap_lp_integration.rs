@@ -986,60 +986,13 @@ fn zap_balance_pays_tip_and_lps_to_default_recipient() {
     assert_eq!(bal(&env, &env.zap_addr, &env.lp_denom), 0);
 }
 
-#[test]
-fn zap_skips_provide_when_swap_delta_too_small() {
-    let env = setup_native_pair(10_000_000_000_000u128);
-    let wasm = Wasm::new(&env.app);
-
-    let user_lp_before = bal(&env, &env.user.address(), &env.lp_denom);
-    let user_atom_before = bal(&env, &env.user.address(), DENOM_ATOM);
-    let user_usdt_before = bal(&env, &env.user.address(), DENOM_USDT);
-
-    let tiny = 4u128;
-    let resp = wasm
-        .execute(
-            &env.zap_addr,
-            &ZapExecuteMsg::Zap {
-                pair: env.pair_addr.clone(),
-                recipient: None,
-                max_spread: Some(Decimal::one()),
-                slippage_tolerance: Some(Decimal::percent(99)),
-                min_lp_out: None,
-                deadline: None,
-            },
-            &[Coin::new(tiny, DENOM_ATOM)],
-            &env.user,
-        )
-        .expect("zap should not panic on tiny input — M-01 skip should fire");
-
-    let skipped = resp.events.iter().any(|e| {
-        e.ty == "wasm"
-            && e.attributes
-                .iter()
-                .any(|a| a.key == "action" && a.value == "zap_provide_skip")
-    });
-    assert!(
-        skipped,
-        "expected the provide step to be skipped under M-01"
-    );
-
-    let user_lp_after = bal(&env, &env.user.address(), &env.lp_denom);
-    let user_atom_after = bal(&env, &env.user.address(), DENOM_ATOM);
-    let user_usdt_after = bal(&env, &env.user.address(), DENOM_USDT);
-    assert_eq!(user_lp_after, user_lp_before, "no LP should have been minted");
-    let net_atom_loss = user_atom_before as i128 - user_atom_after as i128;
-    let net_usdt_gain = user_usdt_after as i128 - user_usdt_before as i128;
-    assert!(
-        (0..=tiny as i128).contains(&net_atom_loss),
-        "net ATOM loss out of bounds: got {}",
-        net_atom_loss
-    );
-    assert!(
-        (0..=2).contains(&net_usdt_gain),
-        "net USDT gain out of bounds: got {}",
-        net_usdt_gain
-    );
-}
+// Note: the M-01 "skip provide when delta ≤ 1" path used to be exercised
+// here with a 4-wei native input + max_spread=100%. The 50% per-call
+// tolerance cap added in v2 makes that combination no longer reachable from
+// the user-facing entry point — `optimal_split` on a 4-wei input lands a
+// 1-or-2-wei swap whose spread saturates above 50%. The skip behaviour is
+// instead covered by a direct callback unit test in `src/tests.rs`
+// (`callback_provide_skips_when_delta_le_one`).
 
 #[test]
 fn simulate_zap_matches_pair_simulation_query() {
@@ -1437,5 +1390,254 @@ fn cw20_provide_allowance_expires_next_block() {
             other, resp.allowance
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// ZapBalance preserves pre-existing asset_b (M4 fix)
+// ---------------------------------------------------------------------------
+
+/// `ZapBalance` snapshots the non-input asset and LP balances at entry, so a
+/// stray transfer of asset_b (or queued LP) never leaks into the deposit.
+/// Pre-fix: drain mode would bundle pre-existing asset_b with the swap
+/// return, overshoot the pool ratio, and trip `MaxSlippageAssertion`.
+#[test]
+fn zap_balance_preserves_pre_existing_asset_b_and_lp() {
+    let env = setup_native_pair(10_000_000_000_000u128);
+    let bank = Bank::new(&env.app);
+    let wasm = Wasm::new(&env.app);
+
+    // Stage: someone mis-sends asset_b (USDT) and a unit of LP to the zap.
+    let stray_b = 5_000_000u128;
+    let stray_lp = 7u128;
+    bank.send(
+        injective_test_tube::injective_std::types::cosmos::bank::v1beta1::MsgSend {
+            from_address: env.admin.address(),
+            to_address: env.zap_addr.clone(),
+            amount: vec![
+                injective_test_tube::injective_std::types::cosmos::base::v1beta1::Coin {
+                    denom: DENOM_USDT.to_string(),
+                    amount: stray_b.to_string(),
+                },
+            ],
+        },
+        &env.admin,
+    )
+    .unwrap();
+    // Mint LP to admin first by adding liquidity, then forward `stray_lp`.
+    let admin_lp_before = bal(&env, &env.admin.address(), &env.lp_denom);
+    wasm.execute(
+        &env.pair_addr,
+        &PairExecuteMsg::ProvideLiquidity {
+            assets: [
+                Asset {
+                    info: native(DENOM_ATOM),
+                    amount: Uint128::new(stray_lp * 1000),
+                },
+                Asset {
+                    info: native(DENOM_USDT),
+                    amount: Uint128::new(stray_lp * 1000),
+                },
+            ],
+            receiver: None,
+            deadline: None,
+            slippage_tolerance: None,
+        },
+        &[
+            Coin::new(stray_lp * 1000, DENOM_ATOM),
+            Coin::new(stray_lp * 1000, DENOM_USDT),
+        ],
+        &env.admin,
+    )
+    .unwrap();
+    let admin_lp_after = bal(&env, &env.admin.address(), &env.lp_denom);
+    assert!(admin_lp_after > admin_lp_before);
+    bank.send(
+        injective_test_tube::injective_std::types::cosmos::bank::v1beta1::MsgSend {
+            from_address: env.admin.address(),
+            to_address: env.zap_addr.clone(),
+            amount: vec![
+                injective_test_tube::injective_std::types::cosmos::base::v1beta1::Coin {
+                    denom: env.lp_denom.clone(),
+                    amount: stray_lp.to_string(),
+                },
+            ],
+        },
+        &env.admin,
+    )
+    .unwrap();
+
+    // Royalty inflow.
+    let royalty = 1_000_000_000u128;
+    bank.send(
+        injective_test_tube::injective_std::types::cosmos::bank::v1beta1::MsgSend {
+            from_address: env.admin.address(),
+            to_address: env.zap_addr.clone(),
+            amount: vec![
+                injective_test_tube::injective_std::types::cosmos::base::v1beta1::Coin {
+                    denom: DENOM_ATOM.to_string(),
+                    amount: royalty.to_string(),
+                },
+            ],
+        },
+        &env.admin,
+    )
+    .unwrap();
+
+    let treasury_lp_before = bal(&env, &env.treasury.address(), &env.lp_denom);
+
+    wasm.execute(
+        &env.zap_addr,
+        &ZapExecuteMsg::ZapBalance {
+            max_spread: Some(Decimal::permille(5)),
+            slippage_tolerance: Some(Decimal::percent(1)),
+            min_lp_out: Some(Uint128::new(1)),
+            deadline: None,
+        },
+        &[],
+        &env.keeper,
+    )
+    .unwrap();
+
+    // Stray asset_b survives; stray LP survives. Treasury got freshly-minted LP.
+    assert_eq!(
+        bal(&env, &env.zap_addr, DENOM_USDT),
+        stray_b,
+        "stray USDT must not have been deposited"
+    );
+    assert_eq!(
+        bal(&env, &env.zap_addr, &env.lp_denom),
+        stray_lp,
+        "stray LP must not have been swept"
+    );
+    assert!(
+        bal(&env, &env.treasury.address(), &env.lp_denom) > treasury_lp_before,
+        "treasury should have received freshly-minted LP"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Owner-as-tip-recipient on ZapBalance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zap_balance_owner_caller_collects_tip_themselves() {
+    let env = setup_native_pair(10_000_000_000_000u128);
+    let wasm = Wasm::new(&env.app);
+    let bank = Bank::new(&env.app);
+
+    let royalty = 1_000_000_000u128;
+    bank.send(
+        injective_test_tube::injective_std::types::cosmos::bank::v1beta1::MsgSend {
+            from_address: env.admin.address(),
+            to_address: env.zap_addr.clone(),
+            amount: vec![
+                injective_test_tube::injective_std::types::cosmos::base::v1beta1::Coin {
+                    denom: DENOM_ATOM.to_string(),
+                    amount: royalty.to_string(),
+                },
+            ],
+        },
+        &env.admin,
+    )
+    .unwrap();
+
+    let admin_atom_before = bal(&env, &env.admin.address(), DENOM_ATOM);
+
+    wasm.execute(
+        &env.zap_addr,
+        &ZapExecuteMsg::ZapBalance {
+            max_spread: Some(Decimal::permille(5)),
+            slippage_tolerance: Some(Decimal::percent(1)),
+            min_lp_out: Some(Uint128::new(1)),
+            deadline: None,
+        },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+
+    let admin_atom_after = bal(&env, &env.admin.address(), DENOM_ATOM);
+    let expected_tip = royalty * 25 / 10_000;
+    // Owner paid gas in INJ, not ATOM, so the ATOM delta is exactly the tip.
+    assert_eq!(
+        admin_atom_after - admin_atom_before,
+        expected_tip,
+        "owner-as-caller should receive tip in input asset"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sweep can rescue LP from the contract
+// ---------------------------------------------------------------------------
+
+#[test]
+fn admin_sweep_rescues_lp_token_balance() {
+    let env = setup_native_pair(10_000_000_000_000u128);
+    let bank = Bank::new(&env.app);
+    let wasm = Wasm::new(&env.app);
+
+    // Mint LP to admin and forward some to the contract.
+    let admin_lp_before = bal(&env, &env.admin.address(), &env.lp_denom);
+    wasm.execute(
+        &env.pair_addr,
+        &PairExecuteMsg::ProvideLiquidity {
+            assets: [
+                Asset {
+                    info: native(DENOM_ATOM),
+                    amount: Uint128::new(1_000_000),
+                },
+                Asset {
+                    info: native(DENOM_USDT),
+                    amount: Uint128::new(1_000_000),
+                },
+            ],
+            receiver: None,
+            deadline: None,
+            slippage_tolerance: None,
+        },
+        &[
+            Coin::new(1_000_000u128, DENOM_ATOM),
+            Coin::new(1_000_000u128, DENOM_USDT),
+        ],
+        &env.admin,
+    )
+    .unwrap();
+    let admin_lp_after_mint = bal(&env, &env.admin.address(), &env.lp_denom);
+    let stuck_lp = admin_lp_after_mint - admin_lp_before;
+    assert!(stuck_lp > 0);
+
+    bank.send(
+        injective_test_tube::injective_std::types::cosmos::bank::v1beta1::MsgSend {
+            from_address: env.admin.address(),
+            to_address: env.zap_addr.clone(),
+            amount: vec![
+                injective_test_tube::injective_std::types::cosmos::base::v1beta1::Coin {
+                    denom: env.lp_denom.clone(),
+                    amount: stuck_lp.to_string(),
+                },
+            ],
+        },
+        &env.admin,
+    )
+    .unwrap();
+    assert_eq!(bal(&env, &env.zap_addr, &env.lp_denom), stuck_lp);
+
+    let treasury_lp_before = bal(&env, &env.treasury.address(), &env.lp_denom);
+    wasm.execute(
+        &env.zap_addr,
+        &ZapExecuteMsg::Sweep {
+            recipient: env.treasury.address(),
+            assets: vec![native(&env.lp_denom)],
+        },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+
+    assert_eq!(bal(&env, &env.zap_addr, &env.lp_denom), 0);
+    assert_eq!(
+        bal(&env, &env.treasury.address(), &env.lp_denom),
+        treasury_lp_before + stuck_lp
+    );
 }
 

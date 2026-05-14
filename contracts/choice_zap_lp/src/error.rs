@@ -50,4 +50,16 @@ pub enum ContractError {
 
     #[error("Caller is not in the keeper allowlist")]
     NotKeeper {},
+
+    #[error("Migration state missing: no v1 config bytes at storage key `config`")]
+    MigrationStateMissing {},
+
+    #[error("Invalid migration: cannot apply variant `{requested}` from current version `{from}`")]
+    InvalidMigration { from: String, requested: String },
+
+    #[error("max_spread {value} exceeds maximum {max}")]
+    MaxSpreadTooHigh { value: String, max: String },
+
+    #[error("slippage_tolerance {value} exceeds maximum {max}")]
+    SlippageToleranceTooHigh { value: String, max: String },
 }

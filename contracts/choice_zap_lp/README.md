@@ -225,16 +225,26 @@ is needed unless the user wants to LP into someone else's wallet.
 
 - `Zap` / `Receive` are permissionless but **snapshot-isolated** — the caller
   can only reach balance deltas this call produced.
-- `ZapBalance` is gated on owner ∪ keeper allowlist. The pair and input are
-  in immutable Config. A compromised keeper key cannot redirect funds into a
-  malicious pool, change the input asset, or alter the recipient.
+- `ZapBalance` is gated on owner ∪ keeper allowlist. It snapshots the
+  non-input asset and LP balances at entry, so any pre-existing dust or
+  accidental transfer stays untouched (rescuable via `Sweep`). The pair and
+  input are in immutable Config. A compromised keeper key cannot redirect
+  funds into a malicious pool, change the input asset, or alter the recipient.
 - LP is minted to the contract (`receiver = self`), then forwarded in
   `Callback::Sweep`. `min_lp_out` checks against the freshly-minted delta,
   not the recipient's total LP balance.
 - `tip_bps` is hard-capped at 100 bps so a slip on `UpdateConfig` cannot
   drain royalties to keepers.
+- `max_spread` and `slippage_tolerance` are capped at 50% per call so a UI
+  bug, fat-fingered keeper config, or compromised hot key cannot disable
+  MEV protection on the swap leg.
 - `Callback` requires `info.sender == env.contract.address` — external
   callers cannot invoke it.
+- `MsgMigrateContract` cannot rewrite the immutable `(input, pair)` route.
+  The migrate entrypoint dispatches by cw2 version: only `FromV1` (against
+  a 1.x contract) accepts a route, and `Patch` (against a 2.x contract)
+  carries no fields. The wasm-admin can therefore only roll forward to a
+  newer v2 code id, never re-pin the route.
 
 ## Migration from v1
 
@@ -242,13 +252,17 @@ v1 (1.1.x) held an owner-managed `RegisterRoute` map. v2 removes that map
 and pins one immutable route per instance. Either path is supported:
 
 - **Migrate in place.** Call `MsgMigrateContract` with the new code id and
-  `MigrateMsg { input, pair }`. The owner / default_recipient / tip_bps /
-  min_zap_amount stay; old `ROUTES` entries become orphaned storage. Any
-  additional routes that lived on the v1 contract become unreachable —
-  instantiate fresh contracts for them.
+  `MigrateMsg::FromV1 { input, pair }`. The owner / default_recipient /
+  tip_bps / min_zap_amount stay; old `ROUTES` entries become orphaned
+  storage. Any additional routes that lived on the v1 contract become
+  unreachable — instantiate fresh contracts for them. The migrate handler
+  rejects this variant on a 2.x contract, so it can only be used once.
 - **Instantiate fresh per stream** (recommended). Easier to reason about,
   zero migration risk. The v1 contract can be neutralized by clearing
   `default_recipient` and removing all keepers.
+
+For a v2 → v2 patch (e.g. picking up a bugfix without changing the route),
+use `MsgMigrateContract` with `MigrateMsg::Patch {}`.
 
 ## Build & test
 
