@@ -2,23 +2,24 @@ use crate::error::ContractError;
 use crate::math::optimal_swap_in;
 use crate::msg::{
     CallbackMsg, ConfigResponse, ExecuteMsg, InstantiateMsg, IsKeeperResponse, KeepersResponse,
-    MigrateMsg, QueryMsg, RouteResponse, RoutesResponse, SimulateZapResponse,
+    MigrateMsg, QueryMsg, SimulateZapResponse, ZapHookMsg,
 };
-use crate::state::{Config, CONFIG, KEEPERS, ROUTES};
+use crate::state::{Config, CONFIG, KEEPERS};
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps, DepsMut, Empty, Env,
-    MessageInfo, Order, Response, StdResult, Uint128, WasmMsg,
+    from_json, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps, DepsMut,
+    Empty, Env, MessageInfo, Order, QuerierWrapper, Response, StdResult, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
+use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg, Expiration};
 
 use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::pair::{
-    ExecuteMsg as PairExecuteMsg, PoolResponse as PairPoolResponse, QueryMsg as PairQueryMsg,
-    SimulationResponse as PairSimulationResponse,
+    Cw20HookMsg as PairCw20HookMsg, ExecuteMsg as PairExecuteMsg, PoolResponse as PairPoolResponse,
+    QueryMsg as PairQueryMsg, SimulationResponse as PairSimulationResponse,
 };
 
 use injective_cosmwasm::query::InjectiveQueryWrapper;
@@ -60,6 +61,8 @@ pub fn instantiate(
         });
     }
     let min_zap_amount = msg.min_zap_amount.unwrap_or_default();
+    let pair = deps.api.addr_validate(&msg.pair)?;
+    let input = validate_asset_info(deps.api, &msg.input)?;
 
     CONFIG.save(
         deps.storage,
@@ -68,6 +71,8 @@ pub fn instantiate(
             default_recipient: default_recipient.clone(),
             tip_bps,
             min_zap_amount,
+            input: input.clone(),
+            pair: pair.clone(),
         },
     )?;
 
@@ -81,7 +86,33 @@ pub fn instantiate(
                 .unwrap_or_else(|| "none".to_string()),
         )
         .add_attribute("tip_bps", tip_bps.to_string())
-        .add_attribute("min_zap_amount", min_zap_amount))
+        .add_attribute("min_zap_amount", min_zap_amount)
+        .add_attribute("input", input.to_string())
+        .add_attribute("pair", pair))
+}
+
+/// Bech32-validate the contract address embedded in a `Token` variant. Empty
+/// denoms / addresses (degenerate cases) are rejected up front.
+fn validate_asset_info(
+    api: &dyn cosmwasm_std::Api,
+    input: &AssetInfo,
+) -> Result<AssetInfo, ContractError> {
+    match input {
+        AssetInfo::NativeToken { denom } => {
+            if denom.is_empty() {
+                return Err(ContractError::InputAssetMismatch {
+                    got: input.to_string(),
+                });
+            }
+            Ok(input.clone())
+        }
+        AssetInfo::Token { contract_addr } => {
+            let addr = api.addr_validate(contract_addr)?;
+            Ok(AssetInfo::Token {
+                contract_addr: addr.to_string(),
+            })
+        }
+    }
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -110,8 +141,8 @@ pub fn execute(
             min_lp_out,
             deadline,
         ),
+        ExecuteMsg::Receive(cw20_msg) => execute_receive(deps, env, info, cw20_msg),
         ExecuteMsg::ZapBalance {
-            input_denom,
             max_spread,
             slippage_tolerance,
             min_lp_out,
@@ -120,18 +151,11 @@ pub fn execute(
             deps,
             env,
             info,
-            input_denom,
             max_spread,
             slippage_tolerance,
             min_lp_out,
             deadline,
         ),
-        ExecuteMsg::RegisterRoute { input_denom, pair } => {
-            execute_register_route(deps, info, input_denom, pair)
-        }
-        ExecuteMsg::UnregisterRoute { input_denom } => {
-            execute_unregister_route(deps, info, input_denom)
-        }
         ExecuteMsg::AddKeeper { address } => execute_add_keeper(deps, info, address),
         ExecuteMsg::RemoveKeeper { address } => execute_remove_keeper(deps, info, address),
         ExecuteMsg::UpdateConfig {
@@ -140,7 +164,9 @@ pub fn execute(
             tip_bps,
             min_zap_amount,
         } => execute_update_config(deps, info, owner, default_recipient, tip_bps, min_zap_amount),
-        ExecuteMsg::Sweep { recipient, denoms } => execute_sweep(deps, env, info, recipient, denoms),
+        ExecuteMsg::Sweep { recipient, assets } => {
+            execute_sweep(deps, env, info, recipient, assets)
+        }
         ExecuteMsg::Callback(cb) => execute_callback(deps, env, info, cb),
     }
 }
@@ -170,44 +196,118 @@ fn execute_zap(
     }
 
     let pair_addr = deps.api.addr_validate(&pair)?;
-    // Recipient defaults to the caller. Per-call override is safe here because
-    // snapshots (below) ensure only the caller's own funds flow to recipient.
     let recipient_addr = match recipient {
         Some(r) => deps.api.addr_validate(&r)?,
         None => info.sender.clone(),
     };
+    let input_info = AssetInfo::NativeToken {
+        denom: input_coin.denom.clone(),
+    };
 
-    // Pair metadata: need both denoms to snapshot their pre-zap balances. The
-    // pair is queried again inside `plan_zap` (single source of truth for the
-    // checks); the small redundancy keeps the signature clean.
+    run_zap(
+        deps,
+        env,
+        pair_addr,
+        input_info,
+        input_coin.amount,
+        recipient_addr,
+        max_spread,
+        slippage_tolerance,
+        min_lp_out,
+        deadline,
+        "zap",
+    )
+}
+
+fn execute_receive(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+    cw20_msg: Cw20ReceiveMsg,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    // `info.sender` is the CW20 token contract that just transferred us
+    // `cw20_msg.amount`. `cw20_msg.sender` is the original user. We must NOT
+    // accept native funds tagged onto the same call — that's a misuse pattern
+    // and we'd otherwise silently take the funds.
+    if !info.funds.is_empty() {
+        return Err(ContractError::ReceiveWithFunds {
+            count: info.funds.len(),
+        });
+    }
+    if cw20_msg.amount.is_zero() {
+        return Err(ContractError::ZeroInputAmount {});
+    }
+
+    let hook: ZapHookMsg = from_json(&cw20_msg.msg)?;
+    let cw20_contract = info.sender.clone();
+    match hook {
+        ZapHookMsg::Zap {
+            pair,
+            recipient,
+            max_spread,
+            slippage_tolerance,
+            min_lp_out,
+            deadline,
+        } => {
+            assert_deadline(env.block.time.seconds(), deadline)?;
+
+            let pair_addr = deps.api.addr_validate(&pair)?;
+            let original_sender = deps.api.addr_validate(&cw20_msg.sender)?;
+            let recipient_addr = match recipient {
+                Some(r) => deps.api.addr_validate(&r)?,
+                None => original_sender,
+            };
+            let input_info = AssetInfo::Token {
+                contract_addr: cw20_contract.to_string(),
+            };
+
+            run_zap(
+                deps,
+                env,
+                pair_addr,
+                input_info,
+                cw20_msg.amount,
+                recipient_addr,
+                max_spread,
+                slippage_tolerance,
+                min_lp_out,
+                deadline,
+                "zap_cw20",
+            )
+        }
+    }
+}
+
+/// Shared core for both `Zap` (native input) and `Receive`/`ZapHookMsg::Zap`
+/// (CW20 input). At entry, the contract has already received `input_amount` of
+/// `input_info`. The function snapshots the pair-side balances *excluding*
+/// that just-received delta, then emits the three-message zap chain.
+#[allow(clippy::too_many_arguments)]
+fn run_zap(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    pair_addr: Addr,
+    input_info: AssetInfo,
+    input_amount: Uint128,
+    recipient_addr: Addr,
+    max_spread: Option<Decimal>,
+    slippage_tolerance: Option<Decimal>,
+    min_lp_out: Option<Uint128>,
+    deadline: Option<u64>,
+    action_label: &str,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let pair_info: PairInfo = deps
         .querier
         .query_wasm_smart(&pair_addr, &PairQueryMsg::Pair {})?;
-    let denom_0 = native_denom(&pair_info.asset_infos[0])?;
-    let denom_1 = native_denom(&pair_info.asset_infos[1])?;
-    let (snap_denom_a, snap_denom_b) = if input_coin.denom == denom_0 {
-        (denom_0.clone(), denom_1.clone())
-    } else if input_coin.denom == denom_1 {
-        (denom_1.clone(), denom_0.clone())
-    } else {
-        return Err(ContractError::InputDenomMismatch {
-            denom: input_coin.denom,
-        });
-    };
+    let (asset_a, asset_b) = orient_assets(&pair_info, &input_info)?;
 
-    // `bal_a_now` already includes `info.funds` — subtract it to recover the
-    // baseline. This is what makes the user-facing zap safely permissionless:
-    // anything in the contract before this call is not reachable by this
-    // call's recipient.
-    let bal_a_now = deps
-        .querier
-        .query_balance(&env.contract.address, snap_denom_a.clone())?
-        .amount;
-    let pre_a = bal_a_now.checked_sub(input_coin.amount)?;
-    let pre_b = deps
-        .querier
-        .query_balance(&env.contract.address, snap_denom_b.clone())?
-        .amount;
+    // `bal_a_now` already includes `input_amount` (Bank credit for native /
+    // CW20 transfer for tokens). Subtract it to recover the baseline. This is
+    // what makes the user-facing zap safely permissionless: anything in the
+    // contract before this call is not reachable by this call's recipient.
+    let bal_a_now = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &asset_a)?;
+    let pre_a = bal_a_now.checked_sub(input_amount)?;
+    let pre_b = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &asset_b)?;
     let pre_lp = deps
         .querier
         .query_balance(&env.contract.address, pair_info.liquidity_token.clone())?
@@ -217,8 +317,10 @@ fn execute_zap(
         deps.as_ref(),
         &env,
         &pair_addr,
-        &input_coin.denom,
-        input_coin.amount,
+        &pair_info,
+        &asset_a,
+        &asset_b,
+        input_amount,
         &recipient_addr,
         pre_a,
         pre_b,
@@ -231,10 +333,10 @@ fn execute_zap(
 
     Ok(Response::new()
         .add_messages(plan.msgs)
-        .add_attribute("action", "zap")
+        .add_attribute("action", action_label)
         .add_attribute("pair", pair_addr)
-        .add_attribute("input_denom", input_coin.denom)
-        .add_attribute("input_amount", input_coin.amount)
+        .add_attribute("input", input_info.to_string())
+        .add_attribute("input_amount", input_amount)
         .add_attribute("swap_amount", plan.swap_amount)
         .add_attribute("recipient", recipient_addr))
 }
@@ -244,7 +346,6 @@ fn execute_zap_balance(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
     info: MessageInfo,
-    input_denom: String,
     max_spread: Option<Decimal>,
     slippage_tolerance: Option<Decimal>,
     min_lp_out: Option<Uint128>,
@@ -264,17 +365,11 @@ fn execute_zap_balance(
         .clone()
         .ok_or(ContractError::DefaultRecipientUnset {})?;
 
-    // Route is owner-managed: caller cannot redirect into a fake pair.
-    let pair_addr = ROUTES
-        .may_load(deps.storage, input_denom.as_str())?
-        .ok_or_else(|| ContractError::NoRouteForDenom {
-            denom: input_denom.clone(),
-        })?;
+    // Route is pinned at instantiate — no per-call override is possible.
+    let pair_addr = config.pair.clone();
+    let input = config.input.clone();
 
-    let balance = deps
-        .querier
-        .query_balance(&env.contract.address, input_denom.clone())?
-        .amount;
+    let balance = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &input)?;
     if balance.is_zero() || balance < config.min_zap_amount {
         return Err(ContractError::BalanceBelowMin {
             balance: balance.to_string(),
@@ -282,7 +377,7 @@ fn execute_zap_balance(
         });
     }
 
-    // Tip first, then zap the remainder. After the tip BankMsg fires, the
+    // Tip first, then zap the remainder. After the tip transfer fires, the
     // contract's remaining balance equals exactly `input_amount`, which is
     // what `plan_zap`'s optimal split is computed on.
     let tip = if config.tip_bps == 0 {
@@ -297,23 +392,26 @@ fn execute_zap_balance(
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
     if !tip.is_zero() {
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: info.sender.to_string(),
-            amount: vec![Coin {
-                denom: input_denom.clone(),
-                amount: tip,
-            }],
-        }));
+        messages.push(transfer_asset_msg(&input, &info.sender, tip)?);
     }
 
-    // Drain mode: no snapshots. Everything in the contract gets swept after
-    // the zap. Royalty contract holds only royalties; pre-existing balances
-    // are by definition prior leftovers that belong with the recipient.
+    // Drain mode: no snapshots. The contract is dedicated to one royalty
+    // stream, so any pre-existing balance of the non-input side belongs to a
+    // prior in-flight zap's dust and is fine to bundle into this LP step. The
+    // user-facing `Zap`/`Receive` paths still use snapshot isolation via the
+    // `pre_*` fields; only `ZapBalance` drains.
+    let pair_info: PairInfo = deps
+        .querier
+        .query_wasm_smart(&pair_addr, &PairQueryMsg::Pair {})?;
+    let (asset_a, asset_b) = orient_assets(&pair_info, &input)?;
+
     let plan = plan_zap(
         deps.as_ref(),
         &env,
         &pair_addr,
-        &input_denom,
+        &pair_info,
+        &asset_a,
+        &asset_b,
         input_amount,
         &recipient_addr,
         Uint128::zero(),
@@ -330,7 +428,7 @@ fn execute_zap_balance(
         .add_messages(messages)
         .add_attribute("action", "zap_balance")
         .add_attribute("pair", pair_addr)
-        .add_attribute("input_denom", input_denom)
+        .add_attribute("input", input.to_string())
         .add_attribute("balance", balance)
         .add_attribute("tip", tip)
         .add_attribute("input_amount", input_amount)
@@ -344,22 +442,25 @@ struct ZapPlan {
     swap_amount: Uint128,
 }
 
-/// Shared planner used by both `execute_zap` and `execute_zap_balance`. Reads
-/// pair metadata + reserves, computes the optimal split, and emits the
-/// three-message chain: pair.Swap → self.Callback::ProvideLiquidity →
-/// self.Callback::Sweep.
+/// Shared planner used by `run_zap` and `execute_zap_balance`. Reads pair
+/// reserves, computes the optimal split, and emits the three-message chain:
+/// swap → self.Callback::ProvideLiquidity → self.Callback::Sweep.
+///
+/// The swap message is asymmetric:
+///   - native input → `pair.Swap { offer_asset }` with funds
+///   - CW20 input   → `cw20.Send { contract: pair, msg: Cw20HookMsg::Swap }`
 ///
 /// `pre_a` / `pre_b` / `pre_lp` are the baseline contract balances *not*
 /// belonging to this zap. The callbacks treat them as untouchable — only the
-/// deltas this call generates flow to `recipient`. `execute_zap` passes the
-/// real pre-existing balances (so a user zap can't drain queued royalties);
-/// `execute_zap_balance` passes zeros (drain mode).
+/// deltas this call generates flow to `recipient`.
 #[allow(clippy::too_many_arguments)]
 fn plan_zap(
     deps: Deps<InjectiveQueryWrapper>,
     env: &Env,
     pair_addr: &Addr,
-    input_denom: &str,
+    pair_info: &PairInfo,
+    asset_a: &AssetInfo,
+    asset_b: &AssetInfo,
     input_amount: Uint128,
     recipient: &Addr,
     pre_a: Uint128,
@@ -370,30 +471,10 @@ fn plan_zap(
     min_lp_out: Option<Uint128>,
     deadline: Option<u64>,
 ) -> Result<ZapPlan, ContractError> {
-    let pair_info: PairInfo = deps
-        .querier
-        .query_wasm_smart(pair_addr, &PairQueryMsg::Pair {})?;
-    let denom_0 = native_denom(&pair_info.asset_infos[0])?;
-    let denom_1 = native_denom(&pair_info.asset_infos[1])?;
-    let (denom_a, denom_b) = if input_denom == denom_0 {
-        (denom_0.clone(), denom_1.clone())
-    } else if input_denom == denom_1 {
-        (denom_1.clone(), denom_0.clone())
-    } else {
-        return Err(ContractError::InputDenomMismatch {
-            denom: input_denom.to_string(),
-        });
-    };
-    if denom_a == pair_info.liquidity_token || denom_b == pair_info.liquidity_token {
-        return Err(ContractError::InputDenomMismatch {
-            denom: pair_info.liquidity_token,
-        });
-    }
-
     let pool: PairPoolResponse = deps
         .querier
         .query_wasm_smart(pair_addr, &PairQueryMsg::Pool {})?;
-    let (r_a, _r_b) = orient_reserves(&pool, &denom_a)?;
+    let r_a = orient_reserve(&pool, asset_a)?;
     if pool.total_share.is_zero() || r_a.is_zero() {
         return Err(ContractError::EmptyPool {});
     }
@@ -407,32 +488,14 @@ fn plan_zap(
     let slippage_tolerance =
         slippage_tolerance.unwrap_or_else(|| Decimal::permille(DEFAULT_SLIPPAGE_PERMILLE));
 
-    let swap_msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: pair_addr.to_string(),
-        msg: to_json_binary(&PairExecuteMsg::Swap {
-            offer_asset: Asset {
-                info: AssetInfo::NativeToken {
-                    denom: denom_a.clone(),
-                },
-                amount: swap_amount,
-            },
-            belief_price: None,
-            max_spread: Some(max_spread),
-            to: None,
-            deadline,
-        })?,
-        funds: vec![Coin {
-            denom: denom_a.clone(),
-            amount: swap_amount,
-        }],
-    });
+    let swap_msg = build_swap_msg(pair_addr, asset_a, swap_amount, max_spread, deadline)?;
 
     let provide_cb = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: env.contract.address.to_string(),
         msg: to_json_binary(&ExecuteMsg::Callback(CallbackMsg::ProvideLiquidity {
             pair: pair_addr.to_string(),
-            denom_a: denom_a.clone(),
-            denom_b: denom_b.clone(),
+            asset_a: asset_a.clone(),
+            asset_b: asset_b.clone(),
             pre_a,
             pre_b,
             slippage_tolerance,
@@ -445,9 +508,9 @@ fn plan_zap(
         contract_addr: env.contract.address.to_string(),
         msg: to_json_binary(&ExecuteMsg::Callback(CallbackMsg::Sweep {
             recipient: recipient.to_string(),
-            denom_a,
-            denom_b,
-            lp_denom: pair_info.liquidity_token,
+            asset_a: asset_a.clone(),
+            asset_b: asset_b.clone(),
+            lp_denom: pair_info.liquidity_token.clone(),
             pre_a,
             pre_b,
             pre_lp,
@@ -474,8 +537,8 @@ fn execute_callback(
     match cb {
         CallbackMsg::ProvideLiquidity {
             pair,
-            denom_a,
-            denom_b,
+            asset_a,
+            asset_b,
             pre_a,
             pre_b,
             slippage_tolerance,
@@ -484,8 +547,8 @@ fn execute_callback(
             deps,
             env,
             pair,
-            denom_a,
-            denom_b,
+            asset_a,
+            asset_b,
             pre_a,
             pre_b,
             slippage_tolerance,
@@ -493,15 +556,15 @@ fn execute_callback(
         ),
         CallbackMsg::Sweep {
             recipient,
-            denom_a,
-            denom_b,
+            asset_a,
+            asset_b,
             lp_denom,
             pre_a,
             pre_b,
             pre_lp,
             min_lp_out,
         } => callback_sweep(
-            deps, env, recipient, denom_a, denom_b, lp_denom, pre_a, pre_b, pre_lp, min_lp_out,
+            deps, env, recipient, asset_a, asset_b, lp_denom, pre_a, pre_b, pre_lp, min_lp_out,
         ),
     }
 }
@@ -511,8 +574,8 @@ fn callback_provide_liquidity(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
     pair: String,
-    denom_a: String,
-    denom_b: String,
+    asset_a: AssetInfo,
+    asset_b: AssetInfo,
     pre_a: Uint128,
     pre_b: Uint128,
     slippage_tolerance: Decimal,
@@ -521,14 +584,8 @@ fn callback_provide_liquidity(
     assert_deadline(env.block.time.seconds(), deadline)?;
     let pair_addr = deps.api.addr_validate(&pair)?;
 
-    let bal_a = deps
-        .querier
-        .query_balance(&env.contract.address, denom_a.clone())?
-        .amount;
-    let bal_b = deps
-        .querier
-        .query_balance(&env.contract.address, denom_b.clone())?
-        .amount;
+    let bal_a = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &asset_a)?;
+    let bal_b = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &asset_b)?;
 
     // Work only with the freshly generated balances — pre-existing dust /
     // queued royalties stay untouched. `saturating_sub` is defensive: a pre_*
@@ -545,6 +602,9 @@ fn callback_provide_liquidity(
     // funds get filtered out, and the pair's `share == 0` branch rejects with
     // `InvalidZeroAmount`. Skip the LP step instead and let the sweep forward
     // the unused deltas back to recipient.
+    //
+    // CW20 sides don't suffer the underflow (the pair sets `remain_amount=0`
+    // for them), but we apply the haircut uniformly to keep one code path.
     let one = Uint128::new(1);
     if delta_a <= one || delta_b <= one {
         return Ok(Response::new()
@@ -557,33 +617,45 @@ fn callback_provide_liquidity(
 
     let assets = [
         Asset {
-            info: AssetInfo::NativeToken {
-                denom: denom_a.clone(),
-            },
+            info: asset_a.clone(),
             amount: deposit_a,
         },
         Asset {
-            info: AssetInfo::NativeToken {
-                denom: denom_b.clone(),
-            },
+            info: asset_b.clone(),
             amount: deposit_b,
         },
     ];
 
-    let mut funds = vec![
-        Coin {
-            denom: denom_a.clone(),
-            amount: deposit_a,
-        },
-        Coin {
-            denom: denom_b.clone(),
-            amount: deposit_b,
-        },
-    ];
+    // Build the provide chain: CW20 sides need an IncreaseAllowance hop first
+    // (the pair `TransferFrom`s the deposit), with `Expiration::AtHeight(h+1)`
+    // so any rounding residual auto-expires next block.
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
+    let mut funds: Vec<Coin> = vec![];
+    for (asset, deposit) in [(&asset_a, deposit_a), (&asset_b, deposit_b)] {
+        match asset {
+            AssetInfo::NativeToken { denom } => {
+                funds.push(Coin {
+                    denom: denom.clone(),
+                    amount: deposit,
+                });
+            }
+            AssetInfo::Token { contract_addr } => {
+                messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: contract_addr.clone(),
+                    msg: to_json_binary(&Cw20ExecuteMsg::IncreaseAllowance {
+                        spender: pair_addr.to_string(),
+                        amount: deposit,
+                        expires: Some(Expiration::AtHeight(env.block.height + 1)),
+                    })?,
+                    funds: vec![],
+                }));
+            }
+        }
+    }
     // SDK requires lexicographic ordering on bank funds; the pair doesn't care.
     funds.sort_by(|a, b| a.denom.cmp(&b.denom));
 
-    let provide_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: pair_addr.to_string(),
         msg: to_json_binary(&PairExecuteMsg::ProvideLiquidity {
             assets,
@@ -592,10 +664,10 @@ fn callback_provide_liquidity(
             slippage_tolerance: Some(slippage_tolerance),
         })?,
         funds,
-    });
+    }));
 
     Ok(Response::new()
-        .add_message(provide_msg)
+        .add_messages(messages)
         .add_attribute("action", "zap_provide")
         .add_attribute("deposit_a", deposit_a)
         .add_attribute("deposit_b", deposit_b))
@@ -606,8 +678,8 @@ fn callback_sweep(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
     recipient: String,
-    denom_a: String,
-    denom_b: String,
+    asset_a: AssetInfo,
+    asset_b: AssetInfo,
     lp_denom: String,
     pre_a: Uint128,
     pre_b: Uint128,
@@ -616,14 +688,8 @@ fn callback_sweep(
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let recipient_addr = deps.api.addr_validate(&recipient)?;
 
-    let bal_a = deps
-        .querier
-        .query_balance(&env.contract.address, denom_a.clone())?
-        .amount;
-    let bal_b = deps
-        .querier
-        .query_balance(&env.contract.address, denom_b.clone())?
-        .amount;
+    let bal_a = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &asset_a)?;
+    let bal_b = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &asset_b)?;
     let bal_lp = deps
         .querier
         .query_balance(&env.contract.address, lp_denom.clone())?
@@ -646,41 +712,34 @@ fn callback_sweep(
         }
     }
 
-    let mut coins = vec![];
+    // LP is always native; native dust bundles into the same `BankMsg::Send`
+    // for cheaper gas. CW20 dust goes via `Cw20::Transfer`.
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
+    let mut bank_coins: Vec<Coin> = vec![];
     if !lp_out.is_zero() {
-        coins.push(Coin {
+        bank_coins.push(Coin {
             denom: lp_denom.clone(),
             amount: lp_out,
         });
     }
-    if !dust_a.is_zero() {
-        coins.push(Coin {
-            denom: denom_a.clone(),
-            amount: dust_a,
-        });
-    }
-    if !dust_b.is_zero() {
-        coins.push(Coin {
-            denom: denom_b.clone(),
-            amount: dust_b,
-        });
-    }
+    push_dust(&asset_a, dust_a, &recipient_addr, &mut bank_coins, &mut messages)?;
+    push_dust(&asset_b, dust_b, &recipient_addr, &mut bank_coins, &mut messages)?;
 
-    let mut response = Response::new()
-        .add_attribute("action", "zap_sweep")
-        .add_attribute("recipient", recipient_addr.clone())
-        .add_attribute("lp_amount", lp_out)
-        .add_attribute("dust_a", dust_a)
-        .add_attribute("dust_b", dust_b);
-
-    if !coins.is_empty() {
-        coins.sort_by(|x, y| x.denom.cmp(&y.denom));
-        response = response.add_message(CosmosMsg::Bank(BankMsg::Send {
+    if !bank_coins.is_empty() {
+        bank_coins.sort_by(|x, y| x.denom.cmp(&y.denom));
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
             to_address: recipient_addr.to_string(),
-            amount: coins,
+            amount: bank_coins,
         }));
     }
-    Ok(response)
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "zap_sweep")
+        .add_attribute("recipient", recipient_addr)
+        .add_attribute("lp_amount", lp_out)
+        .add_attribute("dust_a", dust_a)
+        .add_attribute("dust_b", dust_b))
 }
 
 fn execute_update_config(
@@ -733,51 +792,6 @@ fn execute_update_config(
         .add_attribute("min_zap_amount", config.min_zap_amount))
 }
 
-fn execute_register_route(
-    deps: DepsMut<InjectiveQueryWrapper>,
-    info: MessageInfo,
-    input_denom: String,
-    pair: String,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
-    if input_denom.is_empty() {
-        return Err(ContractError::InputDenomMismatch {
-            denom: input_denom,
-        });
-    }
-    let pair_addr = deps.api.addr_validate(&pair)?;
-    let prior = ROUTES.may_load(deps.storage, input_denom.as_str())?;
-    ROUTES.save(deps.storage, input_denom.as_str(), &pair_addr)?;
-    Ok(Response::new()
-        .add_attribute("action", "register_route")
-        .add_attribute("input_denom", input_denom)
-        .add_attribute("pair", pair_addr)
-        .add_attribute(
-            "previous_pair",
-            prior.map(|a| a.to_string()).unwrap_or_else(|| "none".into()),
-        ))
-}
-
-fn execute_unregister_route(
-    deps: DepsMut<InjectiveQueryWrapper>,
-    info: MessageInfo,
-    input_denom: String,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
-    let existed = ROUTES.may_load(deps.storage, input_denom.as_str())?.is_some();
-    ROUTES.remove(deps.storage, input_denom.as_str());
-    Ok(Response::new()
-        .add_attribute("action", "unregister_route")
-        .add_attribute("input_denom", input_denom)
-        .add_attribute("existed", existed.to_string()))
-}
-
 fn execute_add_keeper(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
@@ -817,33 +831,48 @@ fn execute_sweep(
     env: Env,
     info: MessageInfo,
     recipient: String,
-    denoms: Vec<String>,
+    assets: Vec<AssetInfo>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     if info.sender != config.owner {
         return Err(ContractError::Unauthorized {});
     }
     let recipient_addr = deps.api.addr_validate(&recipient)?;
-    let mut coins: Vec<Coin> = vec![];
-    for denom in denoms {
-        let bal = deps
-            .querier
-            .query_balance(&env.contract.address, denom.clone())?;
-        if !bal.amount.is_zero() {
-            coins.push(bal);
+
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
+    let mut bank_coins: Vec<Coin> = vec![];
+    for asset in &assets {
+        let bal =
+            query_asset_balance(&deps.querier, deps.api, &env.contract.address, asset)?;
+        if bal.is_zero() {
+            continue;
+        }
+        match asset {
+            AssetInfo::NativeToken { denom } => bank_coins.push(Coin {
+                denom: denom.clone(),
+                amount: bal,
+            }),
+            AssetInfo::Token { contract_addr } => messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: contract_addr.clone(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: recipient_addr.to_string(),
+                    amount: bal,
+                })?,
+                funds: vec![],
+            })),
         }
     }
-    let mut response = Response::new()
-        .add_attribute("action", "sweep")
-        .add_attribute("recipient", recipient_addr.clone());
-    if !coins.is_empty() {
-        coins.sort_by(|a, b| a.denom.cmp(&b.denom));
-        response = response.add_message(CosmosMsg::Bank(BankMsg::Send {
+    if !bank_coins.is_empty() {
+        bank_coins.sort_by(|a, b| a.denom.cmp(&b.denom));
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
             to_address: recipient_addr.to_string(),
-            amount: coins,
+            amount: bank_coins,
         }));
     }
-    Ok(response)
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "sweep")
+        .add_attribute("recipient", recipient_addr))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -852,37 +881,12 @@ pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> Std
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::SimulateZap {
             pair,
-            input_denom,
+            input,
             input_amount,
-        } => to_json_binary(&query_simulate(deps, pair, input_denom, input_amount)?),
-        QueryMsg::Route { input_denom } => to_json_binary(&query_route(deps, input_denom)?),
-        QueryMsg::Routes {} => to_json_binary(&query_routes(deps)?),
+        } => to_json_binary(&query_simulate(deps, pair, input, input_amount)?),
         QueryMsg::Keepers {} => to_json_binary(&query_keepers(deps)?),
         QueryMsg::IsKeeper { address } => to_json_binary(&query_is_keeper(deps, address)?),
     }
-}
-
-fn query_route(deps: Deps<InjectiveQueryWrapper>, input_denom: String) -> StdResult<RouteResponse> {
-    let pair = ROUTES.may_load(deps.storage, input_denom.as_str())?.ok_or_else(|| {
-        cosmwasm_std::StdError::generic_err(format!("no route for {}", input_denom))
-    })?;
-    Ok(RouteResponse {
-        input_denom,
-        pair: pair.to_string(),
-    })
-}
-
-fn query_routes(deps: Deps<InjectiveQueryWrapper>) -> StdResult<RoutesResponse> {
-    let routes: Vec<RouteResponse> = ROUTES
-        .range(deps.storage, None, None, Order::Ascending)
-        .map(|item| {
-            item.map(|(k, v)| RouteResponse {
-                input_denom: k,
-                pair: v.to_string(),
-            })
-        })
-        .collect::<StdResult<Vec<_>>>()?;
-    Ok(RoutesResponse { routes })
 }
 
 fn query_keepers(deps: Deps<InjectiveQueryWrapper>) -> StdResult<KeepersResponse> {
@@ -910,37 +914,28 @@ fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> 
         default_recipient: c.default_recipient.map(|a| a.to_string()),
         tip_bps: c.tip_bps,
         min_zap_amount: c.min_zap_amount,
+        input: c.input,
+        pair: c.pair.to_string(),
     })
 }
 
 fn query_simulate(
     deps: Deps<InjectiveQueryWrapper>,
     pair: String,
-    input_denom: String,
+    input: AssetInfo,
     input_amount: Uint128,
 ) -> StdResult<SimulateZapResponse> {
     let pair_addr = deps.api.addr_validate(&pair)?;
     let pair_info: PairInfo = deps
         .querier
         .query_wasm_smart(&pair_addr, &PairQueryMsg::Pair {})?;
-    let denom_0 = native_denom(&pair_info.asset_infos[0])
+    let (asset_a, _asset_b) = orient_assets(&pair_info, &input)
         .map_err(|e| cosmwasm_std::StdError::generic_err(e.to_string()))?;
-    let denom_1 = native_denom(&pair_info.asset_infos[1])
-        .map_err(|e| cosmwasm_std::StdError::generic_err(e.to_string()))?;
-    let denom_a = if input_denom == denom_0 {
-        denom_0.clone()
-    } else if input_denom == denom_1 {
-        denom_1.clone()
-    } else {
-        return Err(cosmwasm_std::StdError::generic_err(
-            "input denom does not match pair",
-        ));
-    };
 
     let pool: PairPoolResponse = deps
         .querier
         .query_wasm_smart(&pair_addr, &PairQueryMsg::Pool {})?;
-    let (r_a, _r_b) = orient_reserves(&pool, &denom_a)
+    let r_a = orient_reserve(&pool, &asset_a)
         .map_err(|e| cosmwasm_std::StdError::generic_err(e.to_string()))?;
 
     let swap_amount = optimal_swap_in(r_a, input_amount)
@@ -957,9 +952,7 @@ fn query_simulate(
             &pair_addr,
             &PairQueryMsg::Simulation {
                 offer_asset: Asset {
-                    info: AssetInfo::NativeToken {
-                        denom: denom_a.clone(),
-                    },
+                    info: asset_a.clone(),
                     amount: swap_amount,
                 },
             },
@@ -974,44 +967,139 @@ fn query_simulate(
     })
 }
 
+/// Subset of v1 `Config` used to read pre-migration bytes. v1 had no
+/// `input` / `pair`, so we deserialize what's present and supply the route
+/// from `MigrateMsg`. The orphaned `ROUTES` map entries from v1 are left in
+/// storage — unreachable from v2 code, no functional impact.
+#[derive(serde::Deserialize)]
+struct LegacyConfigV1 {
+    owner: Addr,
+    default_recipient: Option<Addr>,
+    tip_bps: u16,
+    min_zap_amount: Uint128,
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(
     deps: DepsMut<InjectiveQueryWrapper>,
     _env: Env,
-    _msg: MigrateMsg,
+    msg: MigrateMsg,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    Ok(Response::new().add_attribute("action", "migrate"))
+
+    let raw = deps
+        .storage
+        .get(b"config")
+        .ok_or(ContractError::Unauthorized {})?;
+    let legacy: LegacyConfigV1 = cosmwasm_std::from_json(&raw)?;
+
+    let pair = deps.api.addr_validate(&msg.pair)?;
+    let input = validate_asset_info(deps.api, &msg.input)?;
+
+    CONFIG.save(
+        deps.storage,
+        &Config {
+            owner: legacy.owner,
+            default_recipient: legacy.default_recipient,
+            tip_bps: legacy.tip_bps,
+            min_zap_amount: legacy.min_zap_amount,
+            input: input.clone(),
+            pair: pair.clone(),
+        },
+    )?;
+
+    Ok(Response::new()
+        .add_attribute("action", "migrate")
+        .add_attribute("input", input.to_string())
+        .add_attribute("pair", pair))
 }
 
 // ---------- helpers ----------
 
-fn native_denom(info: &AssetInfo) -> Result<String, ContractError> {
-    match info {
-        AssetInfo::NativeToken { denom } => Ok(denom.clone()),
-        AssetInfo::Token { .. } => Err(ContractError::Cw20NotSupported {}),
+fn orient_assets(
+    pair_info: &PairInfo,
+    input: &AssetInfo,
+) -> Result<(AssetInfo, AssetInfo), ContractError> {
+    if pair_info.asset_infos[0].equal(input) {
+        Ok((
+            pair_info.asset_infos[0].clone(),
+            pair_info.asset_infos[1].clone(),
+        ))
+    } else if pair_info.asset_infos[1].equal(input) {
+        Ok((
+            pair_info.asset_infos[1].clone(),
+            pair_info.asset_infos[0].clone(),
+        ))
+    } else {
+        Err(ContractError::InputAssetMismatch {
+            got: input.to_string(),
+        })
     }
 }
 
-fn orient_reserves(
-    pool: &PairPoolResponse,
-    denom_a: &str,
-) -> Result<(Uint128, Uint128), ContractError> {
-    let (r_0, r_1) = (pool.assets[0].amount, pool.assets[1].amount);
-    match (&pool.assets[0].info, &pool.assets[1].info) {
-        (AssetInfo::NativeToken { denom: d0 }, AssetInfo::NativeToken { denom: d1 }) => {
-            if d0 == denom_a {
-                Ok((r_0, r_1))
-            } else if d1 == denom_a {
-                Ok((r_1, r_0))
-            } else {
-                Err(ContractError::InputDenomMismatch {
-                    denom: denom_a.to_string(),
-                })
-            }
-        }
-        _ => Err(ContractError::Cw20NotSupported {}),
+fn orient_reserve(pool: &PairPoolResponse, asset_a: &AssetInfo) -> Result<Uint128, ContractError> {
+    if pool.assets[0].info.equal(asset_a) {
+        Ok(pool.assets[0].amount)
+    } else if pool.assets[1].info.equal(asset_a) {
+        Ok(pool.assets[1].amount)
+    } else {
+        Err(ContractError::InputAssetMismatch {
+            got: asset_a.to_string(),
+        })
     }
+}
+
+fn query_asset_balance(
+    querier: &QuerierWrapper<InjectiveQueryWrapper>,
+    api: &dyn cosmwasm_std::Api,
+    contract: &Addr,
+    info: &AssetInfo,
+) -> StdResult<Uint128> {
+    info.query_pool(querier, api, contract.clone())
+}
+
+fn transfer_asset_msg(
+    info: &AssetInfo,
+    recipient: &Addr,
+    amount: Uint128,
+) -> StdResult<CosmosMsg<InjectiveMsgWrapper>> {
+    match info {
+        AssetInfo::NativeToken { denom } => Ok(CosmosMsg::Bank(BankMsg::Send {
+            to_address: recipient.to_string(),
+            amount: vec![Coin {
+                denom: denom.clone(),
+                amount,
+            }],
+        })),
+        AssetInfo::Token { contract_addr } => Ok(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_addr.clone(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: recipient.to_string(),
+                amount,
+            })?,
+            funds: vec![],
+        })),
+    }
+}
+
+fn push_dust(
+    asset: &AssetInfo,
+    amount: Uint128,
+    recipient: &Addr,
+    bank_coins: &mut Vec<Coin>,
+    messages: &mut Vec<CosmosMsg<InjectiveMsgWrapper>>,
+) -> StdResult<()> {
+    if amount.is_zero() {
+        return Ok(());
+    }
+    match asset {
+        AssetInfo::NativeToken { denom } => bank_coins.push(Coin {
+            denom: denom.clone(),
+            amount,
+        }),
+        AssetInfo::Token { .. } => messages.push(transfer_asset_msg(asset, recipient, amount)?),
+    }
+    Ok(())
 }
 
 fn assert_deadline(blocktime: u64, deadline: Option<u64>) -> Result<(), ContractError> {
@@ -1021,4 +1109,49 @@ fn assert_deadline(blocktime: u64, deadline: Option<u64>) -> Result<(), Contract
         }
     }
     Ok(())
+}
+
+// Build the swap-step message for `plan_zap`.
+//   - Native input: pair.Swap with funds=[offer_asset]
+//   - CW20 input:   cw20.Send(pair, amount, Cw20HookMsg::Swap)
+fn build_swap_msg(
+    pair_addr: &Addr,
+    asset_a: &AssetInfo,
+    amount: Uint128,
+    max_spread: Decimal,
+    deadline: Option<u64>,
+) -> StdResult<CosmosMsg<InjectiveMsgWrapper>> {
+    match asset_a {
+        AssetInfo::NativeToken { denom } => Ok(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: pair_addr.to_string(),
+            msg: to_json_binary(&PairExecuteMsg::Swap {
+                offer_asset: Asset {
+                    info: asset_a.clone(),
+                    amount,
+                },
+                belief_price: None,
+                max_spread: Some(max_spread),
+                to: None,
+                deadline,
+            })?,
+            funds: vec![Coin {
+                denom: denom.clone(),
+                amount,
+            }],
+        })),
+        AssetInfo::Token { contract_addr } => Ok(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_addr.clone(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Send {
+                contract: pair_addr.to_string(),
+                amount,
+                msg: to_json_binary(&PairCw20HookMsg::Swap {
+                    belief_price: None,
+                    max_spread: Some(max_spread),
+                    to: None,
+                    deadline,
+                })?,
+            })?,
+            funds: vec![],
+        })),
+    }
 }

@@ -1,4 +1,4 @@
-use cosmwasm_std::{Decimal256, Uint128, Uint256};
+use cosmwasm_std::{Isqrt, Uint128, Uint256};
 
 use crate::error::ContractError;
 
@@ -42,39 +42,14 @@ const _: () = {
     );
 };
 
-const SCALE_1E18: u128 = 1_000_000_000_000_000_000;
-
 /// Integer square root of a Uint256, floored.
 ///
-/// Uses `Decimal256::sqrt` (10^-18 fixed-point Newton's method) for the heavy
-/// lifting and then walks at most one step in each direction to guarantee the
-/// result is exactly `floor(sqrt(n))`.
+/// Delegates to `Uint256::isqrt` (bit-shift Newton's method that works across
+/// the full Uint256 range). Earlier versions wrapped `Decimal256::sqrt`, which
+/// internally scales by 10^18 and overflows once `radicand > ~1.16e59` — easy
+/// to hit for pairs holding 18-decimal tokens with sizable reserves.
 pub fn isqrt(n: Uint256) -> Result<Uint256, ContractError> {
-    if n.is_zero() {
-        return Ok(Uint256::zero());
-    }
-
-    let scale = Uint256::from(SCALE_1E18);
-    let approx = Decimal256::from_ratio(n, 1u8).sqrt().atomics() / scale;
-
-    let mut s = approx;
-    // Correct any downstream rounding from Decimal256::sqrt(). At most one
-    // step in either direction.
-    let one = Uint256::from(1u128);
-    while s.checked_mul(s).map(|sq| sq > n).unwrap_or(true) {
-        if s.is_zero() {
-            break;
-        }
-        s -= one;
-    }
-    loop {
-        let next = s + one;
-        match next.checked_mul(next) {
-            Ok(sq) if sq <= n => s = next,
-            _ => break,
-        }
-    }
-    Ok(s)
+    Ok(n.isqrt())
 }
 
 /// Optimal-split: given reserve `r_a` of the input side and total input

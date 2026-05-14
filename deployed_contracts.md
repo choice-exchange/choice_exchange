@@ -11,6 +11,7 @@
 | Burn Manager   | 31998   |
 | CW20 Adapter   | 31999   |
 | Router         | 32000   |
+| Zap LP (v2.0.0)| 39459   |
 
 ## Contract Addresses
 
@@ -20,6 +21,21 @@
 | Burn Manager   | `inj1f552m9nfc7ae9c3pc4jhmvpcgjhlkw3tgqd92v`                        |
 | Factory        | `inj18egg5e9p0k2wn03s0vn6k87xfgcpmfq2fzhugp`                        |
 | Router         | `inj1j62jw77t0fk54rq8m5ztk4apu86tawcjgufp7t`                        |
+| Zap LP (UI)    | `inj1zekjv7tsge94da5kxrhds70kvnv9pqc39mtvt4`                        |
+
+### Testnet zap-LP royalty streams
+
+One contract instance per `(input, pair)` royalty stream. All pinned to pair
+`inj1w0l60dw4c8kp73k6wda0ns04hcts37l7nj879r` (CW20 ↔ INJ).
+
+| Stream                           | Address                                      |
+| -------------------------------- | -------------------------------------------- |
+| CW20 royalty (`inj17qld…m69xl7`) | `inj1jhkl8uyk4qp8sa5xmfvxdklyk6g3zuszv2aht5` |
+| INJ royalty (`native:inj`)       | `inj1s3dfkxt4lx0lcsn3k2wkazvwuxfupzd707dmw5` |
+
+Deprecated v1 zap-LP contract `inj1crke0ye0jhace2eryy4mvlna3qluqgyaz4v0md`
+(code id 39458) is neutralized: `default_recipient` cleared, all keepers
+removed. Do not direct new royalty flows at it.
 
 ## Additional Addresses
 

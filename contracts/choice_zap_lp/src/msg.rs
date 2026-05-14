@@ -1,11 +1,14 @@
 use cosmwasm_std::{Decimal, Uint128};
+use cw20::Cw20ReceiveMsg;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use choice::asset::AssetInfo;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct InstantiateMsg {
-    /// Owner with admin rights (UpdateConfig, Sweep, owner-only Zap). Defaults
-    /// to the instantiator.
+    /// Owner with admin rights (UpdateConfig, Sweep, AddKeeper/RemoveKeeper).
+    /// Defaults to the instantiator.
     pub owner: Option<String>,
     /// Recipient of LP+dust for `ZapBalance`. Also the fallback for `Zap`.
     /// `ZapBalance` errors until this is set.
@@ -16,14 +19,24 @@ pub struct InstantiateMsg {
     /// Minimum input-side balance the keeper path will act on. Below this,
     /// `ZapBalance` errors so keepers stop wasting gas.
     pub min_zap_amount: Option<Uint128>,
+    /// Royalty input asset for `ZapBalance`. Immutable post-instantiate.
+    pub input: AssetInfo,
+    /// Royalty target pair for `ZapBalance`. Immutable post-instantiate.
+    pub pair: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
-    /// Owner-only manual zap. Caller sends one native coin in `info.funds`; it
-    /// gets optimally split, swapped, LP'd, and the LP plus any dust go to
-    /// `recipient` (falling back to `default_recipient`).
+    /// Permissionless manual zap for **native input**. Caller sends one native
+    /// coin in `info.funds`; it gets optimally split, swapped, LP'd, and the
+    /// LP plus any dust go to `recipient` (defaulting to `info.sender`).
+    /// Multi-pair: `pair` is passed per-call, independent of the royalty route
+    /// pinned in Config.
+    ///
+    /// For **CW20 input**, do not call this — use `cw20.Send(zap, amount,
+    /// ZapHookMsg::Zap { ... })` on the CW20 contract instead, which routes
+    /// into the `Receive` handler below.
     Zap {
         pair: String,
         recipient: Option<String>,
@@ -37,31 +50,25 @@ pub enum ExecuteMsg {
         deadline: Option<u64>,
     },
 
-    /// Keeper-callable path. Reads the contract's current balance of
-    /// `input_denom`, pays the caller `tip_bps` as a tip, and zaps the
-    /// remainder into the owner-registered route for that denom. LP + dust
-    /// always go to the configured `default_recipient` — no per-call
-    /// override, so a compromised keeper cannot redirect funds.
+    /// CW20 entry point. Triggered when a user calls `cw20.Send(zap, amount,
+    /// ZapHookMsg)` on a CW20 token contract that is one side of the target
+    /// pair. The CW20 contract becomes `info.sender`; the original caller is
+    /// `cw20_msg.sender`. Multi-pair (pair comes from `ZapHookMsg::Zap.pair`).
+    Receive(Cw20ReceiveMsg),
+
+    /// Keeper-callable royalty path. Reads the contract's current balance of
+    /// `Config.input`, pays the caller `tip_bps` as a tip, and zaps the
+    /// remainder into `Config.pair`. LP + dust go to `default_recipient`.
     ///
     /// Caller must be the owner or a registered keeper (see `AddKeeper`).
-    /// Errors if no route is registered for `input_denom`, the balance is
-    /// below `min_zap_amount`, or `default_recipient` is unset.
+    /// Errors if the balance is below `min_zap_amount` or `default_recipient`
+    /// is unset.
     ZapBalance {
-        input_denom: String,
         max_spread: Option<Decimal>,
         slippage_tolerance: Option<Decimal>,
         min_lp_out: Option<Uint128>,
         deadline: Option<u64>,
     },
-
-    /// Owner-only: register or overwrite the `input_denom → pair` route used
-    /// by `ZapBalance`. Overwriting is allowed (a re-register just replaces
-    /// the prior entry).
-    RegisterRoute { input_denom: String, pair: String },
-
-    /// Owner-only: remove a route. Subsequent `ZapBalance` calls for that
-    /// denom will error.
-    UnregisterRoute { input_denom: String },
 
     /// Owner-only: add a keeper address authorized to call `ZapBalance`.
     AddKeeper { address: String },
@@ -70,7 +77,9 @@ pub enum ExecuteMsg {
     RemoveKeeper { address: String },
 
     /// Owner-only: update mutable config fields. Pass `None` to leave a field
-    /// unchanged; pass empty-string `default_recipient` to clear it.
+    /// unchanged; pass empty-string `default_recipient` to clear it. The
+    /// royalty route (`input`, `pair`) is intentionally NOT mutable — to
+    /// change it, instantiate a new contract.
     UpdateConfig {
         owner: Option<String>,
         default_recipient: Option<String>,
@@ -78,15 +87,31 @@ pub enum ExecuteMsg {
         min_zap_amount: Option<Uint128>,
     },
 
-    /// Owner-only rescue: bank-send the given native denoms held by this contract
-    /// to `recipient`. Useful if something gets stuck.
+    /// Owner-only rescue: forward the given assets (native or CW20) held by
+    /// this contract to `recipient`. Useful if something gets stuck.
     Sweep {
         recipient: String,
-        denoms: Vec<String>,
+        assets: Vec<AssetInfo>,
     },
 
     /// Internal sub-step. Only callable by the contract itself.
     Callback(CallbackMsg),
+}
+
+/// Payload of a `cw20.Send(zap, amount, msg)` — the CW20 equivalent of the
+/// `Zap` execute variant. Wire-compatible: the CW20 contract delivers the
+/// tokens and then forwards this binary into the zap's `Receive` handler.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ZapHookMsg {
+    Zap {
+        pair: String,
+        recipient: Option<String>,
+        max_spread: Option<Decimal>,
+        slippage_tolerance: Option<Decimal>,
+        min_lp_out: Option<Uint128>,
+        deadline: Option<u64>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -95,23 +120,31 @@ pub enum CallbackMsg {
     /// After Swap: deposit the **delta** of A and B that this call produced
     /// (`current_balance - pre_*`) into `pair` with receiver=self. The pre_*
     /// snapshots isolate this zap from any pre-existing contract balance,
-    /// which is what makes the user-facing `Zap` path safely permissionless.
+    /// which is what makes the user-facing `Zap` and `Receive` paths safely
+    /// permissionless.
+    ///
+    /// For CW20 sides, this step also emits `IncreaseAllowance(pair,
+    /// deposit, AtHeight(h+1))` before the `ProvideLiquidity` call so the
+    /// pair can `TransferFrom` the CW20 deposit. The allowance auto-expires
+    /// at the next block height.
     ProvideLiquidity {
         pair: String,
-        denom_a: String,
-        denom_b: String,
+        asset_a: AssetInfo,
+        asset_b: AssetInfo,
         pre_a: Uint128,
         pre_b: Uint128,
+        /// Forwarded to the pair as the LP-step slippage gate. Defaults are
+        /// applied in `plan_zap` so this is always a concrete value here.
         slippage_tolerance: Decimal,
         deadline: Option<u64>,
     },
     /// After ProvideLiquidity: forward the LP and dust deltas (current minus
-    /// snapshot) to recipient. Any pre-existing balance — royalties queued
-    /// up before the zap, prior dust, etc. — stays put.
+    /// snapshot) to recipient. Native + LP go via `BankMsg::Send`; CW20 dust
+    /// goes via `Cw20::Transfer`. Pre-existing balances stay put.
     Sweep {
         recipient: String,
-        denom_a: String,
-        denom_b: String,
+        asset_a: AssetInfo,
+        asset_b: AssetInfo,
         lp_denom: String,
         pre_a: Uint128,
         pre_b: Uint128,
@@ -128,13 +161,9 @@ pub enum QueryMsg {
     /// reserves of `pair`. Does not include slippage from the swap itself.
     SimulateZap {
         pair: String,
-        input_denom: String,
+        input: AssetInfo,
         input_amount: Uint128,
     },
-    /// Look up the registered pair for an input denom.
-    Route { input_denom: String },
-    /// List all registered routes.
-    Routes {},
     /// List all keeper addresses (owner is implicitly allowed and not
     /// included).
     Keepers {},
@@ -149,6 +178,10 @@ pub struct ConfigResponse {
     pub default_recipient: Option<String>,
     pub tip_bps: u16,
     pub min_zap_amount: Uint128,
+    /// Immutable royalty route input asset (used by `ZapBalance`).
+    pub input: AssetInfo,
+    /// Immutable royalty route pair address (used by `ZapBalance`).
+    pub pair: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -162,17 +195,6 @@ pub struct SimulateZapResponse {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct RouteResponse {
-    pub input_denom: String,
-    pub pair: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct RoutesResponse {
-    pub routes: Vec<RouteResponse>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct KeepersResponse {
     pub keepers: Vec<String>,
 }
@@ -182,5 +204,11 @@ pub struct IsKeeperResponse {
     pub is_keeper: bool,
 }
 
+/// v1 → v2 migration payload. Pins the royalty route into the new `Config`
+/// shape (`input`, `pair`) and drops the legacy `ROUTES` map. Without these
+/// fields the new code cannot deserialize the old Config.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct MigrateMsg {}
+pub struct MigrateMsg {
+    pub input: AssetInfo,
+    pub pair: String,
+}

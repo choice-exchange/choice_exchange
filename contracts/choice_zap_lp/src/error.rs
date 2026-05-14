@@ -21,11 +21,11 @@ pub enum ContractError {
     #[error("Zap input amount is zero")]
     ZeroInputAmount {},
 
-    #[error("Input denom {denom} does not match either side of the pair")]
-    InputDenomMismatch { denom: String },
+    #[error("Input asset {got} does not match either side of the pair")]
+    InputAssetMismatch { got: String },
 
-    #[error("CW20 pair sides are not supported by this zap")]
-    Cw20NotSupported {},
+    #[error("Receive hook payload must not carry native funds (got {count})")]
+    ReceiveWithFunds { count: usize },
 
     #[error("Pair has no liquidity; zap requires an initialized pool")]
     EmptyPool {},
@@ -50,7 +50,4 @@ pub enum ContractError {
 
     #[error("Caller is not in the keeper allowlist")]
     NotKeeper {},
-
-    #[error("No route registered for input denom {denom}")]
-    NoRouteForDenom { denom: String },
 }

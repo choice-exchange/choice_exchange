@@ -3,6 +3,8 @@ use cw_storage_plus::{Item, Map};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use choice::asset::AssetInfo;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Config {
     pub owner: Addr,
@@ -15,13 +17,16 @@ pub struct Config {
     /// Minimum input-side balance that `ZapBalance` will act on. Below this
     /// the call no-ops (errors). Prevents dust-spam pokes.
     pub min_zap_amount: Uint128,
+    /// Royalty route: input asset that `ZapBalance` drains. Set once at
+    /// instantiate (or migrate) — immutable from execute. One instance per
+    /// `(input, pair)` royalty stream.
+    pub input: AssetInfo,
+    /// Royalty route: pair contract the input is zapped into. Set once at
+    /// instantiate (or migrate) — immutable from execute.
+    pub pair: Addr,
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
-
-/// Owner-managed map from input denom to the target pair address. `ZapBalance`
-/// resolves the pair from this map; the caller cannot redirect into a fake.
-pub const ROUTES: Map<&str, Addr> = Map::new("routes");
 
 /// Owner-managed allowlist of keeper addresses authorized to call
 /// `ZapBalance`. Owner is implicitly allowed and does not need to be in this
