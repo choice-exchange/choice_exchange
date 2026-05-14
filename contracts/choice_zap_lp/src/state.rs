@@ -17,13 +17,15 @@ pub struct Config {
     /// Minimum input-side balance that `ZapBalance` will act on. Below this
     /// the call no-ops (errors). Prevents dust-spam pokes.
     pub min_zap_amount: Uint128,
-    /// Royalty route: input asset that `ZapBalance` drains. Set once at
-    /// instantiate (or migrate) — immutable from execute. One instance per
-    /// `(input, pair)` royalty stream.
-    pub input: AssetInfo,
-    /// Royalty route: pair contract the input is zapped into. Set once at
-    /// instantiate (or migrate) — immutable from execute.
-    pub pair: Addr,
+    /// Royalty route: input asset that `ZapBalance` drains. Optional — when
+    /// unset, `ZapBalance` errors with `RoyaltyRouteUnset`. Settable via
+    /// `UpdateConfig` so a contract can be instantiated lazily and wired to a
+    /// specific royalty stream later.
+    pub input: Option<AssetInfo>,
+    /// Royalty route: pair contract the input is zapped into. Optional —
+    /// when unset, `ZapBalance` errors with `RoyaltyRouteUnset`. Settable via
+    /// `UpdateConfig`.
+    pub pair: Option<Addr>,
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");

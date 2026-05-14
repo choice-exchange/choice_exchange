@@ -1,0 +1,31 @@
+{
+  "network": "testnet",
+  "chain_id": "injective-888",
+  "deployed_at_utc": "2026-05-14T09:24:32Z",
+  "signer": "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz",
+  "dev_multisig": "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz",
+  "treasury": "inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz",
+  "timelock_seconds": 3600,
+  "farm_fee_inj_base": "1000000000000000000",
+  "token_locker_creation_fee": {
+    "amount": "100000000000000000",
+    "denom": "inj"
+  },
+  "code_ids": {
+    "admin_timelock":  39470,
+    "farm":            39471,
+    "farm_factory":    39472,
+    "zap_lp":          39473,
+    "token_locker":    39474
+  },
+  "addresses": {
+    "admin_timelock":  "inj163xsz38hz67vc33f790d0v6yjkv677qq9v80dh",
+    "farm_factory":    "inj1r5jyqlh3qskaty5na22z7arzdpz70705elzje0",
+    "zap_lp":          "inj1jwdc7muk0jled0ysh5urmju9kyxamujk45nrwk",
+    "token_locker":    "inj1vz579dn0efkmmcvlmp3wwqgahyqnuv2an2u26v"
+  },
+  "deferred_rotations": [
+    "factory.config.owner  inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz → inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz  (propose_new_owner + 48h + apply_owner_rotation)",
+    "timelock.config.owner inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz → inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz  (propose_new_owner + 3600s + apply_owner_rotation)"
+  ]
+}

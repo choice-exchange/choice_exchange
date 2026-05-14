@@ -431,6 +431,24 @@ fn parse_instantiated_addr(reply: &Reply) -> StdResult<String> {
     ))
 }
 
+/// Mutates `fee_collector`, `instantiate_fee_inj`, and `farm_owner` immediately
+/// on owner signature — **no timelock**. Pre-mainnet audit flagged this as
+/// asymmetric with `ProposeUpdateFarmCodeId` / `ProposeNewOwner` (both
+/// timelocked) and with the farm-side `ProposeUpdateConfig` (timelocked).
+///
+/// Risk accepted: a compromised factory `owner` can (a) redirect future launch
+/// fees by swapping `fee_collector`, (b) set a malicious `farm_owner` for
+/// farms spawned *after* the swap (existing farms are unaffected — their
+/// owner is canonicalized at instantiate time), or (c) brick farm creation
+/// by setting an absurd `instantiate_fee_inj`. None of these can drain user
+/// funds from already-spawned farms; the worst case is launch-fee theft and
+/// griefing of future creators.
+///
+/// Mitigation: the factory's `owner` must be the governance multisig /
+/// `choice_admin_timelock`. Hold the key in cold storage with the same
+/// operational discipline as the wasm-admin key. If the centralization
+/// surface ever expands (e.g., factory gains the power to migrate spawned
+/// farms), this function MUST be timelocked.
 fn execute_update_config(
     deps: DepsMut,
     info: MessageInfo,

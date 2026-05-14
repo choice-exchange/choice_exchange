@@ -67,8 +67,14 @@ pub fn instantiate(
         });
     }
     let min_zap_amount = msg.min_zap_amount.unwrap_or_default();
-    let pair = deps.api.addr_validate(&msg.pair)?;
-    let input = validate_asset_info(deps.api, &msg.input)?;
+    let pair = msg
+        .pair
+        .map(|p| deps.api.addr_validate(&p))
+        .transpose()?;
+    let input = msg
+        .input
+        .map(|i| validate_asset_info(deps.api, &i))
+        .transpose()?;
 
     CONFIG.save(
         deps.storage,
@@ -93,8 +99,19 @@ pub fn instantiate(
         )
         .add_attribute("tip_bps", tip_bps.to_string())
         .add_attribute("min_zap_amount", min_zap_amount)
-        .add_attribute("input", input.to_string())
-        .add_attribute("pair", pair))
+        .add_attribute(
+            "input",
+            input
+                .as_ref()
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        )
+        .add_attribute(
+            "pair",
+            pair.as_ref()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        ))
 }
 
 /// Bech32-validate the contract address embedded in a `Token` variant. Empty
@@ -169,7 +186,18 @@ pub fn execute(
             default_recipient,
             tip_bps,
             min_zap_amount,
-        } => execute_update_config(deps, info, owner, default_recipient, tip_bps, min_zap_amount),
+            input,
+            pair,
+        } => execute_update_config(
+            deps,
+            info,
+            owner,
+            default_recipient,
+            tip_bps,
+            min_zap_amount,
+            input,
+            pair,
+        ),
         ExecuteMsg::Sweep { recipient, assets } => {
             execute_sweep(deps, env, info, recipient, assets)
         }
@@ -374,9 +402,16 @@ fn execute_zap_balance(
         .clone()
         .ok_or(ContractError::DefaultRecipientUnset {})?;
 
-    // Route is pinned at instantiate — no per-call override is possible.
-    let pair_addr = config.pair.clone();
-    let input = config.input.clone();
+    // Route must be wired (instantiate accepted None; the owner sets it later
+    // via UpdateConfig). Refuse to drain anything until both sides are set.
+    let pair_addr = config
+        .pair
+        .clone()
+        .ok_or(ContractError::RoyaltyRouteUnset {})?;
+    let input = config
+        .input
+        .clone()
+        .ok_or(ContractError::RoyaltyRouteUnset {})?;
 
     let balance = query_asset_balance(&deps.querier, deps.api, &env.contract.address, &input)?;
     if balance.is_zero() || balance < config.min_zap_amount {
@@ -757,6 +792,7 @@ fn callback_sweep(
         .add_attribute("dust_b", dust_b))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_update_config(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
@@ -764,6 +800,8 @@ fn execute_update_config(
     default_recipient: Option<String>,
     tip_bps: Option<u16>,
     min_zap_amount: Option<Uint128>,
+    input: Option<AssetInfo>,
+    pair: Option<String>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
     if info.sender != config.owner {
@@ -792,6 +830,12 @@ fn execute_update_config(
     if let Some(m) = min_zap_amount {
         config.min_zap_amount = m;
     }
+    if let Some(i) = input {
+        config.input = Some(validate_asset_info(deps.api, &i)?);
+    }
+    if let Some(p) = pair {
+        config.pair = Some(deps.api.addr_validate(&p)?);
+    }
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new()
         .add_attribute("action", "update_config")
@@ -804,7 +848,23 @@ fn execute_update_config(
                 .unwrap_or_else(|| "none".to_string()),
         )
         .add_attribute("tip_bps", config.tip_bps.to_string())
-        .add_attribute("min_zap_amount", config.min_zap_amount))
+        .add_attribute("min_zap_amount", config.min_zap_amount)
+        .add_attribute(
+            "input",
+            config
+                .input
+                .as_ref()
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        )
+        .add_attribute(
+            "pair",
+            config
+                .pair
+                .as_ref()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        ))
 }
 
 fn execute_add_keeper(
@@ -930,7 +990,7 @@ fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> 
         tip_bps: c.tip_bps,
         min_zap_amount: c.min_zap_amount,
         input: c.input,
-        pair: c.pair.to_string(),
+        pair: c.pair.map(|a| a.to_string()),
     })
 }
 
@@ -1031,8 +1091,8 @@ pub fn migrate(
                     default_recipient: legacy.default_recipient,
                     tip_bps: legacy.tip_bps,
                     min_zap_amount: legacy.min_zap_amount,
-                    input: input.clone(),
-                    pair: pair.clone(),
+                    input: Some(input.clone()),
+                    pair: Some(pair.clone()),
                 },
             )?;
 

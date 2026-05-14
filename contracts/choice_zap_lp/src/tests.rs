@@ -41,8 +41,10 @@ fn cw20(addr: &Addr) -> AssetInfo {
 }
 
 /// Default route used by tests that don't otherwise care: native INJ routed
-/// into a deterministic mock pair address. The royalty (input, pair) pair is
-/// required at instantiate time as of v2, so every test threads it through.
+/// into a deterministic mock pair address. The royalty (input, pair) is now
+/// optional at instantiate time; tests that exercise `ZapBalance` need both
+/// set, so this helper returns them wrapped in `Some(..)` ready to thread into
+/// `InstantiateMsg`.
 fn default_route(api: &MockApi) -> (AssetInfo, String) {
     (native("inj"), api.addr_make("pair").to_string())
 }
@@ -62,8 +64,8 @@ fn do_instantiate(
             default_recipient: None,
             tip_bps: None,
             min_zap_amount: None,
-            input,
-            pair,
+            input: Some(input),
+            pair: Some(pair),
         },
     )
     .unwrap();
@@ -87,8 +89,8 @@ fn do_instantiate_with_defaults(
             default_recipient,
             tip_bps,
             min_zap_amount,
-            input,
-            pair,
+            input: Some(input),
+            pair: Some(pair),
         },
     )
     .unwrap();
@@ -574,8 +576,8 @@ fn instantiate_rejects_tip_over_cap() {
             default_recipient: None,
             tip_bps: Some(101),
             min_zap_amount: None,
-            input,
-            pair,
+            input: Some(input),
+            pair: Some(pair),
         },
     )
     .unwrap_err();
@@ -596,6 +598,8 @@ fn update_config_rejects_tip_over_cap() {
             default_recipient: None,
             tip_bps: Some(500),
             min_zap_amount: None,
+            input: None,
+            pair: None,
         },
     )
     .unwrap_err();
@@ -795,6 +799,8 @@ fn update_config_owner_only() {
             default_recipient: Some(new_treasury),
             tip_bps: None,
             min_zap_amount: None,
+            input: None,
+            pair: None,
         },
     )
     .unwrap_err();
@@ -818,6 +824,8 @@ fn update_config_owner_can_update() {
             default_recipient: Some(new_treasury_str),
             tip_bps: Some(50),
             min_zap_amount: Some(Uint128::new(123_456)),
+            input: None,
+            pair: None,
         },
     )
     .unwrap();
@@ -844,6 +852,8 @@ fn update_config_empty_default_clears() {
             default_recipient: Some(treasury),
             tip_bps: None,
             min_zap_amount: None,
+            input: None,
+            pair: None,
         },
     )
     .unwrap();
@@ -856,6 +866,8 @@ fn update_config_empty_default_clears() {
             default_recipient: Some(String::new()),
             tip_bps: None,
             min_zap_amount: None,
+            input: None,
+            pair: None,
         },
     )
     .unwrap();
@@ -909,8 +921,8 @@ fn migrate_v1_to_v2_preserves_config_and_pins_route() {
     assert_eq!(config.tip_bps, 25);
     assert_eq!(config.min_zap_amount, Uint128::new(1_000));
     // v2 fields come from MigrateMsg.
-    assert_eq!(config.input, cw20(&token));
-    assert_eq!(config.pair, pair);
+    assert_eq!(config.input, Some(cw20(&token)));
+    assert_eq!(config.pair, Some(pair));
     // cw2 version bumped.
     assert_eq!(
         cw2::get_contract_version(&deps.storage).unwrap().version,
@@ -942,8 +954,8 @@ fn migrate_from_v1_rejected_on_v2_contract() {
 
     // Config untouched.
     let config = crate::state::CONFIG.load(&deps.storage).unwrap();
-    assert_eq!(config.input, native("inj"));
-    assert_ne!(config.pair, new_pair);
+    assert_eq!(config.input, Some(native("inj")));
+    assert_ne!(config.pair, Some(new_pair));
 }
 
 #[test]

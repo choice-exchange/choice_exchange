@@ -19,10 +19,12 @@ pub struct InstantiateMsg {
     /// Minimum input-side balance the keeper path will act on. Below this,
     /// `ZapBalance` errors so keepers stop wasting gas.
     pub min_zap_amount: Option<Uint128>,
-    /// Royalty input asset for `ZapBalance`. Immutable post-instantiate.
-    pub input: AssetInfo,
-    /// Royalty target pair for `ZapBalance`. Immutable post-instantiate.
-    pub pair: String,
+    /// Royalty input asset for `ZapBalance`. Optional — leave unset for a
+    /// lazy deploy and wire it later via `UpdateConfig` once the stream is
+    /// ready. `ZapBalance` errors with `RoyaltyRouteUnset` while unset.
+    pub input: Option<AssetInfo>,
+    /// Royalty target pair for `ZapBalance`. Same lazy semantics as `input`.
+    pub pair: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -78,13 +80,17 @@ pub enum ExecuteMsg {
 
     /// Owner-only: update mutable config fields. Pass `None` to leave a field
     /// unchanged; pass empty-string `default_recipient` to clear it. The
-    /// royalty route (`input`, `pair`) is intentionally NOT mutable — to
-    /// change it, instantiate a new contract.
+    /// royalty route (`input`, `pair`) is now settable here so a contract
+    /// instantiated with `input`/`pair` unset can be wired to a stream later.
+    /// Owner = governance multisig, so route mutability is bounded by the
+    /// same trust as `Sweep`.
     UpdateConfig {
         owner: Option<String>,
         default_recipient: Option<String>,
         tip_bps: Option<u16>,
         min_zap_amount: Option<Uint128>,
+        input: Option<AssetInfo>,
+        pair: Option<String>,
     },
 
     /// Owner-only rescue: forward the given assets (native or CW20) held by
@@ -178,10 +184,10 @@ pub struct ConfigResponse {
     pub default_recipient: Option<String>,
     pub tip_bps: u16,
     pub min_zap_amount: Uint128,
-    /// Immutable royalty route input asset (used by `ZapBalance`).
-    pub input: AssetInfo,
-    /// Immutable royalty route pair address (used by `ZapBalance`).
-    pub pair: String,
+    /// Royalty route input asset used by `ZapBalance`. `None` until wired.
+    pub input: Option<AssetInfo>,
+    /// Royalty route pair address used by `ZapBalance`. `None` until wired.
+    pub pair: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

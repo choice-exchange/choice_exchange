@@ -67,7 +67,7 @@ store_contract() {
         return 1
     fi
     local tx_output txhash query_output code_id
-    tx_output=$(yes "$PASSWORD" | injectived tx wasm store "$wasm_path" \
+    tx_output=$(printf '%s\n' "$PASSWORD" | injectived tx wasm store "$wasm_path" \
         --from="$FROM" \
         --chain-id="$CHAIN_ID" \
         --yes --fees="$FEES" --gas="$GAS" \
@@ -101,7 +101,7 @@ instantiate_contract() {
     else
         admin_flag="--admin=$admin"
     fi
-    tx_output=$(yes "$PASSWORD" | injectived tx wasm instantiate "$code_id" "$init_msg" \
+    tx_output=$(printf '%s\n' "$PASSWORD" | injectived tx wasm instantiate "$code_id" "$init_msg" \
         --label="$label" \
         $admin_flag \
         --from="$FROM" \

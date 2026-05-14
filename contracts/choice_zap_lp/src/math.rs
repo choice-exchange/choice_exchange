@@ -10,13 +10,22 @@ use crate::error::ContractError;
 /// downstream `slippage_tolerance` on `ProvideLiquidity` catches gross
 /// mismatches via `MaxSlippageAssertion`, so a stale constant fails gracefully
 /// at the LP step rather than silently mis-allocating funds.
+///
+/// Only consumed by the `const _` sanity block below (and the `#[cfg(test)]`
+/// `simulate_swap_return`); `#[allow(dead_code)]` because rustc's dead-code
+/// lint doesn't see const-expression uses.
+#[allow(dead_code)]
 const COMMISSION_RATE_PERMILLE: u128 = 3;
 
 /// Fraction of the commission that STAYS in the pool (= LP-accrued fee). The
 /// pair's swap splits `commission_amount` 6-ways: 1/6 burn, 1/6 fee_wallet,
 /// the rest stays — see `choice_pair/src/contract.rs` (`fee_wallet_amount`,
 /// `burn_amount`, `lp_amount`). Net `1 - 1/6 - 1/6 = 4/6 = 2/3` stays.
+///
+/// See `COMMISSION_RATE_PERMILLE` for the dead-code-allow rationale.
+#[allow(dead_code)]
 const POOL_KEEP_NUM: u128 = 4;
+#[allow(dead_code)]
 const POOL_KEEP_DEN: u128 = 6;
 
 // ---- Coefficients of the corrected optimal-split quadratic ----

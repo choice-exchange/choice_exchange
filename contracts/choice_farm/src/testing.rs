@@ -2330,6 +2330,204 @@ fn test_migrate_staking_preserves_bonded_stake() {
     assert_eq!(info.pending_reward, Uint128::from(1_000_000u128));
 }
 
+/// Pre-mainnet audit gap: exercise `apply_migrate_staking` when the reward
+/// token and staking token are the SAME CW20. The contract holds
+/// `bond + reward` in one denom; without the `reserved_for_bonded` guard at
+/// `contract.rs:616` the migration would forward the staker's principal to
+/// the new staking contract.
+#[test]
+fn test_migrate_staking_same_token_does_not_drain_bond() {
+    let mut deps = mock_dependencies(&[]);
+    let start = mock_env().block.time.seconds();
+    let shared_addr = deps.api.addr_make("shared0000");
+    let owner = deps.api.addr_make("addr0000");
+    let staker = deps.api.addr_make("staker");
+    let funder = deps.api.addr_make("funder");
+    let contract_addr = mock_env().contract.address.to_string();
+
+    let msg = InstantiateMsg {
+        owner: owner.to_string(),
+        reward_token: AssetInfo::Token {
+            contract_addr: shared_addr.to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: shared_addr.to_string(),
+        },
+        distribution_schedule: vec![(start, start + 100, Uint128::from(1_000_000u128))],
+    };
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&owner, &[]),
+        msg,
+    )
+    .unwrap();
+
+    // Fund 2_000_000 via the shared CW20. Mock balance bumped first so the
+    // M-1 reconcile inside receive_cw20 sees the delta.
+    deps.querier.set_cw20_balance(
+        shared_addr.to_string(),
+        contract_addr.clone(),
+        Uint128::from(2_000_000u128),
+    );
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&shared_addr, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: funder.to_string(),
+            amount: Uint128::from(2_000_000u128),
+            msg: to_json_binary(&Cw20HookMsg::Fund {}).unwrap(),
+        }),
+    )
+    .unwrap();
+
+    // Bond 100 of the same CW20.
+    deps.querier.set_cw20_balance(
+        shared_addr.to_string(),
+        contract_addr.clone(),
+        Uint128::from(2_000_100u128),
+    );
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&shared_addr, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: staker.to_string(),
+            amount: Uint128::from(100u128),
+            msg: to_json_binary(&Cw20HookMsg::Bond {}).unwrap(),
+        }),
+    )
+    .unwrap();
+
+    // Propose at t = start + 50 then apply after the timelock — schedule
+    // fully elapses, so the sole bonder is credited the entire 1_000_000.
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(50);
+    let new_staking = deps.api.addr_make("newstaking").to_string();
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeMigrateStaking {
+            new_staking_contract: new_staking.clone(),
+        },
+    )
+    .unwrap();
+
+    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::ApplyMigrateStaking {},
+    )
+    .unwrap();
+
+    // Must forward only the reward half (1_000_000 unfunded + 0 dust). The
+    // 100-unit bond + 1_000_000 already-credited pending stay in the contract.
+    // A buggy version that omits the same-token guard would ship 1_000_100
+    // (draining the staker's principal) or 2_000_100 (draining bond + pending).
+    let remaining_attr = res
+        .attributes
+        .iter()
+        .find(|a| a.key == "remaining_amount")
+        .unwrap();
+    assert_eq!(
+        remaining_attr.value, "1000000",
+        "same-token migration must reserve total_bond_amount AND unclaimed_pending"
+    );
+
+    assert_eq!(res.messages.len(), 1, "expected one outbound Cw20::Transfer");
+    match &res.messages[0].msg {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: cw20_addr,
+            msg,
+            ..
+        }) => {
+            assert_eq!(cw20_addr, &shared_addr.to_string());
+            let parsed: Cw20ExecuteMsg = from_json(msg).unwrap();
+            match parsed {
+                Cw20ExecuteMsg::Transfer { recipient, amount } => {
+                    assert_eq!(recipient, new_staking);
+                    assert_eq!(amount, Uint128::from(1_000_000u128));
+                }
+                other => panic!("expected Transfer, got {:?}", other),
+            }
+        }
+        other => panic!("expected Wasm execute, got {:?}", other),
+    }
+
+    // State sanity: bond intact, pending credited, schedule drained.
+    let mut env_after = mock_env();
+    env_after.block.time = env_after
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 51);
+    let state_res = query(deps.as_ref(), env_after.clone(), QueryMsg::State { block_time: None }).unwrap();
+    let state: StateResponse = from_json(&state_res).unwrap();
+    assert_eq!(state.total_bond_amount, Uint128::from(100u128));
+    assert_eq!(state.undistributed_rewards, Uint128::zero());
+
+    // Staker can still unbond their principal — emits a Cw20::Transfer of 100.
+    let unbond_res = execute(
+        deps.as_mut(),
+        env_after.clone(),
+        message_info(&staker, &[]),
+        ExecuteMsg::Unbond {
+            amount: Uint128::from(100u128),
+        },
+    )
+    .unwrap();
+    let unbond_msg = unbond_res
+        .messages
+        .iter()
+        .find_map(|m| match &m.msg {
+            CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. })
+                if contract_addr == &shared_addr.to_string() =>
+            {
+                from_json::<Cw20ExecuteMsg>(msg).ok()
+            }
+            _ => None,
+        })
+        .expect("unbond must emit a Cw20::Transfer of the shared denom");
+    match unbond_msg {
+        Cw20ExecuteMsg::Transfer { recipient, amount } => {
+            assert_eq!(recipient, staker.to_string());
+            assert_eq!(amount, Uint128::from(100u128));
+        }
+        other => panic!("expected Transfer, got {:?}", other),
+    }
+
+    // Pending 1_000_000 must still be withdrawable from the reserved balance.
+    let withdraw_res = execute(
+        deps.as_mut(),
+        env_after,
+        message_info(&staker, &[]),
+        ExecuteMsg::Withdraw {},
+    )
+    .unwrap();
+    let withdraw_msg = withdraw_res
+        .messages
+        .iter()
+        .find_map(|m| match &m.msg {
+            CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. })
+                if contract_addr == &shared_addr.to_string() =>
+            {
+                from_json::<Cw20ExecuteMsg>(msg).ok()
+            }
+            _ => None,
+        })
+        .expect("withdraw must emit a Cw20::Transfer of the shared denom");
+    match withdraw_msg {
+        Cw20ExecuteMsg::Transfer { recipient, amount } => {
+            assert_eq!(recipient, staker.to_string());
+            assert_eq!(amount, Uint128::from(1_000_000u128));
+        }
+        other => panic!("expected Transfer, got {:?}", other),
+    }
+}
+
 /// H-1 regression: a single bonder with bond_amount=1 must not be able to brick
 /// the farm by waiting for a high-emission schedule to push
 /// `distributed / total_bond_amount` past Decimal::MAX (~3.4e20). Before the

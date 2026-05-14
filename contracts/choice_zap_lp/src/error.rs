@@ -48,6 +48,9 @@ pub enum ContractError {
     #[error("default_recipient must be set before ZapBalance can run")]
     DefaultRecipientUnset {},
 
+    #[error("royalty route (input + pair) must be set before ZapBalance can run")]
+    RoyaltyRouteUnset {},
+
     #[error("Caller is not in the keeper allowlist")]
     NotKeeper {},
 
