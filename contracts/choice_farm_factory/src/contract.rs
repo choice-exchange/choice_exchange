@@ -239,11 +239,15 @@ fn execute_create_farm(
 
     let farm_id = NEXT_FARM_ID.load(deps.storage)?;
     let fee_collector_addr = deps.api.addr_humanize(&config.fee_collector)?;
-    // `farm_owner` is the Choice governance multisig: it becomes both the
-    // farm's `Config.owner` AND the wasm `admin` of the spawned farm. The
-    // user who called `CreateFarm` and paid the fee is recorded as
-    // `FarmRecord.operator` for off-chain attribution only — they have no
-    // on-chain role on the farm contract.
+    // Two distinct addresses are installed on the spawned farm:
+    //   - wasm `admin`        = `config.farm_owner` (the protocol timelock).
+    //     Controls `MsgMigrateContract` against the farm — protocol-gated.
+    //   - farm `Config.owner` = `info.sender` (the creator).
+    //     Controls `AddSchedules`, `Fund`, `ProposeUpdateConfig`,
+    //     `ProposeNewOwner`, etc. — creator-self-service.
+    // Separating these lets the protocol keep the kill-switch on the wasm
+    // code while letting the creator manage their own farm's reward
+    // schedules without going through the multisig for every change.
     let farm_owner_addr = deps.api.addr_humanize(&config.farm_owner)?;
 
     PENDING_FARM.save(
@@ -296,18 +300,16 @@ fn execute_create_farm(
     // 3. Spawn the farm with empty `funds`. The reply forwards the reward via
     //    `Fund {}` so `undistributed_rewards` is credited atomically.
     //
-    //    Both the farm's `Config.owner` AND the wasm `admin` are set to the
-    //    governance multisig (`farm_owner`) — NOT the factory, NOT the
-    //    operator. This means:
-    //      - The user paying the launch fee has no admin powers on the farm.
-    //      - The multisig can `MigrateContract` the farm if a fix ships.
-    //      - The factory itself has no special role on the farm post-launch.
+    //    wasm `admin` = `farm_owner` (timelock) — protocol controls code
+    //    migrations on the farm.
+    //    `Config.owner` = `info.sender` (creator) — creator self-serves
+    //    schedule changes, funding, etc.
     response = response.add_submessage(SubMsg::reply_on_success(
         WasmMsg::Instantiate {
             admin: Some(farm_owner_addr.to_string()),
             code_id: config.farm_code_id,
             msg: to_json_binary(&FarmInstantiateMsg {
-                owner: farm_owner_addr.to_string(),
+                owner: info.sender.to_string(),
                 reward_token,
                 staking_token,
                 distribution_schedule,

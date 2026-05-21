@@ -1,21 +1,23 @@
 use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, CosmosMsg, SubMsg, Uint128, WasmMsg,
+    coins, from_json, to_json_binary, Binary, Coin, CosmosMsg, SubMsg, Uint128, WasmMsg,
 };
 
 use crate::contract::{
-    execute, instantiate, query, ConfigResponse, ExecuteMsg, InstantiateMsg,
-    PendingMigrationResponse, PendingOwnerRotationResponse, QueryMsg,
+    execute, instantiate, query, ConfigResponse, ExecuteMsg, InstantiateMsg, PendingActionResponse,
+    PendingOwnerRotationResponse, QueryMsg,
 };
-use crate::state::MIN_TIMELOCK_SECONDS;
+use crate::state::{ProposedAction, MIN_TIMELOCK_SECONDS};
 
 const TIMELOCK: u64 = 48 * 60 * 60;
 
-fn setup() -> (cosmwasm_std::OwnedDeps<
+type Deps = cosmwasm_std::OwnedDeps<
     cosmwasm_std::testing::MockStorage,
     cosmwasm_std::testing::MockApi,
     cosmwasm_std::testing::MockQuerier,
->, cosmwasm_std::Addr) {
+>;
+
+fn setup() -> (Deps, cosmwasm_std::Addr) {
     let mut deps = mock_dependencies();
     let owner = deps.api.addr_make("owner");
     let deployer = deps.api.addr_make("deployer");
@@ -30,6 +32,22 @@ fn setup() -> (cosmwasm_std::OwnedDeps<
     )
     .unwrap();
     (deps, owner)
+}
+
+fn migrate_action(contract: &str, code_id: u64, msg: Binary) -> ProposedAction {
+    ProposedAction::Migrate {
+        contract: contract.to_string(),
+        code_id,
+        msg,
+    }
+}
+
+fn execute_action(contract: &str, msg: Binary, funds: Vec<Coin>) -> ProposedAction {
+    ProposedAction::Execute {
+        contract: contract.to_string(),
+        msg,
+        funds,
+    }
 }
 
 #[test]
@@ -60,61 +78,53 @@ fn instantiate_records_config() {
 }
 
 #[test]
-fn propose_apply_full_path() {
+fn propose_migrate_apply_full_path() {
     let (mut deps, owner) = setup();
     let target = deps.api.addr_make("farm0000");
     let mut env = mock_env();
 
-    // Outsider can't propose.
     let outsider = deps.api.addr_make("outsider");
     let err = execute(
         deps.as_mut(),
         env.clone(),
         message_info(&outsider, &[]),
         ExecuteMsg::Propose {
-            contract: target.to_string(),
-            code_id: 99,
-            msg: Binary::default(),
+            action: migrate_action(target.as_str(), 99, Binary::default()),
         },
     )
     .unwrap_err();
     assert!(err.to_string().contains("unauthorized"));
 
-    // code_id zero rejected.
     let err = execute(
         deps.as_mut(),
         env.clone(),
         message_info(&owner, &[]),
         ExecuteMsg::Propose {
-            contract: target.to_string(),
-            code_id: 0,
-            msg: Binary::default(),
+            action: migrate_action(target.as_str(), 0, Binary::default()),
         },
     )
     .unwrap_err();
     assert!(err.to_string().contains("code_id must be non-zero"));
 
-    // Owner proposes.
+    let migrate_msg = to_json_binary(&Uint128::from(7u128)).unwrap();
     execute(
         deps.as_mut(),
         env.clone(),
         message_info(&owner, &[]),
         ExecuteMsg::Propose {
-            contract: target.to_string(),
-            code_id: 99,
-            msg: to_json_binary(&Uint128::from(7u128)).unwrap(),
+            action: migrate_action(target.as_str(), 99, migrate_msg.clone()),
         },
     )
     .unwrap();
 
-    let pending: PendingMigrationResponse =
-        from_json(query(deps.as_ref(), env.clone(), QueryMsg::PendingMigration {}).unwrap())
-            .unwrap();
-    assert_eq!(pending.contract, Some(target.to_string()));
-    assert_eq!(pending.code_id, Some(99));
+    let pending: PendingActionResponse =
+        from_json(query(deps.as_ref(), env.clone(), QueryMsg::PendingAction {}).unwrap()).unwrap();
+    assert_eq!(
+        pending.action,
+        Some(migrate_action(target.as_str(), 99, migrate_msg.clone()))
+    );
     assert_eq!(pending.effective_at, Some(env.block.time.seconds() + TIMELOCK));
 
-    // Premature apply rejected.
     let err = execute(
         deps.as_mut(),
         env.clone(),
@@ -122,9 +132,8 @@ fn propose_apply_full_path() {
         ExecuteMsg::Apply {},
     )
     .unwrap_err();
-    assert!(err.to_string().contains("migration timelock has not elapsed"));
+    assert!(err.to_string().contains("action timelock has not elapsed"));
 
-    // After timelock elapses, *anyone* can apply.
     env.block.time = env.block.time.plus_seconds(TIMELOCK + 1);
     let res = execute(
         deps.as_mut(),
@@ -134,20 +143,128 @@ fn propose_apply_full_path() {
     )
     .unwrap();
 
-    // It dispatches WasmMsg::Migrate as itself.
     assert_eq!(
         res.messages,
         vec![SubMsg::new(CosmosMsg::Wasm(WasmMsg::Migrate {
             contract_addr: target.to_string(),
             new_code_id: 99,
-            msg: to_json_binary(&Uint128::from(7u128)).unwrap(),
+            msg: migrate_msg,
         }))]
     );
 
-    // Pending cleared.
-    let pending: PendingMigrationResponse =
-        from_json(query(deps.as_ref(), env, QueryMsg::PendingMigration {}).unwrap()).unwrap();
-    assert_eq!(pending.contract, None);
+    let pending: PendingActionResponse =
+        from_json(query(deps.as_ref(), env, QueryMsg::PendingAction {}).unwrap()).unwrap();
+    assert_eq!(pending.action, None);
+}
+
+#[test]
+fn propose_execute_apply_full_path() {
+    let (mut deps, owner) = setup();
+    let farm = deps.api.addr_make("farm0000");
+    let creator = deps.api.addr_make("creator");
+    let mut env = mock_env();
+
+    // ProposeNewOwner-on-farm payload — opaque from the timelock's POV.
+    // Opaque payload from the timelock's POV — any Binary is forwarded as-is.
+    let rotate_msg = to_json_binary(&Uint128::from(creator.as_str().len() as u128)).unwrap();
+
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::Propose {
+            action: execute_action(farm.as_str(), rotate_msg.clone(), vec![]),
+        },
+    )
+    .unwrap();
+
+    let pending: PendingActionResponse =
+        from_json(query(deps.as_ref(), env.clone(), QueryMsg::PendingAction {}).unwrap()).unwrap();
+    assert_eq!(
+        pending.action,
+        Some(execute_action(farm.as_str(), rotate_msg.clone(), vec![]))
+    );
+
+    env.block.time = env.block.time.plus_seconds(TIMELOCK + 1);
+    let outsider = deps.api.addr_make("outsider");
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&outsider, &[]),
+        ExecuteMsg::Apply {},
+    )
+    .unwrap();
+
+    assert_eq!(
+        res.messages,
+        vec![SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: farm.to_string(),
+            msg: rotate_msg,
+            funds: vec![],
+        }))]
+    );
+}
+
+#[test]
+fn propose_execute_carries_funds() {
+    let (mut deps, owner) = setup();
+    let farm = deps.api.addr_make("farm0000");
+    let mut env = mock_env();
+    let fund_msg = to_json_binary(&Uint128::from(1u128)).unwrap();
+    let funds = coins(1_000_000_000_000_000_000u128, "inj");
+
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::Propose {
+            action: execute_action(farm.as_str(), fund_msg.clone(), funds.clone()),
+        },
+    )
+    .unwrap();
+
+    env.block.time = env.block.time.plus_seconds(TIMELOCK + 1);
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::Apply {},
+    )
+    .unwrap();
+
+    assert_eq!(
+        res.messages,
+        vec![SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: farm.to_string(),
+            msg: fund_msg,
+            funds,
+        }))]
+    );
+}
+
+#[test]
+fn propose_execute_rejects_zero_amount_funds() {
+    let (mut deps, owner) = setup();
+    let farm = deps.api.addr_make("farm0000");
+    let env = mock_env();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::Propose {
+            action: execute_action(
+                farm.as_str(),
+                Binary::default(),
+                vec![Coin {
+                    denom: "inj".to_string(),
+                    amount: Uint128::zero(),
+                }],
+            ),
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("zero-amount coin in funds"));
 }
 
 #[test]
@@ -161,14 +278,11 @@ fn cancel_clears_pending() {
         env.clone(),
         message_info(&owner, &[]),
         ExecuteMsg::Propose {
-            contract: target.to_string(),
-            code_id: 99,
-            msg: Binary::default(),
+            action: migrate_action(target.as_str(), 99, Binary::default()),
         },
     )
     .unwrap();
 
-    // Outsider cancel rejected.
     let outsider = deps.api.addr_make("outsider");
     let err = execute(
         deps.as_mut(),
@@ -187,13 +301,13 @@ fn cancel_clears_pending() {
     )
     .unwrap();
 
-    let pending: PendingMigrationResponse =
-        from_json(query(deps.as_ref(), env, QueryMsg::PendingMigration {}).unwrap()).unwrap();
-    assert_eq!(pending.contract, None);
+    let pending: PendingActionResponse =
+        from_json(query(deps.as_ref(), env, QueryMsg::PendingAction {}).unwrap()).unwrap();
+    assert_eq!(pending.action, None);
 }
 
 #[test]
-fn re_propose_resets_timer() {
+fn re_propose_resets_timer_and_overwrites_action() {
     let (mut deps, owner) = setup();
     let target = deps.api.addr_make("farm0000");
     let mut env = mock_env();
@@ -203,31 +317,31 @@ fn re_propose_resets_timer() {
         env.clone(),
         message_info(&owner, &[]),
         ExecuteMsg::Propose {
-            contract: target.to_string(),
-            code_id: 1,
-            msg: Binary::default(),
+            action: migrate_action(target.as_str(), 1, Binary::default()),
         },
     )
     .unwrap();
 
     env.block.time = env.block.time.plus_seconds(TIMELOCK - 100);
 
+    // Switch from Migrate to Execute; timer + action both reset.
+    let exec_msg = to_json_binary(&Uint128::from(1u128)).unwrap();
     execute(
         deps.as_mut(),
         env.clone(),
         message_info(&owner, &[]),
         ExecuteMsg::Propose {
-            contract: target.to_string(),
-            code_id: 2,
-            msg: Binary::default(),
+            action: execute_action(target.as_str(), exec_msg.clone(), vec![]),
         },
     )
     .unwrap();
 
-    let pending: PendingMigrationResponse =
-        from_json(query(deps.as_ref(), env.clone(), QueryMsg::PendingMigration {}).unwrap())
-            .unwrap();
-    assert_eq!(pending.code_id, Some(2));
+    let pending: PendingActionResponse =
+        from_json(query(deps.as_ref(), env.clone(), QueryMsg::PendingAction {}).unwrap()).unwrap();
+    assert_eq!(
+        pending.action,
+        Some(execute_action(target.as_str(), exec_msg, vec![]))
+    );
     assert_eq!(pending.effective_at, Some(env.block.time.seconds() + TIMELOCK));
 }
 
@@ -237,7 +351,6 @@ fn owner_rotation_timelocked() {
     let mut env = mock_env();
     let new_owner = deps.api.addr_make("new_owner");
 
-    // Outsider can't propose.
     let outsider = deps.api.addr_make("outsider");
     let err = execute(
         deps.as_mut(),
@@ -271,7 +384,6 @@ fn owner_rotation_timelocked() {
     .unwrap();
     assert_eq!(pending.pending_owner, Some(new_owner.to_string()));
 
-    // Premature apply rejected.
     let err = execute(
         deps.as_mut(),
         env.clone(),

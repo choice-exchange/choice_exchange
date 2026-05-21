@@ -1,6 +1,6 @@
 [package]
 name = "choice-farm-factory"
-version = "1.1.2"
+version = "1.2.0"
 authors = ["Dan Van Eijck"]
 edition = "2018"
 description = "Gateway factory that instantiates choice-farm contracts, collects the INJ launch fee, and maintains the on-chain registry of UI-launched farms"

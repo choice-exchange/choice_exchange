@@ -1201,6 +1201,379 @@ fn test_update_config_slot_duration_cap_rejected() {
     }
 }
 
+/// Native-reward setup fixture for `AddSchedules` funding tests. Uses
+/// "uatom" so funds attached look distinct from the test framework's
+/// default "uusd".
+fn instantiate_for_add_schedules_native() -> (TestDeps, cosmwasm_std::Addr) {
+    let mut deps = mock_dependencies(&[]);
+    let owner = deps.api.addr_make("gov0000");
+    let start = mock_env().block.time.seconds();
+    let msg = InstantiateMsg {
+        owner: owner.to_string(),
+        reward_token: AssetInfo::NativeToken {
+            denom: "uatom".to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: deps.api.addr_make("staking0000").to_string(),
+        },
+        distribution_schedule: vec![(
+            start + 1000,
+            start + 1100,
+            Uint128::from(1_000_000u128),
+        )],
+    };
+    instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
+    (deps, owner)
+}
+
+/// CW20-reward happy path: caller pre-approves the farm (assumed at the
+/// cw20 contract level — not modeled here), then `AddSchedules` dispatches
+/// `Cw20::TransferFrom` for the exact total. Schedule is appended; outsiders
+/// rejected.
+#[test]
+fn test_add_schedules_cw20_happy_path() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+    let outsider = deps.api.addr_make("outsider");
+    let reward_cw20 = deps.api.addr_make("reward0000");
+
+    let original = vec![(start + 1000, start + 1100, Uint128::from(1_000_000u128))];
+
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&outsider, &[]),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(start + 2000, start + 2100, Uint128::from(500u128))],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert_eq!(msg, "unauthorized"),
+        _ => panic!("expected unauthorized"),
+    }
+
+    let added = vec![
+        (start + 2000, start + 2100, Uint128::from(500u128)),
+        (start + 3000, start + 3100, Uint128::from(750u128)),
+    ];
+    let total: Uint128 = added.iter().map(|s| s.2).sum();
+
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::AddSchedules {
+            schedules: added.clone(),
+        },
+    )
+    .unwrap();
+
+    // Response carries exactly one message: a TransferFrom against the cw20
+    // reward token pulling `total` from the caller into the farm.
+    assert_eq!(res.messages.len(), 1);
+    match &res.messages[0].msg {
+        cosmwasm_std::CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
+            contract_addr,
+            msg,
+            funds,
+        }) => {
+            assert_eq!(contract_addr, &reward_cw20.to_string());
+            assert!(funds.is_empty());
+            let parsed: cw20::Cw20ExecuteMsg = from_json(msg).unwrap();
+            match parsed {
+                cw20::Cw20ExecuteMsg::TransferFrom {
+                    owner: from,
+                    recipient,
+                    amount,
+                } => {
+                    assert_eq!(from, owner.to_string());
+                    assert_eq!(recipient, env.contract.address.to_string());
+                    assert_eq!(amount, total);
+                }
+                other => panic!("expected TransferFrom, got {:?}", other),
+            }
+        }
+        other => panic!("expected Wasm::Execute, got {:?}", other),
+    }
+
+    // Schedule appended in order.
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), env.clone(), QueryMsg::Config {}).unwrap()).unwrap();
+    let mut expected = original;
+    expected.extend(added);
+    assert_eq!(cfg.distribution_schedule, expected);
+
+    // undistributed_rewards credited inline (TransferFrom hasn't run yet but
+    // the parent tx will revert atomically if it fails).
+    let st: StateResponse =
+        from_json(query(deps.as_ref(), env, QueryMsg::State { block_time: None }).unwrap())
+            .unwrap();
+    assert_eq!(st.undistributed_rewards, total);
+}
+
+/// CW20-reward farm with native funds attached → rejected. The cw20 path
+/// pulls via TransferFrom; native funds attached would be a footgun
+/// (silently swept into the farm's bank balance without crediting).
+#[test]
+fn test_add_schedules_cw20_with_funds_rejected() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &cosmwasm_std::coins(500, "uatom")),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(start + 2000, start + 2100, Uint128::from(500u128))],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("cw20 reward farm takes no native funds"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected cw20-funds rejection"),
+    }
+}
+
+/// Native-reward happy path: caller attaches exactly `sum_of_new_emissions`
+/// of the reward denom; handler credits `undistributed_rewards` inline and
+/// appends the schedule. No TransferFrom message dispatched.
+#[test]
+fn test_add_schedules_native_happy_path() {
+    let (mut deps, owner) = instantiate_for_add_schedules_native();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    let added = vec![
+        (start + 2000, start + 2100, Uint128::from(500u128)),
+        (start + 3000, start + 3100, Uint128::from(750u128)),
+    ];
+    let total: Uint128 = added.iter().map(|s| s.2).sum();
+
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &cosmwasm_std::coins(total.u128(), "uatom")),
+        ExecuteMsg::AddSchedules {
+            schedules: added.clone(),
+        },
+    )
+    .unwrap();
+    assert!(res.messages.is_empty(), "native path takes no submessages");
+    assert_eq!(
+        res.attributes
+            .iter()
+            .find(|a| a.key == "funded")
+            .map(|a| a.value.as_str()),
+        Some(total.to_string().as_str()),
+    );
+
+    let st: StateResponse =
+        from_json(query(deps.as_ref(), env, QueryMsg::State { block_time: None }).unwrap())
+            .unwrap();
+    assert_eq!(st.undistributed_rewards, total);
+}
+
+/// Native-reward: no funds → reject. Mirrors `CreateFarm`'s exact-amount
+/// requirement.
+#[test]
+fn test_add_schedules_native_missing_funds_rejected() {
+    let (mut deps, owner) = instantiate_for_add_schedules_native();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(start + 2000, start + 2100, Uint128::from(500u128))],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("native reward farm requires exactly one coin in funds"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected funds-missing rejection"),
+    }
+}
+
+/// Native-reward: wrong denom → reject.
+#[test]
+fn test_add_schedules_native_wrong_denom_rejected() {
+    let (mut deps, owner) = instantiate_for_add_schedules_native();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &cosmwasm_std::coins(500, "inj")),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(start + 2000, start + 2100, Uint128::from(500u128))],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("wrong denom in funds"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected wrong-denom rejection"),
+    }
+}
+
+/// Native-reward: wrong amount → reject. Caller must send exactly the new
+/// schedules' total emission so the credited `undistributed_rewards`
+/// matches what the schedule will pay out.
+#[test]
+fn test_add_schedules_native_wrong_amount_rejected() {
+    let (mut deps, owner) = instantiate_for_add_schedules_native();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &cosmwasm_std::coins(499, "uatom")),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(start + 2000, start + 2100, Uint128::from(500u128))],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("funds amount mismatch"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected amount-mismatch rejection"),
+    }
+}
+
+/// AddSchedules: empty list is a user error and is rejected so the caller
+/// can't accidentally no-op-burn gas.
+#[test]
+fn test_add_schedules_empty_rejected() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let env = mock_env();
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::AddSchedules { schedules: vec![] },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert_eq!(msg, "schedules must be non-empty"),
+        _ => panic!("expected non-empty rejection"),
+    }
+}
+
+/// AddSchedules: every new slot must start strictly in the future. A slot
+/// whose start has already passed (or equals `last_distributed`) is rejected,
+/// so the call can never retroactively grant rewards.
+#[test]
+fn test_add_schedules_past_start_rejected() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let env = mock_env();
+    let now = env.block.time.seconds();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(now - 10, now + 100, Uint128::one())],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("must start strictly after last_distributed"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected past-start rejection"),
+    }
+}
+
+/// AddSchedules: the combined list still has to satisfy
+/// `validate_distribution_schedule`, including the per-slot duration cap.
+#[test]
+fn test_add_schedules_slot_duration_cap_rejected() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    let too_long = crate::state::MAX_SCHEDULE_SLOT_DURATION_SECONDS + 1;
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(start + 1000, start + 1000 + too_long, Uint128::one())],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("slot duration exceeds max"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected slot-duration rejection"),
+    }
+}
+
+/// AddSchedules: rejected while a ProposeUpdateConfig is pending. If we
+/// allowed it, an Apply of the pending update would overwrite the entire
+/// distribution_schedule and silently drop the appended slots.
+#[test]
+fn test_add_schedules_rejected_when_pending_update() {
+    let (mut deps, owner) = instantiate_for_update_config_tests();
+    let env = mock_env();
+    let start = env.block.time.seconds();
+
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        ExecuteMsg::ProposeUpdateConfig {
+            distribution_schedule: vec![(start + 1000, start + 1100, Uint128::from(1u128))],
+        },
+    )
+    .unwrap();
+
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&owner, &[]),
+        ExecuteMsg::AddSchedules {
+            schedules: vec![(start + 5000, start + 5100, Uint128::one())],
+        },
+    )
+    .unwrap_err();
+    match err {
+        StdError::GenericErr { msg, .. } => assert!(
+            msg.contains("cannot add schedules while a config update is pending"),
+            "got: {}",
+            msg
+        ),
+        _ => panic!("expected pending-update rejection"),
+    }
+}
+
 #[test]
 fn test_instantiate_and_query_native_reward_token() {
     let mut deps = mock_dependencies(&[]);

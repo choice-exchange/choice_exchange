@@ -187,6 +187,7 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
         } => propose_update_config(deps, env, info, distribution_schedule),
         ExecuteMsg::ApplyUpdateConfig {} => apply_update_config(deps, env, info),
         ExecuteMsg::CancelUpdateConfigProposal {} => cancel_update_config_proposal(deps, info),
+        ExecuteMsg::AddSchedules { schedules } => add_schedules(deps, env, info, schedules),
         ExecuteMsg::ProposeNewOwner { new_owner } => {
             propose_new_owner(deps, env, info, new_owner)
         }
@@ -540,6 +541,139 @@ pub fn cancel_update_config_proposal(
     PENDING_CONFIG_UPDATE.remove(deps.storage);
 
     Ok(Response::new().add_attribute("action", "cancel_update_config_proposal"))
+}
+
+/// Owner-only fast path: append future-only schedule slots AND atomically
+/// fund the required reward, mirroring `CreateFarm`. No timelock.
+///
+/// Additivity is enforced (existing slots are not touched; new slots must
+/// start strictly after `last_distributed`), so stakers can never be made
+/// worse off — they may only earn more in a future window.
+///
+/// Funding rules (must cover exactly `sum_of_new_emissions`):
+/// - Native reward token: caller attaches `info.funds = [{denom: reward_denom,
+///   amount: sum}]` — credited inline to `state.undistributed_rewards`.
+/// - CW20 reward token: caller pre-approves via `IncreaseAllowance(spender=<farm>,
+///   amount=sum)`; the handler dispatches `Cw20::TransferFrom(sender → farm)`
+///   as a follow-up message. If the TransferFrom fails (e.g. allowance too
+///   low), the whole tx reverts atomically, so the credit + schedule append
+///   are also rolled back.
+///
+/// Rejected if a `ProposeUpdateConfig` is currently queued: an `Apply` of
+/// that pending proposal would overwrite `config.distribution_schedule`
+/// wholesale and clobber the slots added here. Cancel it first.
+pub fn add_schedules(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    schedules: Vec<(u64, u64, Uint128)>,
+) -> StdResult<Response> {
+    let mut config: Config = read_config(deps.storage)?;
+    let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
+    if sender_addr_raw != config.owner {
+        return Err(StdError::generic_err("unauthorized"));
+    }
+    if schedules.is_empty() {
+        return Err(StdError::generic_err("schedules must be non-empty"));
+    }
+    if PENDING_CONFIG_UPDATE.may_load(deps.storage)?.is_some() {
+        return Err(StdError::generic_err(
+            "cannot add schedules while a config update is pending; cancel it first",
+        ));
+    }
+
+    // Flush accrued credits against the OLD schedule so `last_distributed`
+    // reflects real block time before we enforce the "future-only" guard.
+    // Mirrors the prologue in `apply_update_config`.
+    let mut state: State = read_state(deps.storage)?;
+    compute_reward(&config, &mut state, env.block.time.seconds());
+
+    let mut total_new = Uint128::zero();
+    for s in &schedules {
+        if s.0 <= state.last_distributed {
+            return Err(StdError::generic_err(
+                "add_schedules: every new slot must start strictly after last_distributed",
+            ));
+        }
+        total_new = total_new.checked_add(s.2)?;
+    }
+    if total_new.is_zero() {
+        // validate_distribution_schedule also rejects zero per-slot, but bail
+        // early so the funding branch below never has to reason about a
+        // zero-amount Cw20 TransferFrom (which most cw20-bases reject).
+        return Err(StdError::generic_err("total new reward must be non-zero"));
+    }
+
+    // Branch on reward kind for funding. Either branch credits
+    // `undistributed_rewards` synchronously; the cw20 branch additionally
+    // queues a TransferFrom that will succeed-or-revert the whole tx.
+    let mut response = Response::new();
+    match &config.reward_token {
+        AssetInfo::NativeToken { denom } => {
+            if info.funds.len() != 1 {
+                return Err(StdError::generic_err(format!(
+                    "add_schedules: native reward farm requires exactly one coin in funds \
+                     ({} {}); got {} coin(s)",
+                    total_new, denom, info.funds.len()
+                )));
+            }
+            let received = &info.funds[0];
+            if received.denom != *denom {
+                return Err(StdError::generic_err(format!(
+                    "add_schedules: wrong denom in funds. Expected {}, got {}",
+                    denom, received.denom
+                )));
+            }
+            if received.amount != total_new {
+                return Err(StdError::generic_err(format!(
+                    "add_schedules: funds amount mismatch. Expected {} (sum of new \
+                     emissions), got {}",
+                    total_new, received.amount
+                )));
+            }
+            state.undistributed_rewards =
+                state.undistributed_rewards.checked_add(total_new)?;
+        }
+        AssetInfo::Token { contract_addr } => {
+            if !info.funds.is_empty() {
+                return Err(StdError::generic_err(
+                    "add_schedules: cw20 reward farm takes no native funds; \
+                     pre-approve via Cw20::IncreaseAllowance and the handler \
+                     will pull tokens via TransferFrom",
+                ));
+            }
+            state.undistributed_rewards =
+                state.undistributed_rewards.checked_add(total_new)?;
+            // Adding as a regular message (not a submessage) keeps semantics
+            // simple: if TransferFrom fails — insufficient allowance, sender
+            // balance, etc — the whole tx reverts including the state
+            // changes above. No reply handler needed.
+            response = response.add_message(CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: contract_addr.clone(),
+                msg: to_json_binary(&Cw20ExecuteMsg::TransferFrom {
+                    owner: info.sender.to_string(),
+                    recipient: env.contract.address.to_string(),
+                    amount: total_new,
+                })?,
+                funds: vec![],
+            }));
+        }
+    }
+    store_state(deps.storage, &state)?;
+
+    let added_count = schedules.len();
+    config.distribution_schedule.extend(schedules);
+    // Re-runs all per-slot checks (duration cap, non-zero amount, start<end)
+    // and enforces the MAX_SCHEDULE_SLOTS cap on the combined list.
+    validate_distribution_schedule(&config.distribution_schedule)?;
+    store_config(deps.storage, &config)?;
+
+    Ok(response.add_attributes(vec![
+        ("action", "add_schedules"),
+        ("added", added_count.to_string().as_str()),
+        ("total_slots", config.distribution_schedule.len().to_string().as_str()),
+        ("funded", total_new.to_string().as_str()),
+    ]))
 }
 
 /// Owner proposes a migration target. The actual fund-forwarding is gated

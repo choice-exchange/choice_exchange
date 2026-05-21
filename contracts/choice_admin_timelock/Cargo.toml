@@ -1,9 +1,9 @@
 [package]
 name = "choice-admin-timelock"
-version = "1.1.2"
+version = "1.2.0"
 authors = ["Dan Van Eijck"]
 edition = "2018"
-description = "Timelock contract that holds wasm-admin powers for Choice farm + factory contracts. Delays MsgMigrateContract by a configurable timelock so users have an exit window before code can change under them."
+description = "Timelock contract that holds wasm-admin powers for Choice farm + factory contracts. Queues either MsgMigrateContract or arbitrary MsgExecuteContract via Propose/Apply with a configurable delay, so users have an exit window before code or state changes under them."
 license = "Apache-2.0"
 
 exclude = [

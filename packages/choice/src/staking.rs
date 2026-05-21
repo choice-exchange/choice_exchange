@@ -7,10 +7,12 @@ use cw20::Cw20ReceiveMsg;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
-    /// Address that holds owner privileges (`UpdateConfig`,
-    /// `ProposeMigrateStaking`, `ProposeNewOwner`). For factory-spawned farms
-    /// this is the Choice governance multisig — NOT the user who paid the
-    /// launch fee, who is treated as a one-shot operator with no on-chain role.
+    /// Address that holds farm-level owner privileges (`AddSchedules`,
+    /// `ProposeUpdateConfig`, `ProposeMigrateStaking`, `ProposeNewOwner`).
+    /// For factory-spawned farms (≥ choice-farm-factory 1.2) this is the
+    /// creator — the wallet that called `CreateFarm` and paid the launch
+    /// fee. The wasm admin (controls code migrations) is set separately to
+    /// the protocol timelock.
     pub owner: String,
     pub reward_token: AssetInfo,
     pub staking_token: AssetInfo,
@@ -49,7 +51,9 @@ pub enum ExecuteMsg {
     /// `ProposeMigrateStaking`, the change cannot take effect until
     /// `TIMELOCK_DELAY_SECONDS` have elapsed so stakers have an exit window if
     /// they distrust the new schedule. Re-proposing overwrites the pending
-    /// proposal and resets the timer.
+    /// proposal and resets the timer. Use for *destructive* changes (removing
+    /// or shrinking a future slot); for purely additive changes prefer
+    /// `AddSchedules`, which has no exit-window justification.
     ProposeUpdateConfig {
         distribution_schedule: Vec<(u64, u64, Uint128)>,
     },
@@ -57,6 +61,28 @@ pub enum ExecuteMsg {
     ApplyUpdateConfig {},
     /// Owner-only. Clears a pending schedule update proposal.
     CancelUpdateConfigProposal {},
+    /// Owner-only fast path: append future-only schedule slots AND fund the
+    /// required reward in the same tx. No timelock. Strictly additive —
+    /// nothing existing is removed or modified, so every staker is at least
+    /// as well off after the call as before, and the staker exit-window
+    /// argument behind `ProposeUpdateConfig` does not apply.
+    ///
+    /// Funding is atomic with the schedule change, mirroring `CreateFarm`:
+    /// - Native reward token: caller attaches `info.funds = [{reward_denom,
+    ///   sum_of_new_emissions}]`. Wrong denom or wrong amount → reject.
+    /// - CW20 reward token: caller pre-approves the farm via
+    ///   `IncreaseAllowance(spender=<farm>, amount=sum_of_new_emissions)`;
+    ///   the handler dispatches `Cw20::TransferFrom` and `info.funds` must
+    ///   be empty.
+    ///
+    /// All slots must have `start > state.last_distributed` (computed at call
+    /// time) and must pass the same per-slot duration / non-zero amount /
+    /// max-slots validation as `ProposeUpdateConfig`. Rejected if a
+    /// `ProposeUpdateConfig` is currently pending — cancel it first so the
+    /// pending apply does not clobber the appended slots.
+    AddSchedules {
+        schedules: Vec<(u64, u64, Uint128)>,
+    },
     /// H-4 follow-through: owner proposes a new owner. The rotation cannot
     /// take effect until `TIMELOCK_DELAY_SECONDS` have elapsed, giving users
     /// a window to exit if they distrust the incoming operator. Proposing

@@ -3,7 +3,7 @@ use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
     to_json_binary, Binary, CanonicalAddr, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Response,
-    StdError, StdResult, WasmMsg,
+    StdError, StdResult, Storage, WasmMsg,
 };
 
 use cw2::{get_contract_version, set_contract_version};
@@ -11,7 +11,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::state::{
-    Config, PendingMigration, CONFIG, MIN_TIMELOCK_SECONDS, PENDING_MIGRATION,
+    Config, PendingAction, ProposedAction, CONFIG, LEGACY_PENDING_MIGRATION_KEY,
+    MIN_TIMELOCK_SECONDS, PENDING_ACTION,
 };
 
 const CONTRACT_NAME: &str = "crates.io:choice-admin-timelock";
@@ -26,19 +27,16 @@ pub struct InstantiateMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
-    /// Owner queues a `MsgMigrateContract` against `contract` to `code_id`.
-    /// Apply unlocks `timelock_seconds` from now. Re-proposing overwrites the
-    /// pending proposal and resets the timer.
-    Propose {
-        contract: String,
-        code_id: u64,
-        msg: Binary,
-    },
+    /// Owner queues a `ProposedAction` (either a `Migrate` against another
+    /// contract or a generic `Execute` against any contract this timelock
+    /// has authority over). Apply unlocks `timelock_seconds` from now.
+    /// Re-proposing overwrites the pending proposal and resets the timer.
+    Propose { action: ProposedAction },
     /// Anyone can apply once the timelock has elapsed — the contract
-    /// dispatches `WasmMsg::Migrate` as itself. Public on purpose: users who
-    /// see a queued migration can settle it without depending on the owner.
+    /// dispatches the queued `WasmMsg` as itself. Public on purpose: users
+    /// who see a queued action can settle it without depending on the owner.
     Apply {},
-    /// Owner clears a pending migration.
+    /// Owner clears a pending action.
     Cancel {},
     /// Owner proposes a new owner. Rotation cannot take effect until the
     /// timelock has elapsed.
@@ -57,7 +55,7 @@ pub struct MigrateMsg {}
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
     Config {},
-    PendingMigration {},
+    PendingAction {},
     PendingOwnerRotation {},
 }
 
@@ -68,10 +66,8 @@ pub struct ConfigResponse {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct PendingMigrationResponse {
-    pub contract: Option<String>,
-    pub code_id: Option<u64>,
-    pub msg: Option<Binary>,
+pub struct PendingActionResponse {
+    pub action: Option<ProposedAction>,
     pub effective_at: Option<u64>,
 }
 
@@ -122,11 +118,7 @@ pub fn instantiate(
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> StdResult<Response> {
     match msg {
-        ExecuteMsg::Propose {
-            contract,
-            code_id,
-            msg,
-        } => execute_propose(deps, env, info, contract, code_id, msg),
+        ExecuteMsg::Propose { action } => execute_propose(deps, env, info, action),
         ExecuteMsg::Apply {} => execute_apply(deps, env),
         ExecuteMsg::Cancel {} => execute_cancel(deps, info),
         ExecuteMsg::ProposeNewOwner { new_owner } => {
@@ -145,64 +137,99 @@ fn assert_owner(deps: Deps, sender: &str, config: &Config) -> StdResult<()> {
     Ok(())
 }
 
+fn validate_action(deps: Deps, action: &ProposedAction) -> StdResult<()> {
+    match action {
+        ProposedAction::Migrate {
+            contract, code_id, ..
+        } => {
+            deps.api.addr_validate(contract)?;
+            if *code_id == 0 {
+                return Err(StdError::generic_err("code_id must be non-zero"));
+            }
+        }
+        ProposedAction::Execute {
+            contract, funds, ..
+        } => {
+            deps.api.addr_validate(contract)?;
+            for coin in funds {
+                if coin.amount.is_zero() {
+                    return Err(StdError::generic_err("zero-amount coin in funds"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn execute_propose(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    contract: String,
-    code_id: u64,
-    msg: Binary,
+    action: ProposedAction,
 ) -> StdResult<Response> {
     let config = CONFIG.load(deps.storage)?;
     assert_owner(deps.as_ref(), info.sender.as_str(), &config)?;
-
-    let validated_contract = deps.api.addr_validate(&contract)?;
-    if code_id == 0 {
-        return Err(StdError::generic_err("code_id must be non-zero"));
-    }
+    validate_action(deps.as_ref(), &action)?;
 
     let effective_at = env.block.time.seconds() + config.timelock_seconds;
-    PENDING_MIGRATION.save(
+    PENDING_ACTION.save(
         deps.storage,
-        &PendingMigration {
-            contract: validated_contract.to_string(),
-            code_id,
-            msg: msg.clone(),
+        &PendingAction {
+            action: action.clone(),
             effective_at,
         },
     )?;
 
+    let (kind, contract, code_id) = action_summary(&action);
     Ok(Response::new().add_attributes(vec![
         ("action", "propose"),
-        ("contract", validated_contract.as_str()),
-        ("code_id", code_id.to_string().as_str()),
+        ("kind", kind),
+        ("contract", contract.as_str()),
+        ("code_id", code_id.as_str()),
         ("effective_at", effective_at.to_string().as_str()),
     ]))
 }
 
 fn execute_apply(deps: DepsMut, env: Env) -> StdResult<Response> {
-    let pending = PENDING_MIGRATION
+    let pending = PENDING_ACTION
         .may_load(deps.storage)?
-        .ok_or_else(|| StdError::generic_err("no pending migration"))?;
+        .ok_or_else(|| StdError::generic_err("no pending action"))?;
 
     if env.block.time.seconds() < pending.effective_at {
-        return Err(StdError::generic_err("migration timelock has not elapsed"));
+        return Err(StdError::generic_err("action timelock has not elapsed"));
     }
 
-    PENDING_MIGRATION.remove(deps.storage);
+    PENDING_ACTION.remove(deps.storage);
 
-    let migrate_msg = CosmosMsg::Wasm(WasmMsg::Migrate {
-        contract_addr: pending.contract.clone(),
-        new_code_id: pending.code_id,
-        msg: pending.msg,
-    });
+    let (kind, contract, code_id) = action_summary(&pending.action);
+    let cosmos_msg: CosmosMsg = match pending.action {
+        ProposedAction::Migrate {
+            contract,
+            code_id,
+            msg,
+        } => CosmosMsg::Wasm(WasmMsg::Migrate {
+            contract_addr: contract,
+            new_code_id: code_id,
+            msg,
+        }),
+        ProposedAction::Execute {
+            contract,
+            msg,
+            funds,
+        } => CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract,
+            msg,
+            funds,
+        }),
+    };
 
     Ok(Response::new()
-        .add_message(migrate_msg)
+        .add_message(cosmos_msg)
         .add_attributes(vec![
             ("action", "apply"),
-            ("contract", pending.contract.as_str()),
-            ("code_id", pending.code_id.to_string().as_str()),
+            ("kind", kind),
+            ("contract", contract.as_str()),
+            ("code_id", code_id.as_str()),
         ]))
 }
 
@@ -210,10 +237,10 @@ fn execute_cancel(deps: DepsMut, info: MessageInfo) -> StdResult<Response> {
     let config = CONFIG.load(deps.storage)?;
     assert_owner(deps.as_ref(), info.sender.as_str(), &config)?;
 
-    if PENDING_MIGRATION.may_load(deps.storage)?.is_none() {
-        return Err(StdError::generic_err("no pending migration"));
+    if PENDING_ACTION.may_load(deps.storage)?.is_none() {
+        return Err(StdError::generic_err("no pending action"));
     }
-    PENDING_MIGRATION.remove(deps.storage);
+    PENDING_ACTION.remove(deps.storage);
     Ok(Response::new().add_attribute("action", "cancel"))
 }
 
@@ -277,11 +304,22 @@ fn execute_cancel_owner_proposal(deps: DepsMut, info: MessageInfo) -> StdResult<
     Ok(Response::new().add_attribute("action", "cancel_owner_proposal"))
 }
 
+fn action_summary(action: &ProposedAction) -> (&'static str, String, String) {
+    match action {
+        ProposedAction::Migrate {
+            contract, code_id, ..
+        } => ("migrate", contract.clone(), code_id.to_string()),
+        ProposedAction::Execute { contract, .. } => {
+            ("execute", contract.clone(), String::from("-"))
+        }
+    }
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
-        QueryMsg::PendingMigration {} => to_json_binary(&query_pending_migration(deps)?),
+        QueryMsg::PendingAction {} => to_json_binary(&query_pending_action(deps)?),
         QueryMsg::PendingOwnerRotation {} => to_json_binary(&query_pending_owner(deps)?),
     }
 }
@@ -294,18 +332,14 @@ fn query_config(deps: Deps) -> StdResult<ConfigResponse> {
     })
 }
 
-fn query_pending_migration(deps: Deps) -> StdResult<PendingMigrationResponse> {
-    match PENDING_MIGRATION.may_load(deps.storage)? {
-        Some(p) => Ok(PendingMigrationResponse {
-            contract: Some(p.contract),
-            code_id: Some(p.code_id),
-            msg: Some(p.msg),
+fn query_pending_action(deps: Deps) -> StdResult<PendingActionResponse> {
+    match PENDING_ACTION.may_load(deps.storage)? {
+        Some(p) => Ok(PendingActionResponse {
+            action: Some(p.action),
             effective_at: Some(p.effective_at),
         }),
-        None => Ok(PendingMigrationResponse {
-            contract: None,
-            code_id: None,
-            msg: None,
+        None => Ok(PendingActionResponse {
+            action: None,
             effective_at: None,
         }),
     }
@@ -323,6 +357,12 @@ fn query_pending_owner(deps: Deps) -> StdResult<PendingOwnerRotationResponse> {
     })
 }
 
+/// 1.2.0: storage key rename `pending_migration` → `pending_action`. Clear
+/// any stale value at the old key so it can't shadow a fresh proposal.
+fn clear_legacy_pending(storage: &mut dyn Storage) {
+    storage.remove(LEGACY_PENDING_MIGRATION_KEY.as_bytes());
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response> {
     let stored = get_contract_version(deps.storage)?;
@@ -332,9 +372,11 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
             CONTRACT_NAME, stored.contract
         )));
     }
+    clear_legacy_pending(deps.storage);
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     Ok(Response::new()
         .add_attribute("action", "migrate")
         .add_attribute("from_version", stored.version)
         .add_attribute("to_version", CONTRACT_VERSION))
 }
+

@@ -124,12 +124,13 @@ pub struct PendingFarmCodeIdUpdateResponse {
 pub struct FarmRecord {
     pub id: u64,
     pub farm_addr: String,
-    /// User that paid the launch fee and chose the farm's parameters. Has NO
-    /// on-chain role on the farm contract; surfaced for off-chain attribution.
+    /// User that paid the launch fee, chose the farm's parameters, and is
+    /// installed as the farm's `Config.owner`. Calls `AddSchedules` / `Fund`
+    /// / `ProposeNewOwner` etc. directly on the farm contract.
     pub operator: String,
-    /// Address installed as the farm's `Config.owner` and wasm admin. For
-    /// factory-spawned farms this is the Choice governance multisig at the
-    /// time of creation.
+    /// Wasm admin of the spawned farm — the Choice governance timelock at
+    /// the time of creation. Controls `MsgMigrateContract` against the
+    /// farm; does NOT have any role on the farm's `Config` state.
     pub farm_owner: String,
     pub reward_token: AssetInfo,
     pub staking_token: AssetInfo,

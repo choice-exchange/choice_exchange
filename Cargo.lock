@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "choice-admin-timelock"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "cosmwasm-schema 2.2.2",
  "cosmwasm-std 2.2.2",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "choice-farm"
-version = "1.1.2"
+version = "1.2.1"
 dependencies = [
  "choice",
  "cosmwasm-schema 2.2.2",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "choice-farm-factory"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "choice",
  "cosmwasm-schema 2.2.2",

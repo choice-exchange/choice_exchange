@@ -228,9 +228,10 @@ fn create_farm_cw20_reward_happy_path() {
         other => panic!("expected Wasm::Execute, got {:?}", other),
     }
 
-    // 3: SubMsg Instantiate farm. Admin AND Config.owner (carried in the msg)
-    // are both set to the configured multisig — NOT the factory and NOT the
-    // user. Funds are empty (reward arrives via Fund {} in the reply).
+    // 3: SubMsg Instantiate farm. wasm admin = configured `farm_owner`
+    // (the timelock). `Config.owner` (carried in the msg) = the user who
+    // called CreateFarm. Funds are empty (reward arrives via Fund {} in
+    // the reply).
     let multisig = deps.api.addr_make("multisig").to_string();
     match &res.messages[2].msg {
         CosmosMsg::Wasm(WasmMsg::Instantiate {
@@ -245,7 +246,7 @@ fn create_farm_cw20_reward_happy_path() {
             assert!(funds.is_empty());
             let parsed: FarmInstantiateMsg = from_json(msg).unwrap();
             assert_eq!(parsed.distribution_schedule.len(), 2);
-            assert_eq!(parsed.owner, multisig);
+            assert_eq!(parsed.owner, user.to_string());
         }
         other => panic!("expected Wasm::Instantiate, got {:?}", other),
     }
@@ -845,11 +846,12 @@ fn query_farms_pagination() {
     assert_eq!(page.farms[0].id, 1);
 }
 
-/// H-1: the spawned farm's `Config.owner` AND wasm `admin` are both the
-/// configured `farm_owner` (multisig), regardless of who paid the launch fee.
-/// The user is recorded only as `operator` for off-chain attribution.
+/// Phase C: the spawned farm's wasm `admin` = configured `farm_owner`
+/// (multisig/timelock), `Config.owner` = the user who paid the launch fee.
+/// `FarmRecord` captures both roles distinctly so off-chain consumers can
+/// tell them apart.
 #[test]
-fn create_farm_installs_multisig_as_farm_owner() {
+fn create_farm_installs_multisig_as_wasm_admin_and_user_as_owner() {
     let mut deps = setup();
 
     let user = deps.api.addr_make("alice");
@@ -871,12 +873,13 @@ fn create_farm_installs_multisig_as_farm_owner() {
     let info = message_info(&user, &coins(FEE, "inj"));
     let res = execute(deps.as_mut(), mock_env(), info, create_msg).unwrap();
 
-    // Instantiate submsg (index 2): admin and embedded Config.owner == multisig.
+    // Instantiate submsg (index 2): wasm admin == multisig (timelock).
+    // Embedded `Config.owner` == user (the creator).
     match &res.messages[2].msg {
         CosmosMsg::Wasm(WasmMsg::Instantiate { admin, msg, .. }) => {
             assert_eq!(admin, &Some(multisig.to_string()));
             let parsed: FarmInstantiateMsg = from_json(msg).unwrap();
-            assert_eq!(parsed.owner, multisig.to_string());
+            assert_eq!(parsed.owner, user.to_string());
         }
         other => panic!("expected Wasm::Instantiate, got {:?}", other),
     }
@@ -896,8 +899,70 @@ fn create_farm_installs_multisig_as_farm_owner() {
     assert_ne!(record.operator, record.farm_owner);
 }
 
+/// Phase C invariant: wasm admin (`farm_owner`) and farm `Config.owner`
+/// (creator) are independently controlled. Two different users creating
+/// farms get distinct `Config.owner`s, but the wasm admin on every farm is
+/// the same protocol-side `farm_owner` configured on the factory.
+#[test]
+fn create_farm_separates_admin_from_config_owner() {
+    let mut deps = setup();
+    let alice = deps.api.addr_make("alice");
+    let bob = deps.api.addr_make("bob");
+    let multisig = deps.api.addr_make("multisig").to_string();
+    let reward_cw20 = deps.api.addr_make("rewardcw20");
+    let staking_cw20 = deps.api.addr_make("stakingcw20");
+    let farm0 = deps.api.addr_make("farm0");
+    let farm1 = deps.api.addr_make("farm1");
+
+    let create_msg = ExecuteMsg::CreateFarm {
+        reward_token: AssetInfo::Token {
+            contract_addr: reward_cw20.to_string(),
+        },
+        staking_token: AssetInfo::Token {
+            contract_addr: staking_cw20.to_string(),
+        },
+        distribution_schedule: vec![(future_t(100), future_t(200), Uint128::from(1_000u128))],
+    };
+
+    for (caller, farm_addr) in [(&alice, &farm0), (&bob, &farm1)] {
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(caller, &coins(FEE, "inj")),
+            create_msg.clone(),
+        )
+        .unwrap();
+        match &res.messages[2].msg {
+            CosmosMsg::Wasm(WasmMsg::Instantiate { admin, msg, .. }) => {
+                assert_eq!(admin, &Some(multisig.clone()));
+                let parsed: FarmInstantiateMsg = from_json(msg).unwrap();
+                assert_eq!(parsed.owner, caller.to_string());
+                assert_ne!(parsed.owner, multisig);
+            }
+            other => panic!("expected Wasm::Instantiate, got {:?}", other),
+        }
+        reply(
+            deps.as_mut(),
+            mock_env(),
+            synthetic_instantiate_reply(farm_addr.as_str()),
+        )
+        .unwrap();
+    }
+
+    let a: FarmRecordResp =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Farm { id: 0 }).unwrap()).unwrap();
+    let b: FarmRecordResp =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Farm { id: 1 }).unwrap()).unwrap();
+    assert_eq!(a.operator, alice.to_string());
+    assert_eq!(b.operator, bob.to_string());
+    assert_eq!(a.farm_owner, multisig);
+    assert_eq!(b.farm_owner, multisig);
+}
+
 /// H-1 follow-up: changing the factory's `farm_owner` only affects farms
-/// created AFTER the update. Existing farms keep their original owner.
+/// created AFTER the update. Existing farms keep their original wasm admin
+/// (the `farm_owner` config at creation time). `Config.owner` is the
+/// creator and was never tied to factory state to begin with.
 #[test]
 fn update_farm_owner_does_not_retro_apply() {
     let mut deps = setup();
