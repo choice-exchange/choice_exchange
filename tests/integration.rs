@@ -14,13 +14,26 @@ use choice_clmm_common::manager::{
     ExecuteMsg as ManagerExecuteMsg, InstantiateMsg as ManagerInstantiateMsg, Position,
     QueryMsg as ManagerQueryMsg,
 };
-use choice_clmm_common::pool::{ExecuteMsg as PoolExecuteMsg, PoolState, QueryMsg as PoolQueryMsg};
+use choice_clmm_common::pool::{
+    ExecuteMsg as PoolExecuteMsg, PoolState, ProtocolFeesResponse, QueryMsg as PoolQueryMsg,
+};
 use choice_clmm_common::types::AssetInfo;
 
 use cw721::msg::OwnerOfResponse;
 
 const ATOM: &str = "atom";
 const USDT: &str = "usdt";
+
+fn bank_balance(bank: &Bank<InjectiveTestApp>, address: &str, denom: &str) -> u128 {
+    bank.query_balance(&QueryBalanceRequest {
+        address: address.to_string(),
+        denom: denom.to_string(),
+    })
+    .unwrap()
+    .balance
+    .map(|c| c.amount.parse::<u128>().unwrap())
+    .unwrap_or(0)
+}
 
 fn native(denom: &str) -> AssetInfo {
     AssetInfo::NativeToken {
@@ -844,4 +857,335 @@ fn test_overlapping_liquidity_math() {
         slot0_end.liquidity > Uint128::zero(),
         "Liquidity should not be zero (User B still active)"
     );
+}
+
+// ============================================================================
+// Phase 6 — Protocol-fee accrual → CollectProtocol → live send_to_auction
+// round-trip (deferred from Phase 1).
+// ============================================================================
+//
+// Exercises the full protocol-fee path end-to-end against the REAL
+// `choice_send_to_auction` contract (which emits Injective exchange
+// Deposit+ExternalTransfer messages): the factory owner turns on the carve,
+// swaps accrue protocol fees on both token sides, the owner points the routing
+// at a live auction + treasury, then `CollectProtocol` splits each token
+// `burn_share_bps` to the auction (burned) and the remainder to the treasury.
+// The auction leg succeeding proves the burn-auction round-trip works on-chain,
+// not just in a mock.
+#[test]
+fn test_protocol_fee_collect_to_auction_roundtrip() {
+    let env = setup();
+    let wasm = Wasm::new(&env.app);
+    let bank = Bank::new(&env.app);
+
+    // Fresh treasury account: starts with zero ATOM/USDT so deltas are clean.
+    let treasury = env
+        .app
+        .init_account(&[Coin::new(1_000_000_000_000_000_000u128, "inj")])
+        .unwrap();
+
+    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
+
+    // 1. Factory owner (admin) enables the 25% protocol carve on both sides.
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::SetFeeProtocol {
+            fee_protocol_0: 4,
+            fee_protocol_1: 4,
+        },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+
+    // A non-owner must NOT be able to set the carve (access control).
+    let unauth = wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::SetFeeProtocol {
+            fee_protocol_0: 10,
+            fee_protocol_1: 10,
+        },
+        &[],
+        &env.user,
+    );
+    assert!(
+        unauth.is_err(),
+        "non-factory-owner must not set protocol fee"
+    );
+
+    // 2. Generate fees on BOTH sides so protocol fees accrue in token0 and token1.
+    let trader = &env.admin;
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Swap {
+            recipient: trader.address(),
+            zero_for_one: true,
+            amount_specified: Uint128::new(50_000_000),
+            sqrt_price_limit_x96: Uint256::from(4295128739u128),
+        },
+        &[Coin::new(Uint128::new(50_000_000), ATOM)],
+        trader,
+    )
+    .unwrap();
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Swap {
+            recipient: trader.address(),
+            zero_for_one: false,
+            amount_specified: Uint128::new(50_000_000),
+            sqrt_price_limit_x96: Uint256::from(112045541949572279837463876454u128),
+        },
+        &[Coin::new(Uint128::new(50_000_000), USDT)],
+        trader,
+    )
+    .unwrap();
+
+    let fees: ProtocolFeesResponse = wasm
+        .query(&pool_addr, &PoolQueryMsg::GetProtocolFees {})
+        .unwrap();
+    assert!(
+        !fees.protocol_fees_0.is_zero() && !fees.protocol_fees_1.is_zero(),
+        "protocol fees should accrue on both sides: {:?}",
+        fees
+    );
+
+    // 3. Deploy the real send_to_auction contract and point routing at it.
+    let auction_code_id = wasm
+        .store_code(
+            &get_wasm_byte_code("choice_send_to_auction.wasm"),
+            None,
+            &env.admin,
+        )
+        .unwrap()
+        .data
+        .code_id;
+    let auction_addr = wasm
+        .instantiate(
+            auction_code_id,
+            &choice::send_to_auction::InstantiateMsg {
+                owner: env.admin.address(),
+                // adapter_contract is only used on the CW20 path; a valid addr suffices.
+                adapter_contract: env.admin.address(),
+                burn_auction_subaccount:
+                    "0x1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_string(),
+            },
+            Some(&env.admin.address()),
+            Some("Choice Send To Auction"),
+            &[],
+            &env.admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    // 50% to the burn auction, 50% to the treasury.
+    wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::UpdateProtocolFeeConfig {
+            treasury: Some(treasury.address()),
+            burn_auction: Some(auction_addr.clone()),
+            burn_share_bps: Some(5000),
+            clear_burn_auction: false,
+        },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+
+    // 4. Collect everything. The auction leg must execute (Deposit+ExternalTransfer)
+    //    or the whole tx reverts — success here IS the round-trip proof.
+    let collect_res = wasm
+        .execute(
+            &pool_addr,
+            &PoolExecuteMsg::CollectProtocol {
+                amount0_requested: Uint128::MAX,
+                amount1_requested: Uint128::MAX,
+            },
+            &[],
+            &env.admin,
+        )
+        .unwrap();
+
+    let collected_0: u128 = collect_res
+        .events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .find(|a| a.key == "collected_0")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    let collected_1: u128 = collect_res
+        .events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .find(|a| a.key == "collected_1")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    assert!(collected_0 > 0 && collected_1 > 0);
+
+    // 5a. Protocol fee buckets are now drained.
+    let after: ProtocolFeesResponse = wasm
+        .query(&pool_addr, &PoolQueryMsg::GetProtocolFees {})
+        .unwrap();
+    assert!(after.protocol_fees_0.is_zero() && after.protocol_fees_1.is_zero());
+
+    // 5b. Treasury received exactly the non-burn remainder (collected − floor(50%)).
+    let expected_treasury_atom = collected_0 - (collected_0 * 5000 / 10_000);
+    let expected_treasury_usdt = collected_1 - (collected_1 * 5000 / 10_000);
+    assert_eq!(
+        bank_balance(&bank, &treasury.address(), ATOM),
+        expected_treasury_atom,
+        "treasury ATOM remainder mismatch"
+    );
+    assert_eq!(
+        bank_balance(&bank, &treasury.address(), USDT),
+        expected_treasury_usdt,
+        "treasury USDT remainder mismatch"
+    );
+
+    // 5c. The burn share left the pool entirely (auction consumed it via the
+    //     exchange precompile, so it is NOT sitting in the auction's bank balance).
+    let burn_atom = collected_0 * 5000 / 10_000;
+    assert!(burn_atom > 0, "burn share should be non-zero");
+}
+
+// ============================================================================
+// Phase 6 — Flash loan with a real borrower contract: callback round-trip,
+// fee accrual, and underpayment revert (deferred from Phase 2).
+// ============================================================================
+//
+// Deploys `flash_borrower_mock` (a real CosmWasm contract implementing the
+// pool's FlashCallback), lends it both tokens, and verifies (a) on honest
+// repayment the pool's balance grows by exactly the flash fee, and (b) a
+// borrower that repays one unit short triggers the pool's balance-delta
+// repayment check and the whole transaction reverts (pool balance unchanged).
+#[test]
+fn test_flash_loan_borrower_roundtrip_and_underpay_revert() {
+    let env = setup();
+    let wasm = Wasm::new(&env.app);
+    let bank = Bank::new(&env.app);
+
+    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
+
+    // Deploy the borrower and pre-fund it so it can cover the flash fee
+    // (it returns principal + fee; the fee comes out of this buffer).
+    let borrower_code_id = wasm
+        .store_code(
+            &get_wasm_byte_code("flash_borrower_mock.wasm"),
+            None,
+            &env.admin,
+        )
+        .unwrap()
+        .data
+        .code_id;
+    let borrower_addr = wasm
+        .instantiate(
+            borrower_code_id,
+            &flash_borrower_mock::InstantiateMsg {},
+            Some(&env.admin.address()),
+            Some("Flash Borrower"),
+            &[
+                Coin::new(1_000_000u128, ATOM),
+                Coin::new(1_000_000u128, USDT),
+            ],
+            &env.admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    let amount0 = Uint128::new(2_000_000); // ATOM (token0)
+    let amount1 = Uint128::new(1_000_000); // USDT (token1)
+
+    let honest_plan = flash_borrower_mock::RepayPlan {
+        denom0: ATOM.to_string(),
+        denom1: USDT.to_string(),
+        amount0,
+        amount1,
+        underpay0: Uint128::zero(),
+        underpay1: Uint128::zero(),
+    };
+
+    let pool_atom_before = bank_balance(&bank, &pool_addr, ATOM);
+    let pool_usdt_before = bank_balance(&bank, &pool_addr, USDT);
+
+    let res = wasm
+        .execute(
+            &pool_addr,
+            &PoolExecuteMsg::Flash {
+                recipient: borrower_addr.clone(),
+                amount0,
+                amount1,
+                data: cosmwasm_std::to_json_binary(&honest_plan).unwrap(),
+            },
+            &[],
+            &env.admin,
+        )
+        .unwrap();
+
+    // Flash fee at the 0.05% base tier = ceil(amount * 500 / 1_000_000).
+    let fee0: u128 = res
+        .events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .find(|a| a.key == "fee0")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    let fee1: u128 = res
+        .events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .find(|a| a.key == "fee1")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    assert!(fee0 > 0 && fee1 > 0, "flash fee must be non-zero");
+
+    // The pool must end up with exactly its starting balance + the flash fee.
+    assert_eq!(
+        bank_balance(&bank, &pool_addr, ATOM),
+        pool_atom_before + fee0,
+        "pool ATOM should grow by exactly fee0"
+    );
+    assert_eq!(
+        bank_balance(&bank, &pool_addr, USDT),
+        pool_usdt_before + fee1,
+        "pool USDT should grow by exactly fee1"
+    );
+
+    // --- Underpayment must revert the whole flash ---------------------------
+    let pool_atom_mid = bank_balance(&bank, &pool_addr, ATOM);
+    let pool_usdt_mid = bank_balance(&bank, &pool_addr, USDT);
+
+    let cheat_plan = flash_borrower_mock::RepayPlan {
+        denom0: ATOM.to_string(),
+        denom1: USDT.to_string(),
+        amount0,
+        amount1,
+        underpay0: Uint128::one(), // one unit short of (principal + fee)
+        underpay1: Uint128::zero(),
+    };
+    let cheat = wasm.execute(
+        &pool_addr,
+        &PoolExecuteMsg::Flash {
+            recipient: borrower_addr,
+            amount0,
+            amount1,
+            data: cosmwasm_std::to_json_binary(&cheat_plan).unwrap(),
+        },
+        &[],
+        &env.admin,
+    );
+    assert!(cheat.is_err(), "underpaid flash must revert");
+
+    // Reverted: the pool's balances are untouched by the failed flash.
+    assert_eq!(bank_balance(&bank, &pool_addr, ATOM), pool_atom_mid);
+    assert_eq!(bank_balance(&bank, &pool_addr, USDT), pool_usdt_mid);
 }

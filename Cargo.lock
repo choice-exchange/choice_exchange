@@ -412,6 +412,7 @@ dependencies = [
  "cw721 0.20.0",
  "cw721-base",
  "cw721-metadata-onchain",
+ "flash-borrower-mock",
  "injective-cosmwasm",
  "injective-math",
  "injective-test-tube",
@@ -1575,6 +1576,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "835c052cb0c08c1acf6ffd71c022172e18723949c8282f2b9f27efbc51e64534"
 dependencies = [
  "static_assertions 1.1.0",
+]
+
+[[package]]
+name = "flash-borrower-mock"
+version = "0.1.0"
+dependencies = [
+ "cosmwasm-schema 2.2.2",
+ "cosmwasm-std 2.2.2",
 ]
 
 [[package]]

@@ -1,0 +1,14 @@
+[package]
+name = "flash-borrower-mock"
+version = "0.1.0"
+authors = ["Dan Van Eijck"]
+edition = "2021"
+description = "Test-only flash-loan borrower for choice_clmm_pool integration tests"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-schema = { version = "2.2.2" }
+cosmwasm-std = { version = "2.2.2" }

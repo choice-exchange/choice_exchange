@@ -38,6 +38,8 @@ choice = { path = "../choice" }
 choice-farm = { path = "../../contracts/choice_farm" }
 choice-vault = { path = "../../contracts/choice_vault" }
 choice-zap-lp = { path = "../../contracts/choice_zap_lp" }
+# Test-only flash-loan borrower (FlashCallback round-trip integration test).
+flash-borrower-mock = { path = "../../contracts/flash_borrower_mock" }
 # Types only — the WASM artifact for the on-chain CW20 lives in
 # `contracts/cw20_base_build/` and is produced by `./build_release.sh`.
 cw20-base = { version = "2.0.0", features = ["library"] }

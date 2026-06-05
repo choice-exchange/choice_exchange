@@ -69,7 +69,12 @@ build-pool-seeder:
 	RUSTFLAGS=$(RUST_FLAGS) cargo build --release --lib --target wasm32-unknown-unknown -p choice-pool-seeder
 	cp target/wasm32-unknown-unknown/release/choice_pool_seeder.wasm artifacts/
 
-build-all: build-factory build-pool build-manager
+# Test-only flash-loan borrower used by the CLMM pool flash integration test.
+build-flash-borrower-mock:
+	RUSTFLAGS=$(RUST_FLAGS) cargo build --release --lib --target wasm32-unknown-unknown -p flash-borrower-mock
+	cp target/wasm32-unknown-unknown/release/flash_borrower_mock.wasm artifacts/
+
+build-all: build-factory build-pool build-manager build-flash-borrower-mock
 
 # Full optimised build of every workspace contract via the Docker
 # workspace-optimizer. Slow (~5–10 min) but produces the artifacts the
