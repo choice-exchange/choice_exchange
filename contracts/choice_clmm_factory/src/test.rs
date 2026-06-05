@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::contract::{execute, instantiate, reply};
-    use crate::state::{CONFIG, FEE_TIERS, POOLS};
-    use choice_clmm_common::factory::{ExecuteMsg, InstantiateMsg};
+    use crate::contract::{execute, instantiate, query, reply};
+    use crate::state::{CONFIG, FEE_TIERS, POOLS, POOL_CREATION_AUTH};
+    use choice_clmm_common::factory::{CreationAuthResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
     use choice_clmm_common::pool::InstantiateMsg as PoolInstantiateMsg;
     use choice_clmm_common::types::AssetInfo;
     use cosmwasm_std::testing::{
@@ -18,6 +18,16 @@ mod tests {
         AssetInfo::NativeToken {
             denom: denom.to_string(),
         }
+    }
+
+    /// A `factory/{owner}/{sub}` native denom owned by `owner`.
+    fn factory_denom(owner: &Addr, sub: &str) -> AssetInfo {
+        native(&format!("factory/{}/{}", owner, sub))
+    }
+
+    /// 2^96 — a valid (price == 1.0) init sqrt price.
+    fn init_price() -> Uint256 {
+        Uint256::from(79228162514264337593543950336u128)
     }
 
     // Helper to setup the factory
@@ -222,5 +232,288 @@ mod tests {
 
         let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
         assert_eq!(err.to_string(), "Generic error: Pool already exists");
+    }
+
+    // ----------------------------------------------------------------------
+    // Anti-squat creation gate
+    // ----------------------------------------------------------------------
+
+    fn authorize(
+        deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
+        sender: &Addr,
+        token_a: AssetInfo,
+        token_b: AssetInfo,
+        fee: u32,
+        creator: &Addr,
+        ttl_seconds: u64,
+    ) -> Result<cosmwasm_std::Response, cosmwasm_std::StdError> {
+        let msg = ExecuteMsg::AuthorizeCreation {
+            token_a,
+            token_b,
+            fee,
+            creator: creator.to_string(),
+            ttl_seconds,
+        };
+        execute(deps.as_mut(), mock_env(), message_info(sender, &[]), msg)
+    }
+
+    fn create_pool(
+        deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
+        env: cosmwasm_std::Env,
+        sender: &Addr,
+        token_a: AssetInfo,
+        token_b: AssetInfo,
+        fee: u32,
+    ) -> Result<cosmwasm_std::Response, cosmwasm_std::StdError> {
+        let msg = ExecuteMsg::CreatePool {
+            token_a,
+            token_b,
+            fee,
+            init_sqrt_price: init_price(),
+        };
+        execute(deps.as_mut(), env, message_info(sender, &[]), msg)
+    }
+
+    #[test]
+    fn test_open_creation_unchanged_without_auth() {
+        // No reservation → anyone can create, exactly as before.
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let stranger = deps.api.addr_make("stranger");
+        let res = create_pool(
+            &mut deps,
+            mock_env(),
+            &stranger,
+            factory_denom(&issuer, "shroom_1"),
+            native("inj"),
+            500,
+        )
+        .unwrap();
+        // Pool instantiate submsg emitted (gate is a no-op).
+        assert_eq!(res.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_authorize_by_namespace_owner_and_query() {
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let sink = deps.api.addr_make("sink");
+        let denom = factory_denom(&issuer, "shroom_1");
+
+        // ttl == 0 → no expiry.
+        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+
+        // Query reflects it (and tolerates swapped token order).
+        let bin = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::GetCreationAuth {
+                token_a: native("inj"),
+                token_b: denom,
+                fee: 500,
+            },
+        )
+        .unwrap();
+        let auth: Option<CreationAuthResponse> = from_json(bin).unwrap();
+        let auth = auth.expect("reservation present");
+        assert_eq!(auth.creator, sink.to_string());
+        assert_eq!(auth.expires_at, u64::MAX);
+    }
+
+    #[test]
+    fn test_authorize_rejected_for_non_owner() {
+        // An attacker who doesn't own the namespace can't reserve the slot.
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let attacker = deps.api.addr_make("attacker");
+        let err = authorize(
+            &mut deps,
+            &attacker,
+            factory_denom(&issuer, "shroom_1"),
+            native("inj"),
+            500,
+            &attacker,
+            0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"), "{}", err);
+    }
+
+    #[test]
+    fn test_authorize_rejected_for_foreign_blue_chip_pair() {
+        // No `factory/{attacker}/…` side ⇒ nothing the attacker can claim.
+        let mut deps = setup_factory();
+        let attacker = deps.api.addr_make("attacker");
+        let err = authorize(
+            &mut deps,
+            &attacker,
+            native("uusdc"),
+            native("inj"),
+            500,
+            &attacker,
+            0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"), "{}", err);
+    }
+
+    #[test]
+    fn test_authorize_by_factory_owner() {
+        // Governance (factory owner) can reserve any slot, incl. blue-chip pairs.
+        let mut deps = setup_factory();
+        let owner = deps.api.addr_make("creator"); // setup_factory's instantiator
+        let chosen = deps.api.addr_make("chosen");
+        authorize(&mut deps, &owner, native("uusdc"), native("inj"), 500, &chosen, 0).unwrap();
+        assert!(POOL_CREATION_AUTH
+            .may_load(&deps.storage, ("inj", "uusdc", 500))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_gate_blocks_unauthorized_creator_then_allows_and_consumes() {
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let sink = deps.api.addr_make("sink");
+        let squatter = deps.api.addr_make("squatter");
+        let denom = factory_denom(&issuer, "shroom_1");
+
+        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+
+        // Squatter is blocked (note: passes tokens in the opposite order).
+        let err = create_pool(
+            &mut deps,
+            mock_env(),
+            &squatter,
+            native("inj"),
+            denom.clone(),
+            500,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Generic error: pool slot reserved for another creator"
+        );
+
+        // Authorized sink succeeds and the reservation is consumed.
+        let res = create_pool(&mut deps, mock_env(), &sink, denom, native("inj"), 500).unwrap();
+        assert_eq!(res.messages.len(), 1);
+        let denom_str = format!("factory/{}/shroom_1", issuer);
+        assert!(POOL_CREATION_AUTH
+            .may_load(&deps.storage, (denom_str.as_str(), "inj", 500))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_finite_ttl_expiry_reopens_slot() {
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let sink = deps.api.addr_make("sink");
+        let squatter = deps.api.addr_make("squatter");
+        let denom = factory_denom(&issuer, "shroom_1");
+
+        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 100).unwrap();
+
+        // Past expiry, the slot reopens to anyone and the stale entry is swept.
+        let mut env = mock_env();
+        env.block.time = env.block.time.plus_seconds(101);
+        let res = create_pool(&mut deps, env, &squatter, denom, native("inj"), 500).unwrap();
+        assert_eq!(res.messages.len(), 1);
+        let denom_str = format!("factory/{}/shroom_1", issuer);
+        assert!(POOL_CREATION_AUTH
+            .may_load(&deps.storage, (denom_str.as_str(), "inj", 500))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_ttl_zero_never_expires() {
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let sink = deps.api.addr_make("sink");
+        let squatter = deps.api.addr_make("squatter");
+        let denom = factory_denom(&issuer, "shroom_1");
+
+        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+
+        // Even far in the future, a non-creator is still blocked.
+        let mut env = mock_env();
+        env.block.time = env.block.time.plus_seconds(10_000_000_000);
+        let err = create_pool(&mut deps, env, &squatter, denom, native("inj"), 500).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Generic error: pool slot reserved for another creator"
+        );
+    }
+
+    #[test]
+    fn test_authorize_unsupported_fee_tier_rejected() {
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let sink = deps.api.addr_make("sink");
+        let err = authorize(
+            &mut deps,
+            &issuer,
+            factory_denom(&issuer, "shroom_1"),
+            native("inj"),
+            999_999, // not an enabled tier
+            &sink,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: Fee tier not supported");
+    }
+
+    #[test]
+    fn test_cancel_creation_auth() {
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let sink = deps.api.addr_make("sink");
+        let denom = factory_denom(&issuer, "shroom_1");
+
+        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+
+        // Cancel by the namespace owner releases the slot.
+        let msg = ExecuteMsg::CancelCreationAuth {
+            token_a: denom.clone(),
+            token_b: native("inj"),
+            fee: 500,
+        };
+        execute(deps.as_mut(), mock_env(), message_info(&issuer, &[]), msg).unwrap();
+        let denom_str = format!("factory/{}/shroom_1", issuer);
+        assert!(POOL_CREATION_AUTH
+            .may_load(&deps.storage, (denom_str.as_str(), "inj", 500))
+            .unwrap()
+            .is_none());
+
+        // Cancelling a non-existent reservation errors.
+        let msg = ExecuteMsg::CancelCreationAuth {
+            token_a: denom,
+            token_b: native("inj"),
+            fee: 500,
+        };
+        let err = execute(deps.as_mut(), mock_env(), message_info(&issuer, &[]), msg).unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: No reservation for this slot");
+    }
+
+    #[test]
+    fn test_cancel_rejected_for_non_owner() {
+        let mut deps = setup_factory();
+        let issuer = deps.api.addr_make("issuer");
+        let sink = deps.api.addr_make("sink");
+        let attacker = deps.api.addr_make("attacker");
+        let denom = factory_denom(&issuer, "shroom_1");
+
+        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+
+        let msg = ExecuteMsg::CancelCreationAuth {
+            token_a: denom,
+            token_b: native("inj"),
+            fee: 500,
+        };
+        let err =
+            execute(deps.as_mut(), mock_env(), message_info(&attacker, &[]), msg).unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"), "{}", err);
     }
 }

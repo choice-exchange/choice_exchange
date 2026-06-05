@@ -32,6 +32,7 @@ serde-json-wasm      = { version = "1.0.0" }
 thiserror            = { version = "2.0.12" }
 
 choice               = { path = "../../packages/choice", default-features = false, version = "1.1.2" }
+choice-clmm-common   = { path = "../../packages/choice_clmm_common", version = "1.1.2" }
 
 [dev-dependencies]
 injective-test-tube  = { version = "1.16.3-1" }

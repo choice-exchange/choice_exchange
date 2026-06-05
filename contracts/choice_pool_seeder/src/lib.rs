@@ -1,3 +1,4 @@
+pub mod clmm;
 pub mod contract;
 pub mod error;
 pub mod msg;

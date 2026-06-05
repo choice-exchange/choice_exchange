@@ -33,7 +33,7 @@ use crate::contract::{execute, instantiate, migrate, query, HARD_MAX_TIP_BPS};
 use crate::error::ContractError;
 use crate::msg::{
     CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg, LpDestination,
-    MigrateMsg, QueryMsg, RoleResponse, SinkConfigResponse, SinkInit, SinkStateResponse,
+    MigrateMsg, PoolKind, QueryMsg, RoleResponse, SinkConfigResponse, SinkInit, SinkStateResponse,
 };
 use crate::state::{Role, SinkStatus, ROLE, SINK_STATE};
 
@@ -70,7 +70,27 @@ fn make_factory_init(api: &MockApi) -> FactoryInit {
         admin: api.addr_make("admin").to_string(),
         sink_code_id: 7,
         choice_factory: api.addr_make("choice_factory").to_string(),
+        clmm_factory: Some(api.addr_make("clmm_factory").to_string()),
+        clmm_manager: Some(api.addr_make("clmm_manager").to_string()),
         max_tip_bps: 50,
+    }
+}
+
+/// Default XYK `pool_kind` keyed to the mock factory's pinned `choice_factory`.
+fn xyk_pool_kind(api: &MockApi) -> PoolKind {
+    PoolKind::Xyk {
+        choice_factory: api.addr_make("choice_factory").to_string(),
+        lp_destination: LpDestination::Burn,
+    }
+}
+
+/// Default CLMM `pool_kind` keyed to the mock factory's pinned addresses.
+fn clmm_pool_kind(api: &MockApi) -> PoolKind {
+    PoolKind::Clmm {
+        clmm_factory: api.addr_make("clmm_factory").to_string(),
+        clmm_manager: api.addr_make("clmm_manager").to_string(),
+        fee_tier: 3000,
+        position_recipient: api.addr_make("locker").to_string(),
     }
 }
 
@@ -81,11 +101,10 @@ fn make_sink_init(api: &MockApi) -> SinkInit {
         pair_denom: PAIR_DENOM.to_string(),
         token_decimals: 18,
         pair_decimals: 18,
-        lp_destination: LpDestination::Burn,
+        pool_kind: xyk_pool_kind(api),
         refund_receiver: api.addr_make("refund_receiver").to_string(),
         deadline_seconds: 86_400,
         tip_bps: 25,
-        choice_factory: api.addr_make("choice_factory").to_string(),
     }
 }
 
@@ -198,7 +217,13 @@ fn instantiate_sink_happy_path_sets_pending_state() {
     assert_eq!(cfg.token_denom, TOKEN_DENOM);
     assert_eq!(cfg.pair_denom, PAIR_DENOM);
     assert_eq!(cfg.tip_bps, 25);
-    assert!(matches!(cfg.lp_destination, LpDestination::Burn));
+    assert!(matches!(
+        cfg.pool_kind,
+        PoolKind::Xyk {
+            lp_destination: LpDestination::Burn,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -325,7 +350,10 @@ fn create_sink_rejects_choice_factory_mismatch() {
     let mut deps = simple_deps();
     instantiate_factory_default(&mut deps);
     let mut sink_init = make_sink_init(&deps.api);
-    sink_init.choice_factory = deps.api.addr_make("other_choice_factory").to_string();
+    sink_init.pool_kind = PoolKind::Xyk {
+        choice_factory: deps.api.addr_make("other_choice_factory").to_string(),
+        lp_destination: LpDestination::Burn,
+    };
     let caller = deps.api.addr_make("issuer_keeper");
     let err = execute(
         deps.as_mut(),
@@ -920,7 +948,10 @@ fn callback_distribute_lp_sends_when_destination_is_send_to() {
     let mut deps = rich_deps(&[]);
     let mut init = make_sink_init(&deps.api);
     let dest = deps.api.addr_make("lp_recipient");
-    init.lp_destination = LpDestination::SendTo(dest.to_string());
+    init.pool_kind = PoolKind::Xyk {
+        choice_factory: deps.api.addr_make("choice_factory").to_string(),
+        lp_destination: LpDestination::SendTo(dest.to_string()),
+    };
     let caller = deps.api.addr_make("factory_caller");
     instantiate(
         deps.as_mut(),
@@ -1131,6 +1162,496 @@ fn migrate_from_v1_accepts_current_v1_marker() {
         .attributes
         .iter()
         .any(|a| a.key == "variant" && a.value == "from_v1"));
+}
+
+// ------------------------------------------------------------------------
+// CLMM settle
+// ------------------------------------------------------------------------
+
+use cosmwasm_std::{ContractResult, SystemError, SystemResult, WasmQuery};
+use choice_clmm_common::factory::{
+    ExecuteMsg as ClmmFactoryExecuteMsg, FeeTierEntry, QueryMsg as ClmmFactoryQueryMsg,
+};
+use choice_clmm_common::manager::ExecuteMsg as ClmmManagerExecuteMsg;
+
+/// Deps whose querier answers the two CLMM-factory queries `settle_clmm`
+/// makes — `GetFeeTiers` (→ `tiers`) and `GetPool` (→ `existing_pool`, or an
+/// error meaning "absent"). Bank balances are seeded for the contract address.
+/// We don't extend the shared `choice` mock querier (it would have to depend
+/// on `choice_clmm_common`); a self-contained `update_wasm` closure is enough.
+type ClmmDeps =
+    OwnedDeps<MockStorage, TestMockApi, MockQuerier<InjectiveQueryWrapper>, InjectiveQueryWrapper>;
+
+fn clmm_settle_deps(
+    balances: Vec<Coin>,
+    tiers: Vec<FeeTierEntry>,
+    existing_pool: Option<String>,
+) -> ClmmDeps {
+    let mut querier =
+        MockQuerier::<InjectiveQueryWrapper>::new(&[(MOCK_CONTRACT_ADDR, &balances)]);
+    querier.update_wasm(move |q| match q {
+        WasmQuery::Smart { msg, .. } => match from_json::<ClmmFactoryQueryMsg>(msg) {
+            Ok(ClmmFactoryQueryMsg::GetFeeTiers { .. }) => {
+                SystemResult::Ok(ContractResult::Ok(to_json_binary(&tiers).unwrap()))
+            }
+            Ok(ClmmFactoryQueryMsg::GetPool { .. }) => match &existing_pool {
+                Some(p) => SystemResult::Ok(ContractResult::Ok(to_json_binary(p).unwrap())),
+                None => SystemResult::Err(SystemError::NoSuchContract {
+                    addr: "pool-absent".to_string(),
+                }),
+            },
+            _ => SystemResult::Err(SystemError::UnsupportedRequest {
+                kind: "unexpected clmm query".to_string(),
+            }),
+        },
+        _ => SystemResult::Err(SystemError::UnsupportedRequest {
+            kind: "non-smart wasm query".to_string(),
+        }),
+    });
+    OwnedDeps {
+        storage: MockStorage::default(),
+        api: TestMockApi::default(),
+        querier,
+        custom_query_type: PhantomData,
+    }
+}
+
+fn default_tiers() -> Vec<FeeTierEntry> {
+    vec![
+        FeeTierEntry { fee: 100, tick_spacing: 1 },
+        FeeTierEntry { fee: 500, tick_spacing: 10 },
+        FeeTierEntry { fee: 3000, tick_spacing: 60 },
+        FeeTierEntry { fee: 10000, tick_spacing: 200 },
+    ]
+}
+
+fn instantiate_clmm_sink(deps: &mut ClmmDeps) {
+    let mut init = make_sink_init(&deps.api);
+    init.pool_kind = clmm_pool_kind(&deps.api);
+    let caller = deps.api.addr_make("factory_caller");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap();
+}
+
+#[test]
+fn clmm_settle_emits_create_pool_mint_and_sweep() {
+    let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), None);
+    instantiate_clmm_sink(&mut deps);
+
+    let caller = deps.api.addr_make("cranker");
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap();
+
+    // tip + create_pool + mint + sweep-dust callback
+    assert_eq!(res.messages.len(), 4);
+
+    // [0] tip on the pair side.
+    let expected_tip = Uint128::new(800_000_000u128).multiply_ratio(25u128, 10_000u128);
+    match &res.messages[0].msg {
+        CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+            assert_eq!(to_address, &caller.to_string());
+            assert_eq!(amount, &coins(expected_tip.u128(), PAIR_DENOM));
+        }
+        other => panic!("expected tip send, got {:?}", other),
+    }
+
+    // [1] CreatePool on the pinned clmm factory, no funds, fee tier 3000.
+    let pair_deposit = Uint128::new(800_000_000u128) - expected_tip;
+    match &res.messages[1].msg {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr,
+            msg,
+            funds,
+        }) => {
+            assert_eq!(contract_addr, &deps.api.addr_make("clmm_factory").to_string());
+            assert!(funds.is_empty(), "CreatePool must attach no funds");
+            match from_json::<ClmmFactoryExecuteMsg>(msg.as_slice()).unwrap() {
+                ClmmFactoryExecuteMsg::CreatePool {
+                    token_a,
+                    token_b,
+                    fee,
+                    init_sqrt_price,
+                } => {
+                    assert_eq!(fee, 3000);
+                    // token_a < token_b by the CLMM ordering.
+                    assert!(token_a < token_b);
+                    assert!(!init_sqrt_price.is_zero());
+                }
+                other => panic!("expected CreatePool, got {:?}", other),
+            }
+        }
+        other => panic!("expected CreatePool exec, got {:?}", other),
+    }
+
+    // [2] MintPosition to the locker with both denoms attached as funds.
+    match &res.messages[2].msg {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr,
+            msg,
+            funds,
+        }) => {
+            assert_eq!(contract_addr, &deps.api.addr_make("clmm_manager").to_string());
+            assert_eq!(funds.len(), 2);
+            assert!(funds.windows(2).all(|w| w[0].denom <= w[1].denom));
+            match from_json::<ClmmManagerExecuteMsg>(msg.as_slice()).unwrap() {
+                ClmmManagerExecuteMsg::MintPosition {
+                    fee,
+                    tick_lower,
+                    tick_upper,
+                    recipient,
+                    amount0_min,
+                    amount1_min,
+                    deadline,
+                    ..
+                } => {
+                    assert_eq!(fee, 3000);
+                    // Full range snapped to tick_spacing 60.
+                    assert_eq!(tick_lower, -887220);
+                    assert_eq!(tick_upper, 887220);
+                    assert_eq!(recipient.as_deref(), Some(deps.api.addr_make("locker").as_str()));
+                    assert!(amount0_min.is_zero() && amount1_min.is_zero());
+                    assert_eq!(deadline, 0);
+                }
+                other => panic!("expected MintPosition, got {:?}", other),
+            }
+            // The total funds attached equal token side + pair_deposit.
+            let total_pair: Uint128 = funds
+                .iter()
+                .filter(|c| c.denom == PAIR_DENOM)
+                .map(|c| c.amount)
+                .sum();
+            assert_eq!(total_pair, pair_deposit);
+        }
+        other => panic!("expected MintPosition exec, got {:?}", other),
+    }
+
+    // [3] sweep-dust self callback.
+    match &res.messages[3].msg {
+        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+            assert_eq!(contract_addr, &mock_env().contract.address.to_string());
+            assert!(matches!(
+                from_json::<ExecuteMsg>(msg.as_slice()).unwrap(),
+                ExecuteMsg::Callback(CallbackMsg::SweepDust {})
+            ));
+        }
+        other => panic!("expected sweep callback, got {:?}", other),
+    }
+
+    assert_eq!(
+        SINK_STATE.load(deps.as_ref().storage).unwrap().status,
+        SinkStatus::Settled
+    );
+}
+
+#[test]
+fn clmm_settle_rejects_attached_funds() {
+    // Funds are rejected before any factory query, so tiers/pool are moot.
+    let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), None);
+    instantiate_clmm_sink(&mut deps);
+    let caller = deps.api.addr_make("cranker");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &coins(1, CREATE_FEE_DENOM)),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::UnexpectedFundsForClmmSettle {}));
+}
+
+#[test]
+fn clmm_settle_rejects_preexisting_pool() {
+    let mut deps = clmm_settle_deps(
+        settle_balances(),
+        default_tiers(),
+        Some("inj1preexistingpool".to_string()),
+    );
+    instantiate_clmm_sink(&mut deps);
+    let caller = deps.api.addr_make("cranker");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::ClmmPoolAlreadyExists { .. }));
+}
+
+#[test]
+fn clmm_settle_rejects_unsupported_fee_tier() {
+    // Sink wants fee tier 3000 but the factory only enables 500.
+    let mut deps = clmm_settle_deps(
+        settle_balances(),
+        vec![FeeTierEntry { fee: 500, tick_spacing: 10 }],
+        None,
+    );
+    instantiate_clmm_sink(&mut deps);
+    let cranker = deps.api.addr_make("cranker");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&cranker, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::FeeTierNotSupported { fee: 3000 }));
+}
+
+// ------------------------------------------------------------------------
+// Factory CLMM validation
+// ------------------------------------------------------------------------
+
+#[test]
+fn factory_rejects_half_configured_clmm() {
+    let mut deps = simple_deps();
+    let mut init = make_factory_init(&deps.api);
+    init.clmm_manager = None; // factory set, manager unset
+    let admin = deps.api.addr_make("admin");
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        InstantiateMsg::Factory(init),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::ClmmHalfConfigured {}));
+}
+
+#[test]
+fn create_sink_rejects_clmm_address_mismatch() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let mut sink_init = make_sink_init(&deps.api);
+    sink_init.pool_kind = PoolKind::Clmm {
+        clmm_factory: deps.api.addr_make("wrong_clmm_factory").to_string(),
+        clmm_manager: deps.api.addr_make("clmm_manager").to_string(),
+        fee_tier: 3000,
+        position_recipient: deps.api.addr_make("locker").to_string(),
+    };
+    let caller = deps.api.addr_make("issuer_keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::CreateSink {
+            salt: Binary::from(b"x".to_vec()),
+            sink_init,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::SinkClmmAddressMismatch { .. }));
+}
+
+#[test]
+fn create_sink_clmm_happy_path() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let mut sink_init = make_sink_init(&deps.api);
+    sink_init.pool_kind = clmm_pool_kind(&deps.api);
+    let caller = deps.api.addr_make("issuer_keeper");
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::CreateSink {
+            salt: Binary::from(b"clmm-salt".to_vec()),
+            sink_init,
+        },
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 1);
+    assert!(matches!(
+        &res.messages[0].msg,
+        CosmosMsg::Wasm(WasmMsg::Instantiate2 { code_id, .. }) if *code_id == 7
+    ));
+}
+
+// ------------------------------------------------------------------------
+// Locker
+// ------------------------------------------------------------------------
+
+use crate::msg::{LockerConfigResponse, LockerInit};
+
+fn instantiate_locker(deps: &mut RichDeps, admin: Option<String>) {
+    let init = LockerInit {
+        manager: deps.api.addr_make("clmm_manager").to_string(),
+        beneficiary: deps.api.addr_make("treasury").to_string(),
+        admin,
+    };
+    let caller = deps.api.addr_make("factory_caller");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Locker(init),
+    )
+    .unwrap();
+}
+
+#[test]
+fn create_locker_emits_instantiate2_and_pins_manager() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let caller = deps.api.addr_make("issuer_keeper");
+    let locker_init = LockerInit {
+        manager: deps.api.addr_make("clmm_manager").to_string(),
+        beneficiary: deps.api.addr_make("treasury").to_string(),
+        admin: None,
+    };
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::CreateLocker {
+            salt: Binary::from(b"locker-salt".to_vec()),
+            locker_init,
+        },
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 1);
+    match &res.messages[0].msg {
+        CosmosMsg::Wasm(WasmMsg::Instantiate2 { code_id, msg, admin, .. }) => {
+            assert!(admin.is_none());
+            assert_eq!(*code_id, 7);
+            assert!(matches!(
+                from_json::<InstantiateMsg>(msg.as_slice()).unwrap(),
+                InstantiateMsg::Locker(_)
+            ));
+        }
+        other => panic!("expected Instantiate2, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_locker_rejects_manager_mismatch() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let caller = deps.api.addr_make("issuer_keeper");
+    let locker_init = LockerInit {
+        manager: deps.api.addr_make("wrong_manager").to_string(),
+        beneficiary: deps.api.addr_make("treasury").to_string(),
+        admin: None,
+    };
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::CreateLocker {
+            salt: Binary::from(b"x".to_vec()),
+            locker_init,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::SinkClmmAddressMismatch { .. }));
+}
+
+#[test]
+fn locker_collect_fees_with_explicit_token_id() {
+    let mut deps = rich_deps(&[]);
+    instantiate_locker(&mut deps, None);
+    let anyone = deps.api.addr_make("anyone");
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&anyone, &[]),
+        ExecuteMsg::CollectFees {
+            token_id: Some("42".to_string()),
+        },
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 1);
+    match &res.messages[0].msg {
+        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+            assert_eq!(contract_addr, &deps.api.addr_make("clmm_manager").to_string());
+            match from_json::<ClmmManagerExecuteMsg>(msg.as_slice()).unwrap() {
+                ClmmManagerExecuteMsg::Collect { token_id, recipient } => {
+                    assert_eq!(token_id, "42");
+                    assert_eq!(recipient.as_deref(), Some(deps.api.addr_make("treasury").as_str()));
+                }
+                other => panic!("expected Collect, got {:?}", other),
+            }
+        }
+        other => panic!("expected manager.Collect exec, got {:?}", other),
+    }
+}
+
+#[test]
+fn locker_update_beneficiary_requires_admin() {
+    let mut deps = rich_deps(&[]);
+    let admin = deps.api.addr_make("locker_admin");
+    instantiate_locker(&mut deps, Some(admin.to_string()));
+
+    // Stranger rejected.
+    let stranger = deps.api.addr_make("stranger");
+    let new_ben = deps.api.addr_make("new_treasury");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::UpdateBeneficiary {
+            new_beneficiary: new_ben.to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    // Admin succeeds; query reflects the change.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateBeneficiary {
+            new_beneficiary: new_ben.to_string(),
+        },
+    )
+    .unwrap();
+    let cfg: LockerConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::LockerConfig {}).unwrap()).unwrap();
+    assert_eq!(cfg.beneficiary, new_ben.to_string());
+}
+
+#[test]
+fn locker_update_beneficiary_errors_when_no_admin() {
+    let mut deps = rich_deps(&[]);
+    instantiate_locker(&mut deps, None);
+    let anyone = deps.api.addr_make("anyone");
+    let new_ben = deps.api.addr_make("x");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&anyone, &[]),
+        ExecuteMsg::UpdateBeneficiary {
+            new_beneficiary: new_ben.to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::LockerNoAdmin {}));
+}
+
+#[test]
+fn collect_fees_rejected_on_sink_instance() {
+    let mut deps = rich_deps(&[]);
+    instantiate_sink_default(&mut deps);
+    let anyone = deps.api.addr_make("anyone");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&anyone, &[]),
+        ExecuteMsg::CollectFees { token_id: Some("1".to_string()) },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::WrongRole { .. }));
 }
 
 // Belt: assert the JSON shape of `create_sink_payload` matches what

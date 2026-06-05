@@ -86,6 +86,19 @@ pub fn instantiate(
             reason: "ema_halflife_seconds must be > 0".to_string(),
         });
     }
+    // `volatility_multiplier` is bounded above by 1_000_000: the raw dynamic fee
+    // is `base + |Δprice|/ema * multiplier` and is then clamped to `max_fee_ppm`
+    // (< 1_000_000), so a larger multiplier only makes the fee saturate to the
+    // cap sooner — it can never produce a fee >= 1_000_000 nor overflow (mul_div
+    // is 512-bit, the add is checked). The bound is defense-in-depth so a pool
+    // can't be instantiated with a nonsensical multiplier, and documents that
+    // anything past the ppm scale is meaningless. `0` is allowed (disables the
+    // volatility component → constant `base_fee_ppm`).
+    if msg.fee_config.volatility_multiplier > 1_000_000 {
+        return Err(ContractError::InvalidConfig {
+            reason: "volatility_multiplier must be <= 1_000_000".to_string(),
+        });
+    }
     // `max_fee_change_per_second_ppm == 0` is allowed — disables rate limiting.
     // Any positive value is valid; the clamp math uses `saturating_mul`/`min`
     // so there is no upper bound to check.
@@ -171,6 +184,18 @@ pub fn instantiate(
         .add_attribute("initial_tick", current_tick.to_string()))
 }
 
+/// Reject any native funds attached to an entrypoint that does not consume
+/// them (mirrors `cw_utils::nonpayable`, which is not a dependency). Payable
+/// entrypoints (`Mint`, `Swap*`) handle and refund their own funds.
+fn ensure_nonpayable(info: &MessageInfo) -> Result<(), ContractError> {
+    if !info.funds.is_empty() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "no funds may be attached to this message",
+        )));
+    }
+    Ok(())
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
     deps: DepsMut,
@@ -178,16 +203,32 @@ pub fn execute(
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
-    // Reentrancy guard: while a flash loan is mid-callback, reject every
-    // fund-affecting mutator. Pure config setters (owner-gated, no fund
-    // movement) are exempt. The flash handler itself sets the lock after this
-    // check; its reply clears it. Only flash mutates the lock.
-    let guarded = !matches!(
-        msg,
-        ExecuteMsg::SetFeeProtocol { .. } | ExecuteMsg::UpdateProtocolFeeConfig { .. }
-    );
-    if guarded && crate::state::is_locked(deps.storage) {
+    // Reentrancy guard: while a flash loan is mid-callback, reject EVERY execute
+    // entrypoint — including the owner-gated config setters. Those move no funds,
+    // but `reply_flash` re-reads `PROTOCOL_FEE_CONFIG` *after* the callback runs,
+    // so allowing a mid-flash `SetFeeProtocol`/`UpdateProtocolFeeConfig` would let
+    // the carve of the loan's own fee be re-split mid-loan (least-surprise; not a
+    // solvency issue, since the owner controls both shares anyway). The flash
+    // handler sets the lock after this check; its reply clears it. Only flash
+    // mutates the lock.
+    if crate::state::is_locked(deps.storage) {
         return Err(ContractError::Reentrancy {});
+    }
+
+    // Reject native funds on every entrypoint that does not consume them. Only
+    // the liquidity-add and swap paths legitimately carry funds (and refund any
+    // surplus); everything else (burn, collect, flash, protocol admin, the
+    // CW20 Receive hook) would otherwise silently absorb attached coins into the
+    // pool with no refund. See `ensure_nonpayable`.
+    let payable = matches!(
+        msg,
+        ExecuteMsg::Mint { .. }
+            | ExecuteMsg::Swap { .. }
+            | ExecuteMsg::SwapExactInput { .. }
+            | ExecuteMsg::SwapExactOutput { .. }
+    );
+    if !payable {
+        ensure_nonpayable(&info)?;
     }
 
     match msg {

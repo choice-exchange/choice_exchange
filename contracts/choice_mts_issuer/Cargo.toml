@@ -40,5 +40,11 @@ thiserror            = { version = "2.0.12" }
 # in-sync with the legacy XYK factory contracts.
 choice                = { path = "../../packages/choice", default-features = false, version = "1.1.2" }
 
+# Used for the `factory::ExecuteMsg::AuthorizeCreation` + `AssetInfo` schema —
+# the issuer chains a JSON-encoded `AuthorizeCreation` at the consumer dApp's
+# CLMM factory during RegisterLaunch when `clmm_pool_auth` is Some (anti-squat
+# gate). Same reuse-the-shared-schema rationale as the `choice` dep above.
+choice-clmm-common    = { workspace = true }
+
 [dev-dependencies]
 injective-test-tube  = { version = "1.16.3-1" }

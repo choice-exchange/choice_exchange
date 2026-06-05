@@ -225,6 +225,185 @@ mod tests {
         assert_eq!(find("stranded"), Uint128::new(500));
     }
 
+    /// Regression: a swap must refund the surplus of the input denom AND the
+    /// full amount of any other denom attached — including the pool's *other*
+    /// token. Previously `apply_swap` only refunded the input-denom surplus, so
+    /// any extra coins sent with the swap were silently absorbed into reserves
+    /// and stranded forever (mint already refunded them; swap did not).
+    #[test]
+    fn swap_refunds_excess_and_unrelated_native_funds() {
+        let mut deps = mock_dependencies();
+
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: native("usdt"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 100,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        let creator = message_info(&deps.api.addr_make("factory"), &[]);
+        instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
+
+        // Deep liquidity so the small swap fully consumes its ~1000 input.
+        let mint_msg = ExecuteMsg::Mint {
+            lower_tick: -200,
+            upper_tick: 200,
+            amount: Uint128::from(1_000_000u128),
+        };
+        let lp_info = message_info(
+            &deps.api.addr_make("lp_provider"),
+            &[
+                Coin::new(Uint128::new(1_000_000_000), "inj"),
+                Coin::new(Uint128::new(1_000_000_000), "usdt"),
+            ],
+        );
+        execute(deps.as_mut(), mock_env(), lp_info, mint_msg).unwrap();
+
+        let trader = deps.api.addr_make("trader");
+        let recipient = deps.api.addr_make("recipient");
+        let min_sqrt_ratio = Uint256::from(4295128739u128 + 1);
+
+        let swap_msg = ExecuteMsg::Swap {
+            recipient: recipient.to_string(),
+            zero_for_one: true, // selling token0 (inj) for token1 (usdt)
+            amount_specified: Uint128::from(1000u128),
+            sqrt_price_limit_x96: min_sqrt_ratio,
+        };
+
+        // Attach: input inj with a surplus, the *other* pool token (usdt), and
+        // an unrelated denom. All non-consumed coins must be refunded to sender.
+        let trader_info = message_info(
+            &trader,
+            &[
+                Coin::new(Uint128::new(1500), "inj"),
+                Coin::new(Uint128::new(700), "usdt"),
+                Coin::new(Uint128::new(500), "stranded"),
+            ],
+        );
+        let res = execute(deps.as_mut(), mock_env(), trader_info, swap_msg).unwrap();
+
+        let amount_in: Uint128 = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "amount_in")
+            .unwrap()
+            .value
+            .parse()
+            .unwrap();
+        assert!(!amount_in.is_zero(), "swap should consume some input");
+
+        // The refund BankMsg goes to the SENDER (trader); the swap output (usdt)
+        // goes to the distinct `recipient`, so we can disambiguate by address.
+        let refund = res
+            .messages
+            .iter()
+            .find_map(|m| match &m.msg {
+                cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+                    if to_address == trader.as_str() =>
+                {
+                    Some(amount.clone())
+                }
+                _ => None,
+            })
+            .expect("expected a refund BankMsg::Send to the trader");
+
+        let find = |denom: &str| {
+            refund
+                .iter()
+                .find(|c| c.denom == denom)
+                .map(|c| c.amount)
+                .unwrap_or_default()
+        };
+        // Input-denom surplus, plus the other pool token and the unrelated denom
+        // in full.
+        assert_eq!(find("inj"), Uint128::new(1500) - amount_in);
+        assert_eq!(find("usdt"), Uint128::new(700));
+        assert_eq!(find("stranded"), Uint128::new(500));
+
+        // Sanity: the swap output (usdt) is a *separate* message to `recipient`.
+        let out_to_recipient = res.messages.iter().any(|m| matches!(
+            &m.msg,
+            cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, .. })
+                if to_address == recipient.as_str()
+        ));
+        assert!(out_to_recipient, "swap output should go to recipient");
+    }
+
+    /// Regression: entrypoints that don't consume funds must REJECT attached
+    /// native coins rather than silently absorbing them into the pool. Only
+    /// Mint / Swap* are payable.
+    #[test]
+    fn nonpayable_entrypoints_reject_attached_funds() {
+        let mut deps = mock_dependencies();
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: native("usdt"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 100,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        let creator = message_info(&deps.api.addr_make("factory"), &[]);
+        instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
+
+        let user = deps.api.addr_make("user");
+        let funds = [Coin::new(Uint128::new(1), "inj")];
+
+        let cases = vec![
+            ExecuteMsg::Burn {
+                lower_tick: -10,
+                upper_tick: 10,
+                amount: Uint128::zero(),
+            },
+            ExecuteMsg::Collect {
+                recipient: user.to_string(),
+                lower_tick: -10,
+                upper_tick: 10,
+                amount0_requested: Uint128::MAX,
+                amount1_requested: Uint128::MAX,
+            },
+            ExecuteMsg::Flash {
+                recipient: user.to_string(),
+                amount0: Uint128::new(1),
+                amount1: Uint128::zero(),
+                data: cosmwasm_std::Binary::default(),
+            },
+            ExecuteMsg::CollectProtocol {
+                amount0_requested: Uint128::MAX,
+                amount1_requested: Uint128::MAX,
+            },
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 4,
+                fee_protocol_1: 4,
+            },
+        ];
+
+        for m in cases {
+            let label = format!("{:?}", m);
+            let err = match execute(deps.as_mut(), mock_env(), message_info(&user, &funds), m) {
+                Err(e) => e,
+                Ok(_) => panic!("{} must reject attached funds", label),
+            };
+            assert!(
+                err.to_string().contains("no funds"),
+                "{}: unexpected error {}",
+                label,
+                err
+            );
+        }
+    }
+
     #[test]
     fn test_mint_math_integration() {
         let mut deps = mock_dependencies();
@@ -678,7 +857,9 @@ mod tests {
             upper_tick: 200,
             amount: Uint128::from(500_000u128),
         };
-        let res = execute(deps.as_mut(), mock_env(), lp_info.clone(), burn_msg).unwrap();
+        // Burn/Collect take no funds — use an empty-funds info for the same LP.
+        let lp_nopay = message_info(&deps.api.addr_make(lp_addr), &[]);
+        let res = execute(deps.as_mut(), mock_env(), lp_nopay.clone(), burn_msg).unwrap();
 
         // Verify Burn Attributes
         let burned_0 = res
@@ -711,7 +892,7 @@ mod tests {
             amount0_requested: max_collect,
             amount1_requested: max_collect,
         };
-        let res_collect = execute(deps.as_mut(), mock_env(), lp_info, collect_msg).unwrap();
+        let res_collect = execute(deps.as_mut(), mock_env(), lp_nopay, collect_msg).unwrap();
 
         // 6. Verify Payout
         let collected_0 = res_collect
@@ -1404,7 +1585,7 @@ mod tests {
         let res = execute(
             deps.as_mut(),
             mock_env(),
-            lp_info.clone(),
+            message_info(&lp, &[]),
             ExecuteMsg::Burn {
                 lower_tick: -200,
                 upper_tick: 200,
@@ -1429,7 +1610,7 @@ mod tests {
         let collect_res = execute(
             deps.as_mut(),
             mock_env(),
-            lp_info,
+            message_info(&lp, &[]),
             ExecuteMsg::Collect {
                 recipient: "lp".to_string(),
                 lower_tick: -200,
@@ -1504,7 +1685,7 @@ mod tests {
         execute(
             deps.as_mut(),
             mock_env(),
-            info,
+            message_info(&lp, &[]),
             ExecuteMsg::Burn {
                 lower_tick: -200,
                 upper_tick: 200,
@@ -2428,6 +2609,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err2, ContractError::Reentrancy {}));
+
+        // Config setters are now ALSO guarded during a flash (previously exempt).
+        // `reply_flash` re-reads PROTOCOL_FEE_CONFIG after the callback, so a
+        // mid-flash carve change is rejected. The lock check precedes the owner
+        // check, so this reverts with Reentrancy regardless of sender.
+        let err3 = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 4,
+                fee_protocol_1: 4,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err3, ContractError::Reentrancy {}));
+
+        let err4 = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::UpdateProtocolFeeConfig {
+                treasury: None,
+                burn_auction: None,
+                burn_share_bps: None,
+                clear_burn_auction: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err4, ContractError::Reentrancy {}));
     }
 
     #[test]

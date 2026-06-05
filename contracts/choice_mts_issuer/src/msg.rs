@@ -26,6 +26,10 @@ pub struct InstantiateMsg {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+// `RegisterLaunch` is intentionally a wide message (the whole launch is
+// described in one atomic call); the size gap vs. the small admin variants is
+// expected and boxing it would only obscure the wire shape.
+#[allow(clippy::large_enum_variant)]
 pub enum ExecuteMsg {
     /// Permissionless. Creates the launch denom, mints `total_supply` to
     /// self, ships `evm_supply` to `evm_authority`, pairs the denom to a
@@ -88,6 +92,23 @@ pub enum ExecuteMsg {
         /// reduced amount. Caller must therefore ensure
         /// `total_supply - evm_supply >= 1`.
         choice_factory: Option<String>,
+        /// Layer A (anti-squat entropy). When `Some`, the per-launch salt is
+        /// appended to the subdenom: `{prefix}_{internal_id}_{salt_suffix}`,
+        /// making the launch denom unguessable before this tx exists. Must be
+        /// ASCII-alphanumeric and short enough that the full subdenom stays
+        /// within the 44-char tokenfactory cap. `None` preserves the legacy
+        /// `{prefix}_{internal_id}` form. The keeper persists the salt so the
+        /// denom round-trips; off-chain consumers must read the denom from the
+        /// `register_launch` event rather than recomputing it.
+        salt_suffix: Option<String>,
+        /// Layer B (anti-squat gate). When `Some`, the issuer chains an
+        /// `AuthorizeCreation` at the given CLMM factory reserving the
+        /// `(launch_denom, pair_denom, fee)` pool slot for `seeder_addr` (the
+        /// sink that runs `CreatePool` at `Settle`). The issuer owns the
+        /// `factory/{this}/…` namespace, so it is authorized to reserve. Use
+        /// `ttl_seconds = 0` (no expiry) for graduations. `None` skips the
+        /// reservation (e.g. legacy XYK graduations).
+        clmm_pool_auth: Option<ClmmPoolAuth>,
     },
 
     /// Keeper-relayed after the EVM authority emits `BootstrapReady(internal_id,
@@ -124,6 +145,22 @@ pub enum ExecuteMsg {
 
     /// Admin-only: rotate the pair-asset forwarder bech32.
     UpdateForwarder { new_forwarder: String },
+}
+
+/// Layer B reservation parameters for [`ExecuteMsg::RegisterLaunch`]. Carries
+/// just enough for the issuer to emit `AuthorizeCreation` at the CLMM factory;
+/// the launch denom (token_a) and `pair_denom` (token_b) and the sink
+/// (`seeder_addr`, the authorized creator) are already known to the issuer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct ClmmPoolAuth {
+    /// The consumer dApp's CLMM factory the sink will `CreatePool` on.
+    pub clmm_factory: String,
+    /// Fee tier (pips) of the graduation pool — must match the sink's
+    /// configured `fee_tier`, else the reservation guards the wrong slot.
+    pub fee: u32,
+    /// Reservation TTL in seconds; `0` means no expiry (the graduation
+    /// default — the launch denom is unique, so it can't lapse before Settle).
+    pub ttl_seconds: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

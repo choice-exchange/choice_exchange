@@ -13,17 +13,26 @@ use crate::msg::LpDestination;
 pub enum Role {
     Factory,
     Sink,
+    Locker,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct FactoryConfig {
     pub admin: Addr,
-    /// Code-id used by `Instantiate2`. Mutable via `UpdateSinkCodeId`.
+    /// Code-id used by `Instantiate2` for both sinks and lockers (the seeder
+    /// binary serves every role). Mutable via `UpdateSinkCodeId`.
     /// Single-binary deploys set this == own code-id at instantiate; the
     /// admin can repoint to a freshly-audited build later.
     pub sink_code_id: u64,
-    /// Immutable: pinning a factory to one DEX deployment.
+    /// Immutable: pinning a factory to one XYK DEX deployment. Used by `Xyk`
+    /// sinks.
     pub choice_factory: Addr,
+    /// Immutable: the CLMM factory `Clmm` sinks create pools on. `None`
+    /// disables CLMM graduation for sinks of this factory.
+    pub clmm_factory: Option<Addr>,
+    /// Immutable: the CLMM NFT position manager `Clmm` sinks mint through.
+    /// Set together with `clmm_factory`.
+    pub clmm_manager: Option<Addr>,
     /// Immutable cap on per-sink `tip_bps`.
     pub max_tip_bps: u16,
 }
@@ -35,14 +44,64 @@ pub struct SinkConfig {
     pub pair_denom: String,
     pub token_decimals: u8,
     pub pair_decimals: u8,
-    pub lp_destination: LpDestinationStored,
+    pub pool_kind: PoolKindStored,
     pub refund_receiver: Addr,
     pub deadline_seconds: u64,
     /// Wall-clock seconds at instantiate. `Refund`'s permissionless gate
     /// opens at `instantiated_at + deadline_seconds`.
     pub instantiated_at: u64,
     pub tip_bps: u16,
-    pub choice_factory: Addr,
+}
+
+/// Address-validated mirror of [`crate::msg::PoolKind`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolKindStored {
+    Xyk {
+        choice_factory: Addr,
+        lp_destination: LpDestinationStored,
+    },
+    Clmm {
+        clmm_factory: Addr,
+        clmm_manager: Addr,
+        fee_tier: u32,
+        position_recipient: Addr,
+    },
+}
+
+impl From<&PoolKindStored> for crate::msg::PoolKind {
+    fn from(s: &PoolKindStored) -> Self {
+        match s {
+            PoolKindStored::Xyk {
+                choice_factory,
+                lp_destination,
+            } => crate::msg::PoolKind::Xyk {
+                choice_factory: choice_factory.to_string(),
+                lp_destination: lp_destination.into(),
+            },
+            PoolKindStored::Clmm {
+                clmm_factory,
+                clmm_manager,
+                fee_tier,
+                position_recipient,
+            } => crate::msg::PoolKind::Clmm {
+                clmm_factory: clmm_factory.to_string(),
+                clmm_manager: clmm_manager.to_string(),
+                fee_tier: *fee_tier,
+                position_recipient: position_recipient.to_string(),
+            },
+        }
+    }
+}
+
+/// Locker role config — owns a CLMM position NFT, collects fees to
+/// `beneficiary`, never withdraws principal.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct LockerConfig {
+    pub manager: Addr,
+    pub beneficiary: Addr,
+    /// `None` ⇒ beneficiary immutable.
+    pub admin: Option<Addr>,
 }
 
 /// Address-validated variant of [`crate::msg::LpDestination`] — kept separate
@@ -90,3 +149,4 @@ pub const ROLE: Item<Role> = Item::new("role");
 pub const FACTORY_CONFIG: Item<FactoryConfig> = Item::new("factory_config");
 pub const SINK_CONFIG: Item<SinkConfig> = Item::new("sink_config");
 pub const SINK_STATE: Item<SinkState> = Item::new("sink_state");
+pub const LOCKER_CONFIG: Item<LockerConfig> = Item::new("locker_config");

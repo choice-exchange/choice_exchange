@@ -74,6 +74,18 @@ pub struct DecreaseParams {
     pub deadline: u64,
 }
 
+/// Reject any native funds attached to an entrypoint that does not consume
+/// them (mirrors `cw_utils::nonpayable`, which is not a dependency). Only
+/// `MintPosition` / `IncreaseLiquidity` forward funds to the pool.
+fn ensure_nonpayable(info: &MessageInfo) -> Result<(), ContractError> {
+    if !info.funds.is_empty() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "no funds may be attached to this message",
+        )));
+    }
+    Ok(())
+}
+
 fn validate_deadline(env: &Env, deadline: u64) -> Result<(), ContractError> {
     if deadline > 0 && env.block.time.seconds() > deadline {
         return Err(ContractError::DeadlineExceeded {});
@@ -171,6 +183,19 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     let base_contract = Cw721MetadataContract::default();
+
+    // Reject native funds on every entrypoint that does not consume them. Only
+    // `MintPosition` / `IncreaseLiquidity` legitimately carry funds (forwarded
+    // to the pool, surplus refunded); all other entrypoints — decrease, collect,
+    // burn, and the cw721 pass-throughs — would otherwise strand attached coins
+    // in the manager contract.
+    let payable = matches!(
+        msg,
+        ExecuteMsg::MintPosition { .. } | ExecuteMsg::IncreaseLiquidity { .. }
+    );
+    if !payable {
+        ensure_nonpayable(&info)?;
+    }
 
     match msg {
         ExecuteMsg::MintPosition {

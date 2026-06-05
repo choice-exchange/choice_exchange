@@ -21,6 +21,16 @@ pub enum ContractError {
     #[error("Subdenom prefix `{got}` is empty or exceeds the {max}-char cap")]
     SubdenomPrefixInvalid { got: String, max: usize },
 
+    #[error("salt_suffix `{got}` must be non-empty and ASCII-alphanumeric")]
+    SaltSuffixInvalid { got: String },
+
+    #[error("Constructed subdenom `{subdenom}` is {len} chars, over the {max}-char tokenfactory cap")]
+    SubdenomTooLong {
+        subdenom: String,
+        len: usize,
+        max: usize,
+    },
+
     #[error("Decimals {got} out of range (must be 0..=18)")]
     DecimalsOutOfRange { got: u32 },
 

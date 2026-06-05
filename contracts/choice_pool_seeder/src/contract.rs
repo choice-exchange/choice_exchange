@@ -1,11 +1,13 @@
+use crate::clmm::{full_range_ticks, init_sqrt_price_from_amounts};
 use crate::error::ContractError;
 use crate::msg::{
-    CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg, LpDestination,
-    MigrateMsg, QueryMsg, RoleResponse, SinkConfigResponse, SinkInit, SinkStateResponse,
+    CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg, LockerConfigResponse,
+    LockerInit, LpDestination, MigrateMsg, PoolKind, QueryMsg, RoleResponse, SinkConfigResponse,
+    SinkInit, SinkStateResponse,
 };
 use crate::state::{
-    FactoryConfig, LpDestinationStored, Role, SinkConfig, SinkState, SinkStatus, FACTORY_CONFIG,
-    ROLE, SINK_CONFIG, SINK_STATE,
+    FactoryConfig, LockerConfig, LpDestinationStored, PoolKindStored, Role, SinkConfig, SinkState,
+    SinkStatus, FACTORY_CONFIG, LOCKER_CONFIG, ROLE, SINK_CONFIG, SINK_STATE,
 };
 
 #[cfg(not(feature = "library"))]
@@ -13,14 +15,23 @@ use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
     coins, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
-    Response, StdError, StdResult, Uint128, WasmMsg,
+    Response, StdError, StdResult, Uint128, Uint256, WasmMsg,
 };
 use cw2::set_contract_version;
+use serde::Deserialize;
 
 use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::factory::{ExecuteMsg as FactoryExecuteMsg, QueryMsg as ChoiceFactoryQueryMsg};
 use choice::pair::ExecuteMsg as PairExecuteMsg;
 use choice::querier::query_token_factory_denom_create_fee;
+
+use choice_clmm_common::factory::{
+    ExecuteMsg as ClmmFactoryExecuteMsg, FeeTierEntry, QueryMsg as ClmmFactoryQueryMsg,
+};
+use choice_clmm_common::manager::{
+    ExecuteMsg as ClmmManagerExecuteMsg, QueryMsg as ClmmManagerQueryMsg,
+};
+use choice_clmm_common::types::AssetInfo as ClmmAssetInfo;
 
 use injective_cosmwasm::query::InjectiveQueryWrapper;
 use injective_cosmwasm::InjectiveMsgWrapper;
@@ -38,6 +49,14 @@ pub const HARD_MAX_TIP_BPS: u16 = 1000;
 /// 64-byte truncated identifier so this just needs to be human-recognizable.
 const SINK_LABEL_PREFIX: &str = "choice-pool-seeder-sink";
 
+/// Label prefix for spawned lockers.
+const LOCKER_LABEL_PREFIX: &str = "choice-pool-seeder-locker";
+
+/// Cap on the number of position NFTs `CollectFees { token_id: None }` will
+/// enumerate-and-collect in one call. A launchpad locker holds exactly one,
+/// but the bound keeps the message count sane if a locker is ever reused.
+const COLLECT_FEES_PAGE: u32 = 30;
+
 // ------------------------------------------------------------------------
 // Entry points
 // ------------------------------------------------------------------------
@@ -53,6 +72,7 @@ pub fn instantiate(
     match msg {
         InstantiateMsg::Factory(init) => instantiate_factory(deps, info, init),
         InstantiateMsg::Sink(init) => instantiate_sink(deps, env, info, init),
+        InstantiateMsg::Locker(init) => instantiate_locker(deps, info, init),
     }
 }
 
@@ -71,6 +91,17 @@ fn instantiate_factory(
     let admin = deps.api.addr_validate(&init.admin)?;
     let choice_factory = deps.api.addr_validate(&init.choice_factory)?;
 
+    // CLMM addresses are all-or-nothing: a factory either knows the full CLMM
+    // route (factory + manager) or seeds XYK only.
+    let (clmm_factory, clmm_manager) = match (init.clmm_factory, init.clmm_manager) {
+        (Some(f), Some(m)) => (
+            Some(deps.api.addr_validate(&f)?),
+            Some(deps.api.addr_validate(&m)?),
+        ),
+        (None, None) => (None, None),
+        _ => return Err(ContractError::ClmmHalfConfigured {}),
+    };
+
     ROLE.save(deps.storage, &Role::Factory)?;
     FACTORY_CONFIG.save(
         deps.storage,
@@ -78,6 +109,8 @@ fn instantiate_factory(
             admin: admin.clone(),
             sink_code_id: init.sink_code_id,
             choice_factory: choice_factory.clone(),
+            clmm_factory: clmm_factory.clone(),
+            clmm_manager: clmm_manager.clone(),
             max_tip_bps: init.max_tip_bps,
         },
     )?;
@@ -88,6 +121,14 @@ fn instantiate_factory(
         .add_attribute("admin", admin)
         .add_attribute("sink_code_id", init.sink_code_id.to_string())
         .add_attribute("choice_factory", choice_factory)
+        .add_attribute(
+            "clmm_factory",
+            clmm_factory.map(|a| a.to_string()).unwrap_or_default(),
+        )
+        .add_attribute(
+            "clmm_manager",
+            clmm_manager.map(|a| a.to_string()).unwrap_or_default(),
+        )
         .add_attribute("max_tip_bps", init.max_tip_bps.to_string()))
 }
 
@@ -117,10 +158,10 @@ fn instantiate_sink(
 
     let issuer = deps.api.addr_validate(&init.issuer)?;
     let refund_receiver = deps.api.addr_validate(&init.refund_receiver)?;
-    let choice_factory = deps.api.addr_validate(&init.choice_factory)?;
-    let lp_destination = match init.lp_destination {
-        LpDestination::Burn => LpDestinationStored::Burn,
-        LpDestination::SendTo(s) => LpDestinationStored::SendTo(deps.api.addr_validate(&s)?),
+    let pool_kind = validate_pool_kind(deps.as_ref(), &init.pool_kind)?;
+    let pool_kind_label = match &pool_kind {
+        PoolKindStored::Xyk { .. } => "xyk",
+        PoolKindStored::Clmm { .. } => "clmm",
     };
 
     ROLE.save(deps.storage, &Role::Sink)?;
@@ -132,12 +173,11 @@ fn instantiate_sink(
             pair_denom: init.pair_denom.clone(),
             token_decimals: init.token_decimals,
             pair_decimals: init.pair_decimals,
-            lp_destination,
+            pool_kind,
             refund_receiver: refund_receiver.clone(),
             deadline_seconds: init.deadline_seconds,
             instantiated_at: env.block.time.seconds(),
             tip_bps: init.tip_bps,
-            choice_factory: choice_factory.clone(),
         },
     )?;
     SINK_STATE.save(
@@ -156,9 +196,76 @@ fn instantiate_sink(
         .add_attribute("token_denom", init.token_denom)
         .add_attribute("pair_denom", init.pair_denom)
         .add_attribute("refund_receiver", refund_receiver)
-        .add_attribute("choice_factory", choice_factory)
+        .add_attribute("pool_kind", pool_kind_label)
         .add_attribute("deadline_seconds", init.deadline_seconds.to_string())
         .add_attribute("tip_bps", init.tip_bps.to_string()))
+}
+
+/// Address-validate a `PoolKind` into its stored form. Does NOT check it
+/// against a factory's pinned addresses — that's the factory's job in
+/// `CreateSink` (a directly-instantiated sink has no factory to check
+/// against).
+fn validate_pool_kind(
+    deps: Deps<InjectiveQueryWrapper>,
+    pool_kind: &PoolKind,
+) -> Result<PoolKindStored, ContractError> {
+    Ok(match pool_kind {
+        PoolKind::Xyk {
+            choice_factory,
+            lp_destination,
+        } => PoolKindStored::Xyk {
+            choice_factory: deps.api.addr_validate(choice_factory)?,
+            lp_destination: match lp_destination {
+                LpDestination::Burn => LpDestinationStored::Burn,
+                LpDestination::SendTo(s) => LpDestinationStored::SendTo(deps.api.addr_validate(s)?),
+            },
+        },
+        PoolKind::Clmm {
+            clmm_factory,
+            clmm_manager,
+            fee_tier,
+            position_recipient,
+        } => PoolKindStored::Clmm {
+            clmm_factory: deps.api.addr_validate(clmm_factory)?,
+            clmm_manager: deps.api.addr_validate(clmm_manager)?,
+            fee_tier: *fee_tier,
+            position_recipient: deps.api.addr_validate(position_recipient)?,
+        },
+    })
+}
+
+fn instantiate_locker(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    _info: MessageInfo,
+    init: LockerInit,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let manager = deps.api.addr_validate(&init.manager)?;
+    let beneficiary = deps.api.addr_validate(&init.beneficiary)?;
+    let admin = init
+        .admin
+        .as_deref()
+        .map(|a| deps.api.addr_validate(a))
+        .transpose()?;
+
+    ROLE.save(deps.storage, &Role::Locker)?;
+    LOCKER_CONFIG.save(
+        deps.storage,
+        &LockerConfig {
+            manager: manager.clone(),
+            beneficiary: beneficiary.clone(),
+            admin: admin.clone(),
+        },
+    )?;
+
+    Ok(Response::new()
+        .add_attribute("action", "instantiate")
+        .add_attribute("role", "locker")
+        .add_attribute("manager", manager)
+        .add_attribute("beneficiary", beneficiary)
+        .add_attribute(
+            "admin",
+            admin.map(|a| a.to_string()).unwrap_or_default(),
+        ))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -172,6 +279,9 @@ pub fn execute(
         ExecuteMsg::CreateSink { salt, sink_init } => {
             exec_create_sink(deps, env, info, salt, sink_init)
         }
+        ExecuteMsg::CreateLocker { salt, locker_init } => {
+            exec_create_locker(deps, env, info, salt, locker_init)
+        }
         ExecuteMsg::Settle {} => exec_settle(deps, env, info),
         ExecuteMsg::Refund {} => exec_refund(deps, env, info),
         ExecuteMsg::UpdateAdmin { new_admin } => exec_update_admin(deps, info, new_admin),
@@ -179,6 +289,10 @@ pub fn execute(
             exec_update_sink_code_id(deps, info, new_sink_code_id)
         }
         ExecuteMsg::Callback(cb) => exec_callback(deps, env, info, cb),
+        ExecuteMsg::CollectFees { token_id } => exec_collect_fees(deps, env, info, token_id),
+        ExecuteMsg::UpdateBeneficiary { new_beneficiary } => {
+            exec_update_beneficiary(deps, info, new_beneficiary)
+        }
     }
 }
 
@@ -201,15 +315,11 @@ fn exec_create_sink(
             max: cfg.max_tip_bps,
         });
     }
-    // Reject — don't silently rewrite — so the caller sees what's wrong. The
-    // factory's pinned `choice_factory` is the only DEX a sink it spawns will
-    // talk to; consumers must construct `sink_init` against the same value.
-    if sink_init.choice_factory != cfg.choice_factory.as_str() {
-        return Err(ContractError::SinkChoiceFactoryMismatch {
-            got: sink_init.choice_factory.clone(),
-            expected: cfg.choice_factory.to_string(),
-        });
-    }
+    // Reject — don't silently rewrite — so the caller sees what's wrong. A
+    // sink only ever talks to the DEX deployment(s) this factory pins;
+    // consumers must construct `sink_init.pool_kind` against the same
+    // addresses.
+    require_pool_kind_matches_factory(&cfg, &sink_init.pool_kind)?;
 
     let label = format!("{}-{}", SINK_LABEL_PREFIX, sink_init.token_denom);
 
@@ -233,6 +343,48 @@ fn exec_create_sink(
         .add_attribute("token_denom", sink_init.token_denom)
         .add_attribute("pair_denom", sink_init.pair_denom)
         .add_attribute("tip_bps", sink_init.tip_bps.to_string()))
+}
+
+fn exec_create_locker(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    _env: Env,
+    _info: MessageInfo,
+    salt: Binary,
+    locker_init: LockerInit,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let cfg = require_factory(deps.as_ref(), "create_locker")?;
+
+    // A locker only makes sense alongside CLMM graduation; pin its `manager`
+    // to the factory's CLMM manager so a locker can't be aimed at an
+    // unrelated NFT contract.
+    let clmm_manager = cfg.clmm_manager.as_ref().ok_or(ContractError::ClmmNotConfigured {})?;
+    if locker_init.manager != clmm_manager.as_str() {
+        return Err(ContractError::SinkClmmAddressMismatch {
+            which: "manager".to_string(),
+            got: locker_init.manager.clone(),
+            expected: clmm_manager.to_string(),
+        });
+    }
+
+    let label = format!("{}-{}", LOCKER_LABEL_PREFIX, locker_init.beneficiary);
+    let init_msg = to_json_binary(&InstantiateMsg::Locker(locker_init.clone()))?;
+    let msg = CosmosMsg::Wasm(WasmMsg::Instantiate2 {
+        // No admin → locker code is immutable; the only mutable knob is the
+        // optional `beneficiary` rotation inside the locker itself.
+        admin: None,
+        code_id: cfg.sink_code_id,
+        label,
+        msg: init_msg,
+        funds: vec![],
+        salt,
+    });
+
+    Ok(Response::new()
+        .add_message(msg)
+        .add_attribute("action", "create_locker")
+        .add_attribute("code_id", cfg.sink_code_id.to_string())
+        .add_attribute("manager", locker_init.manager)
+        .add_attribute("beneficiary", locker_init.beneficiary))
 }
 
 fn exec_update_admin(
@@ -300,6 +452,67 @@ fn exec_settle(
         });
     }
 
+    // Mark terminal *before* dispatching messages: this contract has no
+    // re-entry path today, but in CW a bug elsewhere that re-enters this
+    // handler would skip the recheck if we flipped the bit after — flipping
+    // first is the safer default and the in-tx revert still cleans up on
+    // failure.
+    state.status = SinkStatus::Settled;
+    SINK_STATE.save(deps.storage, &state)?;
+
+    match cfg.pool_kind.clone() {
+        PoolKindStored::Xyk {
+            choice_factory,
+            ..
+        } => settle_xyk(deps, env, info, &cfg, &choice_factory, token_bal, pair_bal),
+        PoolKindStored::Clmm {
+            clmm_factory,
+            clmm_manager,
+            fee_tier,
+            position_recipient,
+        } => settle_clmm(
+            deps,
+            env,
+            info,
+            &cfg,
+            ClmmSettleParams {
+                clmm_factory,
+                clmm_manager,
+                fee_tier,
+                position_recipient,
+            },
+            token_bal,
+            pair_bal,
+        ),
+    }
+}
+
+/// Compute the pair-side tip and the remaining deposit. Tip is taken from the
+/// pair-asset side — the side with real value. The launch token has no market
+/// price until the pool exists, so paying tips in `token_denom` would just
+/// print free tokens to the cranker.
+fn split_tip(seed_pair: Uint128, tip_bps: u16) -> Result<(Uint128, Uint128), ContractError> {
+    let tip = if tip_bps == 0 {
+        Uint128::zero()
+    } else {
+        seed_pair.multiply_ratio(tip_bps as u128, 10_000u128)
+    };
+    let pair_deposit = seed_pair.checked_sub(tip)?;
+    if pair_deposit.is_zero() {
+        return Err(ContractError::TipExhaustsBalance {});
+    }
+    Ok((tip, pair_deposit))
+}
+
+fn settle_xyk(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+    cfg: &SinkConfig,
+    choice_factory: &cosmwasm_std::Addr,
+    token_bal: Uint128,
+    pair_bal: Uint128,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     // Tokenfactory `create_pair` fee. The chain debits this from the
     // contract's bank balance at dispatch time; we require `info.funds` to
     // match the fee EXACTLY (denom-set equal, amounts equal). That makes the
@@ -332,26 +545,7 @@ fn exec_settle(
         });
     }
 
-    // Tip is taken from the pair-asset side — the side with real value. The
-    // launch token has no market price until the pool exists, so paying tips
-    // in `token_denom` would just print free tokens to the cranker.
-    let tip = if cfg.tip_bps == 0 {
-        Uint128::zero()
-    } else {
-        seed_pair.multiply_ratio(cfg.tip_bps as u128, 10_000u128)
-    };
-    let pair_deposit = seed_pair.checked_sub(tip)?;
-    if pair_deposit.is_zero() {
-        return Err(ContractError::TipExhaustsBalance {});
-    }
-
-    // Mark terminal *before* dispatching messages: this contract has no
-    // re-entry path today, but in CW a bug elsewhere that re-enters this
-    // handler would skip the recheck if we flipped the bit after — flipping
-    // first is the safer default and the in-tx revert still cleans up on
-    // failure.
-    state.status = SinkStatus::Settled;
-    SINK_STATE.save(deps.storage, &state)?;
+    let (tip, pair_deposit) = split_tip(seed_pair, cfg.tip_bps)?;
 
     let assets = [
         Asset {
@@ -380,7 +574,7 @@ fn exec_settle(
     }
 
     messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: cfg.choice_factory.to_string(),
+        contract_addr: choice_factory.to_string(),
         msg: to_json_binary(&FactoryExecuteMsg::CreatePair { assets })?,
         funds: create_fee,
     }));
@@ -400,10 +594,154 @@ fn exec_settle(
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "settle")
+        .add_attribute("pool_kind", "xyk")
         .add_attribute("caller", info.sender)
         .add_attribute("token_amount", seed_token)
         .add_attribute("pair_balance", seed_pair)
         .add_attribute("pair_deposit", pair_deposit)
+        .add_attribute("tip", tip))
+}
+
+struct ClmmSettleParams {
+    clmm_factory: cosmwasm_std::Addr,
+    clmm_manager: cosmwasm_std::Addr,
+    fee_tier: u32,
+    position_recipient: cosmwasm_std::Addr,
+}
+
+fn settle_clmm(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+    cfg: &SinkConfig,
+    params: ClmmSettleParams,
+    token_bal: Uint128,
+    pair_bal: Uint128,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    // CLMM pool creation is free, so the sink should hold *only* the seed
+    // balances. Reject any attached funds rather than silently folding them
+    // into the deposit.
+    if !info.funds.is_empty() {
+        return Err(ContractError::UnexpectedFundsForClmmSettle {});
+    }
+
+    let ClmmSettleParams {
+        clmm_factory,
+        clmm_manager,
+        fee_tier,
+        position_recipient,
+    } = params;
+
+    // Whole token side seeds the pool; tip comes off the pair side.
+    let seed_token = token_bal;
+    let (tip, pair_deposit) = split_tip(pair_bal, cfg.tip_bps)?;
+
+    // Full-range bounds for this fee tier's spacing.
+    let tick_spacing = query_fee_tier_spacing(deps.as_ref(), &clmm_factory, fee_tier)?;
+    let (tick_lower, tick_upper) = full_range_ticks(tick_spacing)?;
+
+    // Sort the two native denoms into (token0, token1) using the SAME ordering
+    // the CLMM factory applies, and carry each side's seed amount along.
+    let token_ai = ClmmAssetInfo::NativeToken {
+        denom: cfg.token_denom.clone(),
+    };
+    let pair_ai = ClmmAssetInfo::NativeToken {
+        denom: cfg.pair_denom.clone(),
+    };
+    let (token0, token1, amount0, amount1) = if token_ai < pair_ai {
+        (token_ai, pair_ai, seed_token, pair_deposit)
+    } else {
+        (pair_ai, token_ai, pair_deposit, seed_token)
+    };
+
+    // Guard: refuse to seed into a pool someone pre-created (and thus
+    // pre-priced) — our seed ratio would mismatch its price and the mint would
+    // be lopsided. The keeper can then triage (different fee tier, or Refund).
+    if let Some(pool) = query_clmm_pool(deps.as_ref(), &clmm_factory, &token0, &token1, fee_tier)? {
+        return Err(ContractError::ClmmPoolAlreadyExists { pool });
+    }
+
+    // Initial price that makes the full-range mint draw both balances at the
+    // seed ratio.
+    let init_sqrt_price: Uint256 = init_sqrt_price_from_amounts(amount0, amount1)?;
+
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
+
+    if !tip.is_zero() {
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: coins(tip.u128(), &cfg.pair_denom),
+        }));
+    }
+
+    // 1. Create the pool at our price (no funds; reply inside the factory
+    //    registers it before the next top-level message runs).
+    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: clmm_factory.to_string(),
+        msg: to_json_binary(&ClmmFactoryExecuteMsg::CreatePool {
+            token_a: token0.clone(),
+            token_b: token1.clone(),
+            fee: fee_tier,
+            init_sqrt_price,
+        })?,
+        funds: vec![],
+    }));
+
+    // 2. Mint a full-range position to `position_recipient`, attaching both
+    //    seed amounts. The manager resolves the pool, computes liquidity, and
+    //    refunds any one-sided surplus back to this sink. `amount*_min = 0` is
+    //    safe: we created the pool at our price in this same atomic tx, so no
+    //    one can move the price between create and mint. `deadline = 0`
+    //    disables the manager's deadline check.
+    let mut mint_funds = vec![
+        Coin {
+            denom: token0.key().to_string(),
+            amount: amount0,
+        },
+        Coin {
+            denom: token1.key().to_string(),
+            amount: amount1,
+        },
+    ];
+    mint_funds.sort_by(|a, b| a.denom.cmp(&b.denom));
+
+    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: clmm_manager.to_string(),
+        msg: to_json_binary(&ClmmManagerExecuteMsg::MintPosition {
+            token0: token0.clone(),
+            token1: token1.clone(),
+            fee: fee_tier,
+            tick_lower,
+            tick_upper,
+            amount0_desired: amount0,
+            amount1_desired: amount1,
+            amount0_min: Uint128::zero(),
+            amount1_min: Uint128::zero(),
+            recipient: Some(position_recipient.to_string()),
+            deadline: 0,
+        })?,
+        funds: mint_funds,
+    }));
+
+    // 3. Sweep whatever dust the manager refunded.
+    messages.push(self_callback(&env, CallbackMsg::SweepDust {})?);
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "settle")
+        .add_attribute("pool_kind", "clmm")
+        .add_attribute("caller", info.sender)
+        .add_attribute("clmm_factory", clmm_factory)
+        .add_attribute("clmm_manager", clmm_manager)
+        .add_attribute("fee_tier", fee_tier.to_string())
+        .add_attribute("token0", token0.key())
+        .add_attribute("token1", token1.key())
+        .add_attribute("amount0", amount0)
+        .add_attribute("amount1", amount1)
+        .add_attribute("tick_lower", tick_lower.to_string())
+        .add_attribute("tick_upper", tick_upper.to_string())
+        .add_attribute("init_sqrt_price", init_sqrt_price.to_string())
+        .add_attribute("position_recipient", position_recipient)
         .add_attribute("tip", tip))
 }
 
@@ -490,7 +828,47 @@ fn exec_callback(
             pair_amount,
         } => callback_provide_liquidity(deps, env, token_amount, pair_amount),
         CallbackMsg::DistributeLp {} => callback_distribute_lp(deps, env),
+        CallbackMsg::SweepDust {} => callback_sweep_dust(deps, env),
     }
+}
+
+/// Post-CLMM-mint cleanup: the manager refunds one-sided surplus to this sink,
+/// so any `token_denom` / `pair_denom` left here is dust. Forward it to
+/// `refund_receiver`. No-op (and no error) when both balances are zero.
+fn callback_sweep_dust(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let cfg = SINK_CONFIG.load(deps.storage)?;
+
+    let token_dust = deps
+        .querier
+        .query_balance(&env.contract.address, &cfg.token_denom)?
+        .amount;
+    let pair_dust = deps
+        .querier
+        .query_balance(&env.contract.address, &cfg.pair_denom)?
+        .amount;
+
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
+    if !token_dust.is_zero() {
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: cfg.refund_receiver.to_string(),
+            amount: coins(token_dust.u128(), &cfg.token_denom),
+        }));
+    }
+    if !pair_dust.is_zero() {
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address: cfg.refund_receiver.to_string(),
+            amount: coins(pair_dust.u128(), &cfg.pair_denom),
+        }));
+    }
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "callback_sweep_dust")
+        .add_attribute("token_dust", token_dust)
+        .add_attribute("pair_dust", pair_dust))
 }
 
 fn callback_provide_liquidity(
@@ -595,7 +973,18 @@ fn callback_distribute_lp(
     state.lp_minted = Some(lp_balance);
     SINK_STATE.save(deps.storage, &state)?;
 
-    let msg: CosmosMsg<InjectiveMsgWrapper> = match &cfg.lp_destination {
+    // This callback is only emitted by the XYK `Settle` path; a CLMM sink
+    // never enqueues it.
+    let lp_destination = match &cfg.pool_kind {
+        PoolKindStored::Xyk { lp_destination, .. } => lp_destination,
+        PoolKindStored::Clmm { .. } => return Err(ContractError::WrongRole {
+            action: "distribute_lp".to_string(),
+            required: "xyk sink".to_string(),
+            actual: "clmm sink".to_string(),
+        }),
+    };
+
+    let msg: CosmosMsg<InjectiveMsgWrapper> = match lp_destination {
         LpDestinationStored::Burn => CosmosMsg::Bank(BankMsg::Burn {
             amount: coins(lp_balance.u128(), &lp_denom),
         }),
@@ -605,7 +994,7 @@ fn callback_distribute_lp(
         }),
     };
 
-    let destination_label = match &cfg.lp_destination {
+    let destination_label = match lp_destination {
         LpDestinationStored::Burn => "burn".to_string(),
         LpDestinationStored::SendTo(a) => format!("send_to:{}", a),
     };
@@ -619,6 +1008,88 @@ fn callback_distribute_lp(
 }
 
 // ------------------------------------------------------------------------
+// Locker-side
+// ------------------------------------------------------------------------
+
+/// Minimal mirror of `cw721::msg::TokensResponse` so the locker can enumerate
+/// the NFTs it owns without taking a direct cw721 dependency.
+#[derive(Deserialize)]
+struct TokensResp {
+    tokens: Vec<String>,
+}
+
+fn exec_collect_fees(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    _info: MessageInfo,
+    token_id: Option<String>,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let cfg = require_locker(deps.as_ref(), "collect_fees")?;
+
+    // Which positions to collect on. Explicit `token_id` wins; otherwise
+    // enumerate the NFTs this locker owns (a launchpad locker holds exactly
+    // one, but enumeration keeps the contract correct if it ever holds more).
+    let token_ids: Vec<String> = match token_id {
+        Some(id) => vec![id],
+        None => {
+            let resp: TokensResp = deps.querier.query_wasm_smart(
+                &cfg.manager,
+                &ClmmManagerQueryMsg::Tokens {
+                    owner: env.contract.address.to_string(),
+                    start_after: None,
+                    limit: Some(COLLECT_FEES_PAGE),
+                },
+            )?;
+            resp.tokens
+        }
+    };
+
+    if token_ids.is_empty() {
+        return Err(ContractError::LockerNoPositions {});
+    }
+
+    // One `Collect` per position; fees route straight to the beneficiary
+    // (pool → manager → beneficiary), never touching this locker's balance.
+    let messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = token_ids
+        .iter()
+        .map(|id| {
+            Ok(CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: cfg.manager.to_string(),
+                msg: to_json_binary(&ClmmManagerExecuteMsg::Collect {
+                    token_id: id.clone(),
+                    recipient: Some(cfg.beneficiary.to_string()),
+                })?,
+                funds: vec![],
+            }))
+        })
+        .collect::<StdResult<_>>()?;
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "collect_fees")
+        .add_attribute("beneficiary", cfg.beneficiary)
+        .add_attribute("positions", token_ids.len().to_string()))
+}
+
+fn exec_update_beneficiary(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    new_beneficiary: String,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut cfg = require_locker(deps.as_ref(), "update_beneficiary")?;
+    let admin = cfg.admin.clone().ok_or(ContractError::LockerNoAdmin {})?;
+    if info.sender != admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    let new_beneficiary = deps.api.addr_validate(&new_beneficiary)?;
+    cfg.beneficiary = new_beneficiary.clone();
+    LOCKER_CONFIG.save(deps.storage, &cfg)?;
+    Ok(Response::new()
+        .add_attribute("action", "update_beneficiary")
+        .add_attribute("new_beneficiary", new_beneficiary))
+}
+
+// ------------------------------------------------------------------------
 // Queries
 // ------------------------------------------------------------------------
 
@@ -629,6 +1100,7 @@ pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> Std
         QueryMsg::FactoryConfig {} => to_json_binary(&query_factory_config(deps)?),
         QueryMsg::SinkConfig {} => to_json_binary(&query_sink_config(deps)?),
         QueryMsg::SinkState {} => to_json_binary(&query_sink_state(deps)?),
+        QueryMsg::LockerConfig {} => to_json_binary(&query_locker_config(deps)?),
     }
 }
 
@@ -640,6 +1112,7 @@ fn query_role(deps: Deps<InjectiveQueryWrapper>) -> StdResult<RoleResponse> {
             config: query_sink_config(deps)?,
             state: query_sink_state(deps)?,
         }),
+        Role::Locker => Ok(RoleResponse::Locker(query_locker_config(deps)?)),
     }
 }
 
@@ -652,6 +1125,8 @@ fn query_factory_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<FactoryC
         admin: c.admin.into_string(),
         sink_code_id: c.sink_code_id,
         choice_factory: c.choice_factory.into_string(),
+        clmm_factory: c.clmm_factory.map(|a| a.into_string()),
+        clmm_manager: c.clmm_manager.map(|a| a.into_string()),
         max_tip_bps: c.max_tip_bps,
     })
 }
@@ -667,12 +1142,23 @@ fn query_sink_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<SinkConfigR
         pair_denom: c.pair_denom,
         token_decimals: c.token_decimals,
         pair_decimals: c.pair_decimals,
-        lp_destination: (&c.lp_destination).into(),
+        pool_kind: (&c.pool_kind).into(),
         refund_receiver: c.refund_receiver.into_string(),
         deadline_seconds: c.deadline_seconds,
         instantiated_at: c.instantiated_at,
         tip_bps: c.tip_bps,
-        choice_factory: c.choice_factory.into_string(),
+    })
+}
+
+fn query_locker_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<LockerConfigResponse> {
+    if ROLE.load(deps.storage)? != Role::Locker {
+        return Err(StdError::generic_err("not a locker instance"));
+    }
+    let c = LOCKER_CONFIG.load(deps.storage)?;
+    Ok(LockerConfigResponse {
+        manager: c.manager.into_string(),
+        beneficiary: c.beneficiary.into_string(),
+        admin: c.admin.map(|a| a.into_string()),
     })
 }
 
@@ -738,6 +1224,14 @@ pub fn migrate(
 // helpers
 // ------------------------------------------------------------------------
 
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Factory => "factory",
+        Role::Sink => "sink",
+        Role::Locker => "locker",
+    }
+}
+
 fn require_factory(
     deps: Deps<InjectiveQueryWrapper>,
     action: &str,
@@ -745,10 +1239,10 @@ fn require_factory(
     let role = ROLE.load(deps.storage)?;
     match role {
         Role::Factory => Ok(FACTORY_CONFIG.load(deps.storage)?),
-        Role::Sink => Err(ContractError::WrongRole {
+        other => Err(ContractError::WrongRole {
             action: action.to_string(),
             required: "factory".to_string(),
-            actual: "sink".to_string(),
+            actual: role_name(other).to_string(),
         }),
     }
 }
@@ -760,12 +1254,118 @@ fn require_sink(
     let role = ROLE.load(deps.storage)?;
     match role {
         Role::Sink => Ok(SINK_CONFIG.load(deps.storage)?),
-        Role::Factory => Err(ContractError::WrongRole {
+        other => Err(ContractError::WrongRole {
             action: action.to_string(),
             required: "sink".to_string(),
-            actual: "factory".to_string(),
+            actual: role_name(other).to_string(),
         }),
     }
+}
+
+fn require_locker(
+    deps: Deps<InjectiveQueryWrapper>,
+    action: &str,
+) -> Result<LockerConfig, ContractError> {
+    let role = ROLE.load(deps.storage)?;
+    match role {
+        Role::Locker => Ok(LOCKER_CONFIG.load(deps.storage)?),
+        other => Err(ContractError::WrongRole {
+            action: action.to_string(),
+            required: "locker".to_string(),
+            actual: role_name(other).to_string(),
+        }),
+    }
+}
+
+/// Validate a `CreateSink` payload's `pool_kind` against the factory's pinned
+/// DEX addresses. Reject (don't rewrite) on mismatch so the caller sees what's
+/// wrong.
+fn require_pool_kind_matches_factory(
+    cfg: &FactoryConfig,
+    pool_kind: &PoolKind,
+) -> Result<(), ContractError> {
+    match pool_kind {
+        PoolKind::Xyk { choice_factory, .. } => {
+            if choice_factory != cfg.choice_factory.as_str() {
+                return Err(ContractError::SinkChoiceFactoryMismatch {
+                    got: choice_factory.clone(),
+                    expected: cfg.choice_factory.to_string(),
+                });
+            }
+        }
+        PoolKind::Clmm {
+            clmm_factory,
+            clmm_manager,
+            ..
+        } => {
+            let pinned_factory = cfg
+                .clmm_factory
+                .as_ref()
+                .ok_or(ContractError::ClmmNotConfigured {})?;
+            let pinned_manager = cfg
+                .clmm_manager
+                .as_ref()
+                .ok_or(ContractError::ClmmNotConfigured {})?;
+            if clmm_factory != pinned_factory.as_str() {
+                return Err(ContractError::SinkClmmAddressMismatch {
+                    which: "factory".to_string(),
+                    got: clmm_factory.clone(),
+                    expected: pinned_factory.to_string(),
+                });
+            }
+            if clmm_manager != pinned_manager.as_str() {
+                return Err(ContractError::SinkClmmAddressMismatch {
+                    which: "manager".to_string(),
+                    got: clmm_manager.clone(),
+                    expected: pinned_manager.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Look up the tick spacing for `fee` on the CLMM factory. Scans the enabled
+/// fee tiers (default set is ≤4 entries; one page of 100 covers any realistic
+/// config).
+fn query_fee_tier_spacing(
+    deps: Deps<InjectiveQueryWrapper>,
+    clmm_factory: &cosmwasm_std::Addr,
+    fee: u32,
+) -> Result<u32, ContractError> {
+    let tiers: Vec<FeeTierEntry> = deps.querier.query_wasm_smart(
+        clmm_factory,
+        &ClmmFactoryQueryMsg::GetFeeTiers {
+            start_after: None,
+            limit: Some(100),
+        },
+    )?;
+    tiers
+        .into_iter()
+        .find(|t| t.fee == fee)
+        .map(|t| t.tick_spacing)
+        .ok_or(ContractError::FeeTierNotSupported { fee })
+}
+
+/// Returns `Some(pool_address)` if a CLMM pool already exists for
+/// `(token0, token1, fee)`, else `None`. The factory's `GetPool` errors when
+/// the pool is absent, so any query error is treated as "does not exist".
+fn query_clmm_pool(
+    deps: Deps<InjectiveQueryWrapper>,
+    clmm_factory: &cosmwasm_std::Addr,
+    token0: &ClmmAssetInfo,
+    token1: &ClmmAssetInfo,
+    fee: u32,
+) -> Result<Option<String>, ContractError> {
+    let res: StdResult<String> = deps.querier.query_wasm_smart(
+        clmm_factory,
+        &ClmmFactoryQueryMsg::GetPool {
+            token_a: token0.clone(),
+            token_b: token1.clone(),
+            fee,
+        },
+    );
+    Ok(res.ok())
 }
 
 /// Require `info.funds` to be exactly the chain's tokenfactory create fee —
@@ -833,6 +1433,11 @@ fn query_pair_info(
     deps: Deps<InjectiveQueryWrapper>,
     cfg: &SinkConfig,
 ) -> Result<PairInfo, ContractError> {
+    // Only reachable from the XYK `Settle` path.
+    let choice_factory = match &cfg.pool_kind {
+        PoolKindStored::Xyk { choice_factory, .. } => choice_factory,
+        PoolKindStored::Clmm { .. } => return Err(ContractError::PairNotFoundPostCreate {}),
+    };
     let asset_infos = [
         AssetInfo::NativeToken {
             denom: cfg.token_denom.clone(),
@@ -842,10 +1447,7 @@ fn query_pair_info(
         },
     ];
     deps.querier
-        .query_wasm_smart(
-            &cfg.choice_factory,
-            &ChoiceFactoryQueryMsg::Pair { asset_infos },
-        )
+        .query_wasm_smart(choice_factory, &ChoiceFactoryQueryMsg::Pair { asset_infos })
         .map_err(|_| ContractError::PairNotFoundPostCreate {})
 }
 

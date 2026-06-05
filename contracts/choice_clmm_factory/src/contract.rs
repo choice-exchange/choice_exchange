@@ -1,16 +1,17 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply, Response, StdError,
-    StdResult, SubMsg, Uint256, WasmMsg,
+    to_json_binary, Addr, Api, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply, Response,
+    StdError, StdResult, SubMsg, Uint256, WasmMsg,
 };
 use cw_storage_plus::{Bound, Item};
 use sha2::{Digest, Sha256};
 
-use crate::state::{Config, CONFIG, FEE_TIERS, POOLS};
+use crate::state::{Config, PoolCreationAuth, CONFIG, FEE_TIERS, POOLS, POOL_CREATION_AUTH};
 
 use choice_clmm_common::factory::{
-    ConfigResponse, ExecuteMsg, FeeTierEntry, InstantiateMsg, MigrateMsg, PoolInfo, QueryMsg,
+    ConfigResponse, CreationAuthResponse, ExecuteMsg, FeeTierEntry, InstantiateMsg, MigrateMsg,
+    PoolInfo, QueryMsg,
 };
 use choice_clmm_common::pool::{FeeConfig, InstantiateMsg as PoolInstantiateMsg};
 use choice_clmm_common::types::AssetInfo;
@@ -57,7 +58,19 @@ pub fn execute(
             token_b,
             fee,
             init_sqrt_price,
-        } => execute_create_pool(deps, env, token_a, token_b, fee, init_sqrt_price),
+        } => execute_create_pool(deps, env, info, token_a, token_b, fee, init_sqrt_price),
+        ExecuteMsg::AuthorizeCreation {
+            token_a,
+            token_b,
+            fee,
+            creator,
+            ttl_seconds,
+        } => execute_authorize_creation(deps, env, info, token_a, token_b, fee, creator, ttl_seconds),
+        ExecuteMsg::CancelCreationAuth {
+            token_a,
+            token_b,
+            fee,
+        } => execute_cancel_creation_auth(deps, info, token_a, token_b, fee),
         ExecuteMsg::EnableFeeAmount { fee, tick_spacing } => {
             let config = CONFIG.load(deps.storage)?;
             if info.sender != config.owner {
@@ -108,7 +121,8 @@ pub fn execute(
 
 fn execute_create_pool(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
+    info: MessageInfo,
     token_a: AssetInfo,
     token_b: AssetInfo,
     fee: u32,
@@ -127,16 +141,24 @@ fn execute_create_pool(
         deps.api.addr_validate(contract_addr)?;
     }
 
-    let (token0, token1) = if token_a < token_b {
-        (token_a, token_b)
-    } else {
-        (token_b, token_a)
-    };
-
+    let (token0, token1) = sort_tokens(token_a, token_b);
     let key0 = token0.key().to_string();
     let key1 = token1.key().to_string();
 
-    // 2. Check existence
+    // 2. Anti-squat gate. If this slot is reserved (and unexpired), only the
+    //    authorized creator may proceed; otherwise creation is fully
+    //    permissionless, exactly as before. Either way the entry is consumed
+    //    (a matching create) or swept (expired) so the slot doesn't linger.
+    if let Some(auth) = POOL_CREATION_AUTH.may_load(deps.storage, (&key0, &key1, fee))? {
+        if env.block.time.seconds() <= auth.expires_at && info.sender != auth.creator {
+            return Err(StdError::generic_err(
+                "pool slot reserved for another creator",
+            ));
+        }
+        POOL_CREATION_AUTH.remove(deps.storage, (&key0, &key1, fee));
+    }
+
+    // 3. Check existence
     let config = CONFIG.load(deps.storage)?;
     if POOLS.has(deps.storage, (&key0, &key1, fee)) {
         return Err(StdError::generic_err("Pool already exists"));
@@ -161,7 +183,12 @@ fn execute_create_pool(
     // volatility, long enough to make griefing unprofitable.
     let fee_config = FeeConfig {
         base_fee_ppm: fee,
-        max_fee_ppm: fee.saturating_mul(2),
+        // Clamp below 1_000_000: the pool's instantiate validation rejects
+        // `max_fee_ppm >= 1_000_000`, so an un-clamped `fee * 2` would make
+        // `create_pool` revert (with a confusing nested error) for any fee tier
+        // >= 500_000. `min(999_999)` keeps `base <= max` (they meet at the cap)
+        // and guarantees the pool accepts the config for every valid tier.
+        max_fee_ppm: fee.saturating_mul(2).min(999_999),
         volatility_multiplier: 100,
         ema_halflife_seconds: 600,
         max_fee_change_per_second_ppm: 100,
@@ -198,6 +225,158 @@ fn execute_create_pool(
         .add_attribute("fee", fee.to_string())
         .add_attribute("tick_spacing", tick_spacing.to_string())
         .add_attribute("init_sqrt_price", init_sqrt_price.to_string()))
+}
+
+/// Sort two assets into `(token0, token1)` using `AssetInfo`'s ordering — the
+/// single source of truth shared by `CreatePool`, `AuthorizeCreation`, and
+/// `CancelCreationAuth` so all three derive byte-identical storage keys.
+fn sort_tokens(token_a: AssetInfo, token_b: AssetInfo) -> (AssetInfo, AssetInfo) {
+    if token_a < token_b {
+        (token_a, token_b)
+    } else {
+        (token_b, token_a)
+    }
+}
+
+/// True iff `sender` owns the tokenfactory namespace of `asset`, i.e. `asset`
+/// is a native `factory/{owner}/{sub}` denom with `owner == sender`
+/// (canonicalized). Pure string parse — no tokenfactory query, so it works
+/// before the denom is even minted. Non-`factory/` denoms and CW20s return
+/// false.
+fn sender_owns_namespace(api: &dyn Api, sender: &Addr, asset: &AssetInfo) -> bool {
+    let denom = match asset {
+        AssetInfo::NativeToken { denom } => denom,
+        AssetInfo::Token { .. } => return false,
+    };
+    // Expect "factory/{owner}/{subdenom}".
+    let mut parts = denom.split('/');
+    if parts.next() != Some("factory") {
+        return false;
+    }
+    let owner = match parts.next() {
+        Some(o) if !o.is_empty() => o,
+        _ => return false,
+    };
+    // Require a non-empty subdenom segment so a bare "factory/{owner}" can't
+    // be passed off as a namespace claim.
+    if !matches!(parts.next(), Some(s) if !s.is_empty()) {
+        return false;
+    }
+    match (api.addr_canonicalize(sender.as_str()), api.addr_canonicalize(owner)) {
+        (Ok(s), Ok(o)) => s == o,
+        _ => false,
+    }
+}
+
+/// Shared authorizer check for `AuthorizeCreation` / `CancelCreationAuth`:
+/// `sender` must own the namespace of one of the (already validated) sides, or
+/// be the factory owner.
+fn ensure_can_authorize(
+    api: &dyn Api,
+    config: &Config,
+    sender: &Addr,
+    token0: &AssetInfo,
+    token1: &AssetInfo,
+) -> Result<(), StdError> {
+    if *sender == config.owner
+        || sender_owns_namespace(api, sender, token0)
+        || sender_owns_namespace(api, sender, token1)
+    {
+        Ok(())
+    } else {
+        Err(StdError::generic_err(
+            "Unauthorized: must own a token's factory namespace or be the factory owner",
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_authorize_creation(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    token_a: AssetInfo,
+    token_b: AssetInfo,
+    fee: u32,
+    creator: String,
+    ttl_seconds: u64,
+) -> Result<Response, StdError> {
+    if token_a == token_b {
+        return Err(StdError::generic_err("Same tokens"));
+    }
+    if let AssetInfo::Token { contract_addr } = &token_a {
+        deps.api.addr_validate(contract_addr)?;
+    }
+    if let AssetInfo::Token { contract_addr } = &token_b {
+        deps.api.addr_validate(contract_addr)?;
+    }
+    // Reserving a fee tier that can never host a pool is meaningless — fail
+    // early rather than store a dead entry.
+    if !FEE_TIERS.has(deps.storage, fee) {
+        return Err(StdError::generic_err("Fee tier not supported"));
+    }
+    let creator = deps.api.addr_validate(&creator)?;
+
+    let (token0, token1) = sort_tokens(token_a, token_b);
+    let config = CONFIG.load(deps.storage)?;
+    ensure_can_authorize(deps.api, &config, &info.sender, &token0, &token1)?;
+
+    let key0 = token0.key().to_string();
+    let key1 = token1.key().to_string();
+
+    // `ttl_seconds == 0` ⇒ no expiry (the graduation default: the launch denom
+    // is unique, so an indefinite reservation harms nobody and can never lapse
+    // before Settle).
+    let expires_at = if ttl_seconds == 0 {
+        u64::MAX
+    } else {
+        env.block.time.seconds().saturating_add(ttl_seconds)
+    };
+
+    POOL_CREATION_AUTH.save(
+        deps.storage,
+        (&key0, &key1, fee),
+        &PoolCreationAuth {
+            creator: creator.clone(),
+            expires_at,
+        },
+    )?;
+
+    Ok(Response::new()
+        .add_attribute("action", "authorize_creation")
+        .add_attribute("token0", token0.to_string())
+        .add_attribute("token1", token1.to_string())
+        .add_attribute("fee", fee.to_string())
+        .add_attribute("creator", creator)
+        .add_attribute("expires_at", expires_at.to_string()))
+}
+
+fn execute_cancel_creation_auth(
+    deps: DepsMut,
+    info: MessageInfo,
+    token_a: AssetInfo,
+    token_b: AssetInfo,
+    fee: u32,
+) -> Result<Response, StdError> {
+    if token_a == token_b {
+        return Err(StdError::generic_err("Same tokens"));
+    }
+    let (token0, token1) = sort_tokens(token_a, token_b);
+    let config = CONFIG.load(deps.storage)?;
+    ensure_can_authorize(deps.api, &config, &info.sender, &token0, &token1)?;
+
+    let key0 = token0.key().to_string();
+    let key1 = token1.key().to_string();
+    if !POOL_CREATION_AUTH.has(deps.storage, (&key0, &key1, fee)) {
+        return Err(StdError::generic_err("No reservation for this slot"));
+    }
+    POOL_CREATION_AUTH.remove(deps.storage, (&key0, &key1, fee));
+
+    Ok(Response::new()
+        .add_attribute("action", "cancel_creation_auth")
+        .add_attribute("token0", token0.to_string())
+        .add_attribute("token1", token1.to_string())
+        .add_attribute("fee", fee.to_string()))
 }
 
 pub const TMP_POOL_INFO: Item<(String, String, u32)> = Item::new("tmp_pool_info");
@@ -304,6 +483,22 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 })
                 .collect::<StdResult<_>>()?;
             to_json_binary(&tiers)
+        }
+        QueryMsg::GetCreationAuth {
+            token_a,
+            token_b,
+            fee,
+        } => {
+            let (token0, token1) = sort_tokens(token_a, token_b);
+            let key0 = token0.key().to_string();
+            let key1 = token1.key().to_string();
+            let auth = POOL_CREATION_AUTH
+                .may_load(deps.storage, (&key0, &key1, fee))?
+                .map(|a| CreationAuthResponse {
+                    creator: a.creator.to_string(),
+                    expires_at: a.expires_at,
+                });
+            to_json_binary(&auth)
         }
     }
 }

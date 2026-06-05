@@ -11,9 +11,12 @@
 
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
-    entry_point, from_json, BankMsg, Binary, Coin, Deps, DepsMut, Env, MessageInfo, Response,
-    StdResult, Uint128,
+    entry_point, from_json, BankMsg, Binary, Coin, Deps, DepsMut, Env, MessageInfo, Reply, Response,
+    StdResult, SubMsg, Uint128,
 };
+
+/// Reply id for the optional submessage-wrapped repayment.
+const REPLY_REPAY: u64 = 1;
 
 #[cw_serde]
 pub struct InstantiateMsg {}
@@ -41,6 +44,12 @@ pub struct RepayPlan {
     /// Amount to short the repayment by (0 = honest full repayment).
     pub underpay0: Uint128,
     pub underpay1: Uint128,
+    /// When true, repay via a `SubMsg::reply_on_success` (the borrower's own
+    /// reply runs) instead of a plain message. Exercises that a submessage bank
+    /// send still settles BEFORE the pool's `reply_flash` queries the balance.
+    /// `serde(default)` keeps older encodings (without this field) decodable.
+    #[serde(default)]
+    pub repay_via_submsg: bool,
 }
 
 #[entry_point]
@@ -86,16 +95,33 @@ pub fn execute(
             let mut resp = Response::new()
                 .add_attribute("action", "flash_callback")
                 .add_attribute("repay0", repay0)
-                .add_attribute("repay1", repay1);
+                .add_attribute("repay1", repay1)
+                .add_attribute("via_submsg", plan.repay_via_submsg.to_string());
             if !coins.is_empty() {
-                resp = resp.add_message(BankMsg::Send {
+                let bank = BankMsg::Send {
                     to_address: pool,
                     amount: coins,
-                });
+                };
+                if plan.repay_via_submsg {
+                    resp = resp.add_submessage(SubMsg::reply_on_success(bank, REPLY_REPAY));
+                } else {
+                    resp = resp.add_message(bank);
+                }
             }
             Ok(resp)
         }
     }
+}
+
+#[entry_point]
+pub fn reply(_deps: DepsMut, _env: Env, msg: Reply) -> StdResult<Response> {
+    // Only the repayment submessage routes here. Nothing to do — its bank send
+    // has already settled by the time this reply runs (and, in turn, before the
+    // pool's own `reply_flash` queries the balance).
+    if msg.id != REPLY_REPAY {
+        return Err(cosmwasm_std::StdError::generic_err("unknown reply id"));
+    }
+    Ok(Response::new().add_attribute("action", "repay_submsg_reply"))
 }
 
 #[entry_point]

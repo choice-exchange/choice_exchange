@@ -97,6 +97,8 @@ fn register_with_choice_factory(
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: Binary::from(br#"{"create_sink":{"salt":"","sink_init":{}}}"#.to_vec()),
         choice_factory,
+        salt_suffix: None,
+        clmm_pool_auth: None,
     };
     execute(deps.as_mut(), mock_env(), info, msg)
 }
@@ -295,6 +297,8 @@ fn register_launch_rejects_zero_total_supply() {
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: Binary::default(),
         choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     assert!(matches!(err, ContractError::ZeroTotalSupply {}));
@@ -315,6 +319,8 @@ fn register_launch_rejects_evm_supply_over_total() {
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: Binary::default(),
         choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     assert!(matches!(err, ContractError::EvmSupplyExceedsTotal { .. }));
@@ -336,6 +342,8 @@ fn register_launch_rejects_when_caller_omits_create_fee_funds() {
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: Binary::default(),
         choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     assert!(matches!(err, ContractError::InsufficientCreateFee { .. }));
@@ -359,6 +367,8 @@ fn register_launch_rejects_overpaid_create_fee() {
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: Binary::from(br#"{"create_sink":{}}"#.to_vec()),
         choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     assert!(matches!(err, ContractError::CreateFeeOverpaid { .. }));
@@ -385,6 +395,8 @@ fn register_launch_rejects_unexpected_funds_denom() {
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: Binary::from(br#"{"create_sink":{}}"#.to_vec()),
         choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     assert!(matches!(err, ContractError::UnexpectedFundsDenom { .. }));
@@ -442,6 +454,8 @@ fn register_launch_rejects_choice_factory_when_cw_held_is_zero() {
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: Binary::default(),
         choice_factory: Some(deps.api.addr_make("choice_factory").to_string()),
+        salt_suffix: None,
+        clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     assert!(matches!(err, ContractError::ChoiceFactoryNeedsDust { .. }));
@@ -773,4 +787,152 @@ fn simulate_create_token_pair_reply(deps: &mut Deps, internal_id: u64, erc20_add
         }),
     };
     reply(deps.as_mut(), mock_env(), reply_msg).unwrap();
+}
+
+// --------------------------------------------------------------------------
+// Anti-squat: Layer A entropy (salt_suffix) + Layer B gate (clmm_pool_auth)
+// --------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn register_full(
+    deps: &mut Deps,
+    internal_id: u64,
+    salt_suffix: Option<String>,
+    clmm_pool_auth: Option<crate::msg::ClmmPoolAuth>,
+) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
+    let caller = deps.api.addr_make("caller");
+    let info = message_info(&caller, &fee_funds());
+    let msg = ExecuteMsg::RegisterLaunch {
+        internal_id,
+        evm_authority: deps.api.addr_make("evm_authority").to_string(),
+        total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
+        evm_supply: Uint128::new(800_000_000u128) * Uint128::new(10u128.pow(18)),
+        pair_denom: PAIR_DENOM.to_string(),
+        seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
+        seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
+        create_sink_payload: Binary::from(br#"{"create_sink":{"salt":"","sink_init":{}}}"#.to_vec()),
+        choice_factory: None,
+        salt_suffix,
+        clmm_pool_auth,
+    };
+    execute(deps.as_mut(), mock_env(), info, msg)
+}
+
+#[test]
+fn register_launch_salt_suffix_changes_denom() {
+    let mut deps = setup();
+    let res = register_full(&mut deps, 42, Some("a1b2c3".to_string()), None).unwrap();
+
+    // Still the legacy 5-message chain (entropy only changes the denom string).
+    assert_eq!(res.messages.len(), 5);
+
+    let expected = format!(
+        "factory/{}/{}_{}_{}",
+        mock_env().contract.address,
+        PREFIX,
+        42,
+        "a1b2c3"
+    );
+    let stored = LAUNCHES.load(deps.as_ref().storage, 42).unwrap();
+    assert_eq!(stored.denom, expected);
+
+    // And the CreateDenom subdenom carries the suffix.
+    let plain: Vec<&CosmosMsg<injective_cosmwasm::InjectiveMsgWrapper>> = res
+        .messages
+        .iter()
+        .filter(|sm| sm.reply_on == ReplyOn::Never)
+        .map(|sm| &sm.msg)
+        .collect();
+    #[allow(deprecated)]
+    match plain[0] {
+        CosmosMsg::Stargate { value, .. } => {
+            let decoded = MsgCreateDenom::decode(value.as_slice()).unwrap();
+            assert_eq!(decoded.subdenom, format!("{}_{}_{}", PREFIX, 42, "a1b2c3"));
+        }
+        other => panic!("expected Stargate CreateDenom, got {:?}", other),
+    }
+}
+
+#[test]
+fn register_launch_rejects_non_alnum_salt_suffix() {
+    let mut deps = setup();
+    let err = register_full(&mut deps, 1, Some("bad-salt".to_string()), None).unwrap_err();
+    assert!(matches!(err, ContractError::SaltSuffixInvalid { .. }), "{err:?}");
+}
+
+#[test]
+fn register_launch_rejects_empty_salt_suffix() {
+    let mut deps = setup();
+    let err = register_full(&mut deps, 1, Some(String::new()), None).unwrap_err();
+    assert!(matches!(err, ContractError::SaltSuffixInvalid { .. }), "{err:?}");
+}
+
+#[test]
+fn register_launch_rejects_overlong_subdenom() {
+    let mut deps = setup();
+    // prefix(6) + "_" + id-digits + "_" + 40 chars overflows the 44-char cap.
+    let err = register_full(&mut deps, 1, Some("a".repeat(40)), None).unwrap_err();
+    assert!(matches!(err, ContractError::SubdenomTooLong { .. }), "{err:?}");
+}
+
+#[test]
+fn register_launch_clmm_pool_auth_emits_authorize_creation() {
+    let mut deps = setup();
+    let clmm_factory = deps.api.addr_make("clmm_factory");
+    let auth = crate::msg::ClmmPoolAuth {
+        clmm_factory: clmm_factory.to_string(),
+        fee: 3000,
+        ttl_seconds: 0,
+    };
+    let res = register_full(&mut deps, 42, None, Some(auth)).unwrap();
+
+    // The gate adds one extra WasmExec to the legacy 5-message chain.
+    assert_eq!(res.messages.len(), 6);
+
+    let denom = expected_denom(42);
+    let seeder_addr = deps.api.addr_make("seeder_addr").to_string();
+
+    // Find the AuthorizeCreation message (the WasmExec aimed at the CLMM factory).
+    let found = res.messages.iter().find_map(|sm| match &sm.msg {
+        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, funds })
+            if contract_addr == &clmm_factory.to_string() =>
+        {
+            assert!(funds.is_empty(), "AuthorizeCreation carries no funds");
+            let parsed: choice_clmm_common::factory::ExecuteMsg = from_json(msg).unwrap();
+            Some(parsed)
+        }
+        _ => None,
+    });
+
+    match found.expect("AuthorizeCreation message present") {
+        choice_clmm_common::factory::ExecuteMsg::AuthorizeCreation {
+            token_a,
+            token_b,
+            fee,
+            creator,
+            ttl_seconds,
+        } => {
+            assert_eq!(
+                token_a,
+                choice_clmm_common::types::AssetInfo::NativeToken { denom }
+            );
+            assert_eq!(
+                token_b,
+                choice_clmm_common::types::AssetInfo::NativeToken {
+                    denom: PAIR_DENOM.to_string()
+                }
+            );
+            assert_eq!(fee, 3000);
+            assert_eq!(creator, seeder_addr, "creator must be the sink");
+            assert_eq!(ttl_seconds, 0, "no-expiry for graduations");
+        }
+        other => panic!("expected AuthorizeCreation, got {:?}", other),
+    }
+}
+
+#[test]
+fn register_launch_without_clmm_pool_auth_keeps_legacy_chain() {
+    let mut deps = setup();
+    let res = register_full(&mut deps, 42, None, None).unwrap();
+    assert_eq!(res.messages.len(), 5, "no auth message when clmm_pool_auth is None");
 }

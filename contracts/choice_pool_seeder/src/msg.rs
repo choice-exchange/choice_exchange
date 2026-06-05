@@ -28,6 +28,14 @@ pub enum InstantiateMsg {
     /// match against (because the deterministic address derivation depends on
     /// the factory being the creator).
     Sink(SinkInit),
+    /// Spawn a locker. Holds a single CLMM position NFT permanently and
+    /// exposes only fee collection — there is no decrease/burn/transfer path,
+    /// so the seeded principal is locked forever while trading fees stream to
+    /// a beneficiary. Instantiated by a `Factory` via Instantiate2 (so its
+    /// address is derivable from the launch's `internal_id` before the sink
+    /// even exists, which is what lets the sink mint the position straight to
+    /// it).
+    Locker(LockerInit),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -42,11 +50,21 @@ pub struct FactoryInit {
     /// field so a freshly-audited sink code-id can be rolled out by the
     /// admin without rebuilding the factory.
     pub sink_code_id: u64,
-    /// Address of the `choice_factory` (legacy XYK) every sink instantiated
-    /// by this factory will call `CreatePair` against. Per-instance immutable
-    /// so consumer dApps can audit a single factory as "targets this DEX
-    /// deployment, full stop."
+    /// Address of the `choice_factory` (legacy XYK) every `Xyk` sink
+    /// instantiated by this factory will call `CreatePair` against.
+    /// Per-instance immutable so consumer dApps can audit a single factory as
+    /// "targets this DEX deployment, full stop."
     pub choice_factory: String,
+    /// Address of the `choice_clmm_factory` every `Clmm` sink will call
+    /// `CreatePool` against. `None` on a factory that only ever seeds XYK
+    /// pools; a `Clmm` `CreateSink` is rejected unless this is set and matches
+    /// the sink's `clmm_factory`. Immutable post-instantiate, same audit
+    /// rationale as `choice_factory`.
+    pub clmm_factory: Option<String>,
+    /// Address of the `choice_clmm_manager` (NFT position manager) every
+    /// `Clmm` sink mints liquidity through. Paired with `clmm_factory`: both
+    /// must be set (and matched) for a `Clmm` sink. Immutable.
+    pub clmm_manager: Option<String>,
     /// Hard cap on `SinkInit.tip_bps`. Belt-and-suspenders against a
     /// misconfigured (or malicious) consumer dApp draining the pair-asset
     /// side to its own tip recipient.
@@ -76,11 +94,13 @@ pub struct SinkInit {
     pub token_decimals: u8,
     /// Decimals for `pair_denom`. Same note as above.
     pub pair_decimals: u8,
-    /// What happens to the LP minted by the initial `ProvideLiquidity`.
-    /// Immutable per-sink — auditors can decide once whether a given
-    /// launchpad's pools are permanently locked (`Burn`) or routable to a
-    /// treasury (`SendTo`). `Lock { until, beneficiary }` is deferred to v2.
-    pub lp_destination: LpDestination,
+    /// Which DEX this sink graduates to, and the venue-specific config. `Xyk`
+    /// reproduces the legacy constant-product path (create pair, provide
+    /// liquidity, route LP per `lp_destination`); `Clmm` creates a
+    /// concentrated-liquidity pool at the seed ratio and mints a full-range
+    /// position NFT to `position_recipient` (typically a `Locker`). Immutable
+    /// per-sink.
+    pub pool_kind: PoolKind,
     /// `Refund`'s pair-asset recipient. For SHROOM, this is `LaunchpadCore`
     /// (which performs proportional refunds to curve participants on its
     /// own EVM accounting). For other consumer dApps, anywhere they want
@@ -94,10 +114,59 @@ pub struct SinkInit {
     /// pair-asset balance at settle time. 0 disables the tip. Capped at
     /// `FactoryConfig.max_tip_bps`.
     pub tip_bps: u16,
-    /// MUST equal `FactoryConfig.choice_factory`. Carried explicitly so
-    /// auditors reading a sink's stored config see the whole route in one
-    /// place; the factory rejects mismatches at `CreateSink` time.
-    pub choice_factory: String,
+}
+
+/// Graduation venue + its config. The factory validates the embedded
+/// addresses against its own pinned values at `CreateSink` time, so a sink's
+/// stored `pool_kind` always names the exact DEX deployment it will touch.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolKind {
+    /// Legacy constant-product graduation.
+    Xyk {
+        /// MUST equal `FactoryConfig.choice_factory`. The XYK factory this
+        /// sink calls `CreatePair` against.
+        choice_factory: String,
+        /// What happens to the LP minted by the initial `ProvideLiquidity`:
+        /// `Burn` (permanently locked floor) or `SendTo` (treasury / farm).
+        lp_destination: LpDestination,
+    },
+    /// Concentrated-liquidity graduation. `Settle` creates a CLMM pool at the
+    /// seed ratio, then mints a single full-range position NFT (via the
+    /// manager) to `position_recipient`. Pairing a `Locker` recipient with a
+    /// pool whose principal is never decreased = permanently locked liquidity
+    /// that still earns fees.
+    Clmm {
+        /// MUST equal `FactoryConfig.clmm_factory`. The CLMM factory this sink
+        /// calls `CreatePool` against.
+        clmm_factory: String,
+        /// MUST equal `FactoryConfig.clmm_manager`. The NFT position manager
+        /// this sink mints liquidity through.
+        clmm_manager: String,
+        /// Fee tier (pips) for the pool — must be an enabled tier on the CLMM
+        /// factory (e.g. 100/500/3000/10000). Decides the tick spacing the
+        /// full-range bounds snap to.
+        fee_tier: u32,
+        /// Owner of the minted position NFT. Usually a `Locker` whose address
+        /// the launch derived deterministically; any address that can later
+        /// call `manager.Collect` works.
+        position_recipient: String,
+    },
+}
+
+/// Locker role config. The locker owns a CLMM position NFT and can only
+/// collect its fees — never withdraw principal.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct LockerInit {
+    /// The `choice_clmm_manager` the held position NFT lives in. `CollectFees`
+    /// calls `Collect` here; the locker must be the NFT owner.
+    pub manager: String,
+    /// Where collected fees are routed (`manager.Collect { recipient }`). Fees
+    /// flow pool → manager → beneficiary and never touch the locker's balance.
+    pub beneficiary: String,
+    /// Optional admin allowed to rotate `beneficiary`. `None` makes the
+    /// beneficiary immutable — a fully trust-minimized locker.
+    pub admin: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -135,6 +204,18 @@ pub enum ExecuteMsg {
         /// derived deterministically downstream.
         salt: Binary,
         sink_init: SinkInit,
+    },
+
+    /// **Factory-only.** Spawns a `Locker` at `instantiate2(this_factory,
+    /// sink_code_id, salt)` (the seeder binary serves all three roles, so the
+    /// same code-id is used). Permissionless, same security model as
+    /// `CreateSink`: the locker is addressable only by the salt the caller
+    /// supplied. The keeper computes the locker address from a launch-specific
+    /// salt and passes it as a `Clmm` sink's `position_recipient`, so the
+    /// position NFT mints straight into it.
+    CreateLocker {
+        salt: Binary,
+        locker_init: LockerInit,
     },
 
     /// **Sink-only, permissionless.** Single-shot. Reads the sink's own bank
@@ -188,6 +269,22 @@ pub enum ExecuteMsg {
     /// chain so the sink can query the new pair address out of factory
     /// storage between steps.
     Callback(CallbackMsg),
+
+    /// **Locker-only, permissionless.** Collects accrued fees on the held
+    /// position NFT(s) and routes them to the configured `beneficiary` via
+    /// `manager.Collect { recipient }`. With `token_id` `None`, collects every
+    /// NFT the locker owns (first page of the manager's `Tokens` enumeration);
+    /// with `Some`, collects exactly that one. There is intentionally no path
+    /// here to decrease or burn liquidity — principal stays locked.
+    CollectFees {
+        token_id: Option<String>,
+    },
+
+    /// **Locker admin.** Rotate the fee `beneficiary`. Errors if the locker
+    /// was instantiated with no admin (immutable beneficiary).
+    UpdateBeneficiary {
+        new_beneficiary: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -206,6 +303,13 @@ pub enum CallbackMsg {
     /// against a bug where the pair's `share == 0` branch silently produced
     /// no LP.
     DistributeLp {},
+
+    /// Final step of the `Clmm` `Settle`: after `manager.MintPosition` has run
+    /// and refunded any one-sided surplus back to this sink, sweep whatever
+    /// `token_denom` / `pair_denom` dust remains to `refund_receiver` so no
+    /// value strands in a terminal sink. A no-op (no messages) when nothing
+    /// is left.
+    SweepDust {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -222,6 +326,8 @@ pub enum QueryMsg {
     /// Sink-only mutable state: status (`Pending` / `Settled` / `Refunded`)
     /// plus, if settled, the resulting pair address and LP minted amount.
     SinkState {},
+    /// Targeted query: errors with `WrongRole` unless invoked on a locker.
+    LockerConfig {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -232,6 +338,7 @@ pub enum RoleResponse {
         config: SinkConfigResponse,
         state: SinkStateResponse,
     },
+    Locker(LockerConfigResponse),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -239,6 +346,8 @@ pub struct FactoryConfigResponse {
     pub admin: String,
     pub sink_code_id: u64,
     pub choice_factory: String,
+    pub clmm_factory: Option<String>,
+    pub clmm_manager: Option<String>,
     pub max_tip_bps: u16,
 }
 
@@ -249,12 +358,18 @@ pub struct SinkConfigResponse {
     pub pair_denom: String,
     pub token_decimals: u8,
     pub pair_decimals: u8,
-    pub lp_destination: LpDestination,
+    pub pool_kind: PoolKind,
     pub refund_receiver: String,
     pub deadline_seconds: u64,
     pub instantiated_at: u64,
     pub tip_bps: u16,
-    pub choice_factory: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct LockerConfigResponse {
+    pub manager: String,
+    pub beneficiary: String,
+    pub admin: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

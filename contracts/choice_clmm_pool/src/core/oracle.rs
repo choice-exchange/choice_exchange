@@ -159,3 +159,91 @@ pub fn update_oracle(
 ) -> StdResult<()> {
     update_oracle_and_fee(storage, env, current_price).map(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use choice_clmm_common::pool::FeeConfig;
+
+    // Extreme but in-range sqrt prices (Q64.96): the inclusive min and one below
+    // the exclusive max that `get_tick_at_sqrt_ratio` accepts.
+    fn min_sqrt() -> Uint256 {
+        Uint256::from(4_295_128_739u128)
+    }
+    fn max_sqrt_minus_one() -> Uint256 {
+        use std::str::FromStr;
+        Uint256::from_str("1461446703485210103287273052203988822378723970341").unwrap()
+    }
+
+    fn cfg(base: u32, max: u32, mult: u32) -> FeeConfig {
+        FeeConfig {
+            base_fee_ppm: base,
+            max_fee_ppm: max,
+            volatility_multiplier: mult,
+            ema_halflife_seconds: 600,
+            max_fee_change_per_second_ppm: 0,
+        }
+    }
+
+    /// The load-bearing security invariant: for the most adversarial in-range
+    /// inputs (maximum allowed multiplier against maximum price divergence), the
+    /// raw fee saturates to `max_fee_ppm` and never reaches `1_000_000`, never
+    /// overflows, and never panics. This is what makes the `as u32` cast and the
+    /// (unreachable) `fee_pips >= FEE_DENOMINATOR` rejection in `compute_swap_step`
+    /// safe.
+    #[test]
+    fn raw_fee_caps_below_denominator_at_extremes() {
+        // max_fee_ppm at its own ceiling, multiplier at the new bound.
+        let config = cfg(3_000, 999_999, 1_000_000);
+
+        // Maximum upward divergence: tiny EMA, huge current price.
+        let fee_up = compute_raw_dynamic_fee(&config, min_sqrt(), max_sqrt_minus_one()).unwrap();
+        assert_eq!(fee_up, 999_999, "huge divergence must saturate to the cap");
+        assert!(fee_up < 1_000_000);
+
+        // Maximum downward divergence: huge EMA, tiny current price.
+        let fee_down = compute_raw_dynamic_fee(&config, max_sqrt_minus_one(), min_sqrt()).unwrap();
+        assert_eq!(fee_down, 999_999);
+        assert!(fee_down < 1_000_000);
+    }
+
+    /// `volatility_multiplier == 0` disables the volatility component: the fee is
+    /// exactly `base_fee_ppm` regardless of how far price has diverged.
+    #[test]
+    fn raw_fee_zero_multiplier_is_constant_base() {
+        let config = cfg(3_000, 999_999, 0);
+        let fee = compute_raw_dynamic_fee(&config, min_sqrt(), max_sqrt_minus_one()).unwrap();
+        assert_eq!(fee, 3_000);
+    }
+
+    /// A zero EMA (degenerate, shouldn't occur in practice) returns the base fee
+    /// rather than dividing by zero.
+    #[test]
+    fn raw_fee_zero_ema_is_base() {
+        let config = cfg(3_000, 999_999, 100);
+        let fee = compute_raw_dynamic_fee(&config, Uint256::zero(), min_sqrt()).unwrap();
+        assert_eq!(fee, 3_000);
+    }
+
+    /// Between the extremes the fee scales: a small divergence lands strictly
+    /// between base and the cap; a large one is clamped to the cap.
+    #[test]
+    fn raw_fee_scales_then_clamps() {
+        let config = cfg(3_000, 10_000, 1_000_000);
+        let ema = Uint256::from(1_000_000_000_000u128);
+
+        // ~0.1% price divergence with a 1e6 multiplier ≈ +1000 ppm over base.
+        let small = ema + ema / Uint256::from(1_000u128);
+        let fee_small = compute_raw_dynamic_fee(&config, ema, small).unwrap();
+        assert!(
+            fee_small > 3_000 && fee_small < 10_000,
+            "small divergence should land between base and cap, got {}",
+            fee_small
+        );
+
+        // 50% divergence vastly exceeds the cap → clamped.
+        let large = ema + ema / Uint256::from(2u128);
+        let fee_large = compute_raw_dynamic_fee(&config, ema, large).unwrap();
+        assert_eq!(fee_large, 10_000);
+    }
+}

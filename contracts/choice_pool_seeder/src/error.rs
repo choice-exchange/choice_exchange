@@ -27,6 +27,36 @@ pub enum ContractError {
     )]
     SinkChoiceFactoryMismatch { got: String, expected: String },
 
+    #[error(
+        "Clmm sink rejected: factory pins clmm_{which} `{expected}` but sink_init supplied `{got}`"
+    )]
+    SinkClmmAddressMismatch {
+        which: String,
+        got: String,
+        expected: String,
+    },
+
+    #[error("Clmm graduation is not configured on this factory (clmm_factory / clmm_manager unset)")]
+    ClmmNotConfigured {},
+
+    #[error("FactoryInit must set clmm_factory and clmm_manager together, or neither")]
+    ClmmHalfConfigured {},
+
+    #[error("fee tier {fee} is not enabled on the CLMM factory")]
+    FeeTierNotSupported { fee: u32 },
+
+    #[error("CLMM pool for this token pair + fee tier already exists at `{pool}` — refusing to seed into a pre-priced pool")]
+    ClmmPoolAlreadyExists { pool: String },
+
+    #[error("Clmm Settle takes no funds; attach nothing (CLMM pool creation is free)")]
+    UnexpectedFundsForClmmSettle {},
+
+    #[error("Locker has no admin; beneficiary is immutable")]
+    LockerNoAdmin {},
+
+    #[error("Locker owns no position NFTs to collect fees on")]
+    LockerNoPositions {},
+
     #[error("token_denom and pair_denom must differ; got `{denom}` for both")]
     SameDenom { denom: String },
 

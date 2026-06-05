@@ -25,3 +25,19 @@ pub const FEE_TIERS: Map<u32, u32> = Map::new("fee_tiers");
 // Registry of created pools
 // Key: (Token0, Token1, FeeTier) -> Pool Address
 pub const POOLS: Map<(&str, &str, u32), Addr> = Map::new("pools");
+
+/// Anti-squat reservation for a single pool slot. While present and unexpired,
+/// only `creator` may create the `(token0, token1, fee)` pool. Set by the
+/// tokenfactory namespace owner of one side (or the factory owner) via
+/// `AuthorizeCreation`; consumed by the matching `CreatePool` or cleared on
+/// expiry. See `docs/graduation_antisquat_plan.md`.
+#[cw_serde]
+pub struct PoolCreationAuth {
+    pub creator: Addr,
+    /// Unix seconds; `u64::MAX` means no expiry.
+    pub expires_at: u64,
+}
+
+// Key: (Token0, Token1, FeeTier) -> reservation
+pub const POOL_CREATION_AUTH: Map<(&str, &str, u32), PoolCreationAuth> =
+    Map::new("pool_creation_auth");

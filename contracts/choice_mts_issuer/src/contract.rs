@@ -1,10 +1,13 @@
 use crate::error::ContractError;
 use crate::msg::{
-    ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchResponse, LaunchesResponse, MigrateMsg,
-    QueryMsg,
+    ClmmPoolAuth, ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchResponse, LaunchesResponse,
+    MigrateMsg, QueryMsg,
 };
 use crate::proto::{MsgBurn, MsgCreateDenom, MsgCreateTokenPair, ProtoCoin, TokenPair};
 use crate::state::{Config, LaunchRecord, LaunchStatus, CONFIG, LAUNCHES};
+
+use choice_clmm_common::factory::ExecuteMsg as ClmmFactoryExecuteMsg;
+use choice_clmm_common::types::AssetInfo as ClmmAssetInfo;
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -27,6 +30,10 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Reserve room for a `u64` decimal suffix (up to 20 chars) plus the
 /// underscore separator inside tokenfactory's 44-char subdenom cap.
 pub const MAX_SUBDENOM_PREFIX_LEN: usize = 12;
+
+/// Tokenfactory's hard subdenom length cap. The constructed
+/// `{prefix}_{internal_id}[_{salt_suffix}]` must fit within this.
+pub const MAX_SUBDENOM_LEN: usize = 44;
 
 /// Cap registration's decimals at the EVM ERC20 norm. MTS pairing inherits
 /// this on the EVM side, so anything > 18 risks the auto-deployed
@@ -125,6 +132,8 @@ pub fn execute(
             seeder_addr,
             create_sink_payload,
             choice_factory,
+            salt_suffix,
+            clmm_pool_auth,
         } => execute_register_launch(
             deps,
             env,
@@ -138,6 +147,8 @@ pub fn execute(
             seeder_addr,
             create_sink_payload,
             choice_factory,
+            salt_suffix,
+            clmm_pool_auth,
         ),
         ExecuteMsg::DeliverToSeeder {
             internal_id,
@@ -169,6 +180,8 @@ fn execute_register_launch(
     seeder_addr: String,
     create_sink_payload: Binary,
     choice_factory: Option<String>,
+    salt_suffix: Option<String>,
+    clmm_pool_auth: Option<ClmmPoolAuth>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
@@ -219,7 +232,26 @@ fn execute_register_launch(
         cw_held = cw_held.checked_sub(Uint128::one())?;
     }
 
-    let subdenom = format!("{}_{}", config.subdenom_prefix, internal_id);
+    // Layer A: fold the keeper-chosen per-launch salt into the subdenom so the
+    // launch denom is unguessable until this tx exists. Validate the suffix and
+    // the resulting subdenom length up front — a too-long subdenom would only
+    // surface as a cryptic chain-side error on `MsgCreateDenom`.
+    let subdenom = match &salt_suffix {
+        Some(salt) => {
+            if salt.is_empty() || !salt.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(ContractError::SaltSuffixInvalid { got: salt.clone() });
+            }
+            format!("{}_{}_{}", config.subdenom_prefix, internal_id, salt)
+        }
+        None => format!("{}_{}", config.subdenom_prefix, internal_id),
+    };
+    if subdenom.len() > MAX_SUBDENOM_LEN {
+        return Err(ContractError::SubdenomTooLong {
+            subdenom: subdenom.clone(),
+            len: subdenom.len(),
+            max: MAX_SUBDENOM_LEN,
+        });
+    }
     let denom = format!("factory/{}/{}", env.contract.address, subdenom);
 
     // Persist the record up front. `erc20_address` lands in the reply
@@ -317,6 +349,33 @@ fn execute_register_launch(
                 decimals: config.decimals as u8,
             })?,
             funds: coins(1u128, &denom),
+        })));
+    }
+
+    // 5b. (Optional) Layer B anti-squat gate. Reserve the CLMM pool slot
+    //     `(launch_denom, pair_denom, fee)` for the sink that will create it at
+    //     Settle. The issuer owns the `factory/{this}/...` namespace, so the
+    //     factory authorizes this reservation; afterwards no squatter can
+    //     occupy the slot during the curve's lifetime. `ttl_seconds = 0` =
+    //     no expiry — safe because the launch denom is unique. Auth doesn't
+    //     require the denom to exist yet (pure string parse on the factory
+    //     side), but we emit it after CreateDenom anyway for clarity.
+    if let Some(auth) = &clmm_pool_auth {
+        let clmm_factory = deps.api.addr_validate(&auth.clmm_factory)?;
+        submsgs.push(SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: clmm_factory.to_string(),
+            msg: to_json_binary(&ClmmFactoryExecuteMsg::AuthorizeCreation {
+                token_a: ClmmAssetInfo::NativeToken {
+                    denom: denom.clone(),
+                },
+                token_b: ClmmAssetInfo::NativeToken {
+                    denom: pair_denom.clone(),
+                },
+                fee: auth.fee,
+                creator: seeder_addr.to_string(),
+                ttl_seconds: auth.ttl_seconds,
+            })?,
+            funds: vec![],
         })));
     }
 

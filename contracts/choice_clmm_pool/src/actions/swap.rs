@@ -384,16 +384,38 @@ fn apply_swap(
                 .map(|c| c.amount)
                 .unwrap_or_default();
 
-            if sent > result.amount_in {
-                let refund = sent.checked_sub(result.amount_in).map_err(|_| {
-                    StdError::generic_err("refund underflow (invariant broken)")
-                })?;
-                messages.push(in_token.transfer_msg(sender.as_ref(), refund)?);
-            } else {
-                ensure!(
-                    sent == result.amount_in,
-                    ContractError::Std(StdError::generic_err("Insufficient funds"))
-                );
+            // The input denom must cover the swap cost; surplus is refunded.
+            ensure!(
+                sent >= result.amount_in,
+                ContractError::Std(StdError::generic_err("Insufficient funds"))
+            );
+
+            // Refund the surplus of the input denom AND the full amount of every
+            // other denom attached to the message. Parity with the mint path
+            // (`compute_native_refunds`): without refunding non-input coins, any
+            // extra denom sent alongside — including the pool's *other* token —
+            // is silently absorbed into reserves and stranded forever.
+            let mut refunds: Vec<Coin> = vec![];
+            for coin in info_funds {
+                let refund = if coin.denom == denom {
+                    coin.amount.checked_sub(result.amount_in).map_err(|_| {
+                        StdError::generic_err("refund underflow (invariant broken)")
+                    })?
+                } else {
+                    coin.amount
+                };
+                if !refund.is_zero() {
+                    refunds.push(Coin {
+                        denom: coin.denom.clone(),
+                        amount: refund,
+                    });
+                }
+            }
+            if !refunds.is_empty() {
+                messages.push(CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+                    to_address: sender.to_string(),
+                    amount: refunds,
+                }));
             }
         }
         SwapInputSource::Cw20AlreadySent { total_sent } => {

@@ -1108,6 +1108,7 @@ fn test_flash_loan_borrower_roundtrip_and_underpay_revert() {
         amount1,
         underpay0: Uint128::zero(),
         underpay1: Uint128::zero(),
+        repay_via_submsg: false,
     };
 
     let pool_atom_before = bank_balance(&bank, &pool_addr, ATOM);
@@ -1171,6 +1172,7 @@ fn test_flash_loan_borrower_roundtrip_and_underpay_revert() {
         amount1,
         underpay0: Uint128::one(), // one unit short of (principal + fee)
         underpay1: Uint128::zero(),
+        repay_via_submsg: false,
     };
     let cheat = wasm.execute(
         &pool_addr,
@@ -1188,4 +1190,122 @@ fn test_flash_loan_borrower_roundtrip_and_underpay_revert() {
     // Reverted: the pool's balances are untouched by the failed flash.
     assert_eq!(bank_balance(&bank, &pool_addr, ATOM), pool_atom_mid);
     assert_eq!(bank_balance(&bank, &pool_addr, USDT), pool_usdt_mid);
+}
+
+// ============================================================================
+// Phase 6 (b) — native flash repaid via a SUBMESSAGE bank send.
+// ============================================================================
+//
+// The pool verifies flash repayment by querying its own balance in
+// `reply_flash`, which relies on the borrower's repayment having settled first.
+// CosmWasm runs a sub-call's messages AND submessages (and their replies) to
+// completion before the parent's reply fires — so a borrower that repays inside
+// a `SubMsg::reply_on_success` (with its own reply) must still settle before
+// `reply_flash` reads the balance. This test proves that path: an honest native
+// repayment routed through a submessage succeeds and the pool grows by exactly
+// the flash fee.
+#[test]
+fn test_flash_native_repay_via_submessage() {
+    let env = setup();
+    let wasm = Wasm::new(&env.app);
+    let bank = Bank::new(&env.app);
+
+    let (pool_addr, _) = setup_pool_with_liquidity(&env, &wasm);
+
+    let borrower_code_id = wasm
+        .store_code(
+            &get_wasm_byte_code("flash_borrower_mock.wasm"),
+            None,
+            &env.admin,
+        )
+        .unwrap()
+        .data
+        .code_id;
+    let borrower_addr = wasm
+        .instantiate(
+            borrower_code_id,
+            &flash_borrower_mock::InstantiateMsg {},
+            Some(&env.admin.address()),
+            Some("Flash Borrower SubMsg"),
+            &[
+                Coin::new(1_000_000u128, ATOM),
+                Coin::new(1_000_000u128, USDT),
+            ],
+            &env.admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    let amount0 = Uint128::new(2_000_000); // ATOM (token0)
+    let amount1 = Uint128::new(1_000_000); // USDT (token1)
+
+    let plan = flash_borrower_mock::RepayPlan {
+        denom0: ATOM.to_string(),
+        denom1: USDT.to_string(),
+        amount0,
+        amount1,
+        underpay0: Uint128::zero(),
+        underpay1: Uint128::zero(),
+        repay_via_submsg: true,
+    };
+
+    let pool_atom_before = bank_balance(&bank, &pool_addr, ATOM);
+    let pool_usdt_before = bank_balance(&bank, &pool_addr, USDT);
+
+    let res = wasm
+        .execute(
+            &pool_addr,
+            &PoolExecuteMsg::Flash {
+                recipient: borrower_addr,
+                amount0,
+                amount1,
+                data: cosmwasm_std::to_json_binary(&plan).unwrap(),
+            },
+            &[],
+            &env.admin,
+        )
+        .unwrap();
+
+    // Confirm the borrower actually took the submessage repayment path.
+    assert!(
+        res.events
+            .iter()
+            .flat_map(|e| e.attributes.iter())
+            .any(|a| a.key == "via_submsg" && a.value == "true"),
+        "borrower should have repaid via submessage"
+    );
+
+    let fee0: u128 = res
+        .events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .find(|a| a.key == "fee0")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    let fee1: u128 = res
+        .events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .find(|a| a.key == "fee1")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    assert!(fee0 > 0 && fee1 > 0, "flash fee must be non-zero");
+
+    // Submessage repayment settled before reply_flash queried the balance: the
+    // pool ends with exactly its starting balance + the flash fee.
+    assert_eq!(
+        bank_balance(&bank, &pool_addr, ATOM),
+        pool_atom_before + fee0,
+        "pool ATOM should grow by exactly fee0 (submsg repay)"
+    );
+    assert_eq!(
+        bank_balance(&bank, &pool_addr, USDT),
+        pool_usdt_before + fee1,
+        "pool USDT should grow by exactly fee1 (submsg repay)"
+    );
 }

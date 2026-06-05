@@ -73,6 +73,8 @@ fn setup() -> Env {
                 admin: admin.address(),
                 sink_code_id: code_id, // single-binary: factory + sink share the same code-id
                 choice_factory: choice_factory.address(),
+                clmm_factory: None,
+                clmm_manager: None,
                 max_tip_bps: 100,
             }),
             Some(&admin.address()),
@@ -201,4 +203,25 @@ fn create_sink_then_settle_full_lifecycle() {
     //  6. Permissionless `Settle`; assert tip lands, pair gets created,
     //     liquidity provided, LP burned (default LpDestination).
     unimplemented!("re-enable when a wired choice_factory deployment fits inside one test file");
+}
+
+#[test]
+#[ignore = "needs the full CLMM stack (choice_clmm_factory + pool + manager wasm) wired into test-tube to drive CreatePool + MintPosition. Recheck alongside the XYK lifecycle test when a cross-contract testbed harness lands. Unit tests (`clmm_settle_*` in src/tests.rs) cover the message-chain shape, sqrt-price math, full-range ticks, and the pre-existing-pool/fee-tier guards until then."]
+fn create_clmm_sink_then_settle_full_lifecycle() {
+    let env = setup();
+    let _ = env;
+    // Intended scope when re-enabled:
+    //  1. Deploy choice_clmm_factory + pool + manager code-ids into test-tube;
+    //     re-instantiate the seeder factory with clmm_factory/clmm_manager set.
+    //  2. `CreateLocker` with a fixed salt; assert it lives at the predicted
+    //     instantiate2 address.
+    //  3. `CreateSink` with a `PoolKind::Clmm { position_recipient: <locker> }`.
+    //  4. Issue a tokenfactory `token_denom`; bank-send token + pair to the sink
+    //     (no create fee — CLMM pool creation is free).
+    //  5. Permissionless `Settle`; assert: tip lands, a pool exists at the
+    //     seed-ratio price, a full-range position NFT is owned by the locker,
+    //     both balances are consumed (dust swept to refund_receiver).
+    //  6. Generate swap volume; `locker.CollectFees {}`; assert fees land at
+    //     the beneficiary and the locker has no decrease/burn path.
+    unimplemented!("re-enable when a wired CLMM deployment fits inside one test file");
 }

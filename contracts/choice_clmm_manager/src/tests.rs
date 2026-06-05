@@ -251,6 +251,58 @@ mod tests {
         assert_eq!(res.attributes[0].value, "instantiate");
     }
 
+    /// Regression: only MintPosition / IncreaseLiquidity forward funds to the
+    /// pool. Every other entrypoint must REJECT attached native coins rather
+    /// than stranding them in the manager contract. The guard fires before any
+    /// position/ownership lookup, so no NFT setup is needed.
+    #[test]
+    fn nonpayable_entrypoints_reject_attached_funds() {
+        let mut deps = setup_deps();
+        let msg = InstantiateMsg {
+            name: "Choice Positions".to_string(),
+            symbol: "CH-POS".to_string(),
+            factory_addr: deps.api.addr_make("factory_addr").to_string(),
+        };
+        let creator = deps.api.addr_make("creator");
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
+
+        let user = deps.api.addr_make("user");
+        let funds = [Coin::new(Uint128::new(1), "inj")];
+        let cases = vec![
+            ExecuteMsg::DecreaseLiquidity {
+                token_id: "1".to_string(),
+                liquidity: Uint128::new(1),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                deadline: 0,
+            },
+            ExecuteMsg::Collect {
+                token_id: "1".to_string(),
+                recipient: None,
+            },
+            ExecuteMsg::Burn {
+                token_id: "1".to_string(),
+            },
+            ExecuteMsg::TransferNft {
+                recipient: user.to_string(),
+                token_id: "1".to_string(),
+            },
+        ];
+        for m in cases {
+            let label = format!("{:?}", m);
+            let err = match execute(deps.as_mut(), mock_env(), message_info(&user, &funds), m) {
+                Err(e) => e,
+                Ok(_) => panic!("{} must reject attached funds", label),
+            };
+            assert!(
+                err.to_string().contains("no funds"),
+                "{}: unexpected error {}",
+                label,
+                err
+            );
+        }
+    }
+
     fn instantiate_manager(deps: &mut OwnedDeps<MockStorage, MockApi, CustomMockQuerier>) {
         let creator = deps.api.addr_make("creator");
         let init_msg = InstantiateMsg {
