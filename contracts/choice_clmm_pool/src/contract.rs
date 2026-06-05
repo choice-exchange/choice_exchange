@@ -1,8 +1,8 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Response, StdError,
-    StdResult, Uint128,
+    from_json, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply, Response,
+    StdError, StdResult, Uint128,
 };
 use cw_storage_plus::Bound;
 use cw2::set_contract_version;
@@ -10,19 +10,26 @@ use cw20::Cw20ReceiveMsg;
 
 use crate::actions::burn::execute_burn;
 use crate::actions::collect::execute_collect;
+use crate::actions::flash::{execute_flash, reply_flash, REPLY_FLASH};
 use crate::actions::mint::execute_mint;
+use crate::actions::protocol::{
+    execute_collect_protocol, execute_set_fee_protocol, execute_update_protocol_fee_config,
+};
 use crate::actions::swap::{
-    execute_swap, execute_swap_exact_input, execute_swap_exact_input_cw20, query_quote,
+    execute_swap, execute_swap_exact_input, execute_swap_exact_input_cw20,
+    execute_swap_exact_output, query_quote, query_quote_exact_output,
 };
 use crate::core::oracle::initialize_oracle;
 use crate::error::ContractError;
 use crate::core::ticks::get_fee_growth_inside as compute_fee_growth_inside;
 use crate::state::{
     PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, POSITIONS,
-    TICK_BITMAP, TICKS,
+    PROTOCOL_FEES_0, PROTOCOL_FEES_1, PROTOCOL_FEE_CONFIG, TICK_BITMAP, TICKS,
 };
+use choice_clmm_common::factory::{ConfigResponse as FactoryConfigResponse, QueryMsg as FactoryQueryMsg};
 use choice_clmm_common::pool::{
-    Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, PoolState, QueryMsg,
+    Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, PoolState, ProtocolFeeConfig,
+    ProtocolFeesResponse, QueryMsg,
 };
 use choice_clmm_common::types::AssetInfo;
 use choice_clmm_math::tick_math::{get_tick_at_sqrt_ratio, MAX_TICK, MIN_TICK};
@@ -101,6 +108,9 @@ pub fn instantiate(
         token1: msg.token1,
         tick_spacing: msg.tick_spacing,
         fee_config: msg.fee_config,
+        // Hook seam reserved but inert (no engine, no setter yet). See PoolConfig.
+        hook: None,
+        hook_permissions: 0,
     };
     POOL_CONFIG.save(deps.storage, &config)?;
 
@@ -127,6 +137,33 @@ pub fn instantiate(
         msg.initial_sqrt_price,
     )?;
 
+    // Protocol fees default to OFF. Treasury defaults to the factory owner (so a
+    // later `CollectProtocol` never strands funds at the factory contract); the
+    // owner can repoint it via `UpdateProtocolFeeConfig`. The factory's CONFIG
+    // is already committed at this point (instantiate runs inside the factory's
+    // CreatePool submessage), so the query is safe; fall back to the factory
+    // address if it is somehow unavailable.
+    let treasury = deps
+        .querier
+        .query_wasm_smart::<FactoryConfigResponse>(
+            info.sender.clone(),
+            &FactoryQueryMsg::GetConfig {},
+        )
+        .ok()
+        .and_then(|c| deps.api.addr_validate(&c.owner).ok())
+        .unwrap_or_else(|| info.sender.clone());
+
+    PROTOCOL_FEE_CONFIG.save(
+        deps.storage,
+        &ProtocolFeeConfig {
+            fee_protocol_0: 0,
+            fee_protocol_1: 0,
+            treasury,
+            burn_auction: None,
+            burn_share_bps: 0,
+        },
+    )?;
+
     Ok(Response::new()
         .add_attribute("method", "instantiate")
         .add_attribute("token0", config.token0.to_string())
@@ -141,6 +178,18 @@ pub fn execute(
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
+    // Reentrancy guard: while a flash loan is mid-callback, reject every
+    // fund-affecting mutator. Pure config setters (owner-gated, no fund
+    // movement) are exempt. The flash handler itself sets the lock after this
+    // check; its reply clears it. Only flash mutates the lock.
+    let guarded = !matches!(
+        msg,
+        ExecuteMsg::SetFeeProtocol { .. } | ExecuteMsg::UpdateProtocolFeeConfig { .. }
+    );
+    if guarded && crate::state::is_locked(deps.storage) {
+        return Err(ContractError::Reentrancy {});
+    }
+
     match msg {
         ExecuteMsg::Mint {
             lower_tick,
@@ -166,6 +215,22 @@ pub fn execute(
             recipient,
             deadline,
         } => execute_swap_exact_input(deps, env, info, minimum_amount_out, recipient, deadline),
+        ExecuteMsg::SwapExactOutput {
+            zero_for_one,
+            amount_out,
+            maximum_amount_in,
+            recipient,
+            deadline,
+        } => execute_swap_exact_output(
+            deps,
+            env,
+            info,
+            zero_for_one,
+            amount_out,
+            maximum_amount_in,
+            recipient,
+            deadline,
+        ),
         ExecuteMsg::Burn {
             lower_tick,
             upper_tick,
@@ -187,6 +252,33 @@ pub fn execute(
             amount1_requested,
         ),
         ExecuteMsg::Receive(cw20_msg) => receive_cw20(deps, env, info, cw20_msg),
+        ExecuteMsg::SetFeeProtocol {
+            fee_protocol_0,
+            fee_protocol_1,
+        } => execute_set_fee_protocol(deps, info, fee_protocol_0, fee_protocol_1),
+        ExecuteMsg::UpdateProtocolFeeConfig {
+            treasury,
+            burn_auction,
+            burn_share_bps,
+            clear_burn_auction,
+        } => execute_update_protocol_fee_config(
+            deps,
+            info,
+            treasury,
+            burn_auction,
+            burn_share_bps,
+            clear_burn_auction,
+        ),
+        ExecuteMsg::CollectProtocol {
+            amount0_requested,
+            amount1_requested,
+        } => execute_collect_protocol(deps, info, amount0_requested, amount1_requested),
+        ExecuteMsg::Flash {
+            recipient,
+            amount0,
+            amount1,
+            data,
+        } => execute_flash(deps, env, info, recipient, amount0, amount1, data),
     }
 }
 
@@ -231,6 +323,16 @@ fn receive_cw20(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
+pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response, ContractError> {
+    match msg.id {
+        REPLY_FLASH => reply_flash(deps, env, msg),
+        id => Err(ContractError::Std(StdError::generic_err(format!(
+            "unknown reply id: {id}"
+        )))),
+    }
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
     let version = cw2::get_contract_version(deps.storage)?;
     if version.contract != CONTRACT_NAME {
@@ -259,6 +361,14 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             amount_in,
         } => {
             let resp = query_quote(deps, env, token_in, amount_in)
+                .map_err(|e| StdError::generic_err(e.to_string()))?;
+            to_json_binary(&resp)
+        }
+        QueryMsg::QuoteExactOutput {
+            token_out,
+            amount_out,
+        } => {
+            let resp = query_quote_exact_output(deps, env, token_out, amount_out)
                 .map_err(|e| StdError::generic_err(e.to_string()))?;
             to_json_binary(&resp)
         }
@@ -336,6 +446,21 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 fee_growth_inside_0_x128: inside_0,
                 fee_growth_inside_1_x128: inside_1,
             })
+        }
+        QueryMsg::GetProtocolFees {} => {
+            let protocol_fees_0 = PROTOCOL_FEES_0
+                .may_load(deps.storage)?
+                .unwrap_or_default();
+            let protocol_fees_1 = PROTOCOL_FEES_1
+                .may_load(deps.storage)?
+                .unwrap_or_default();
+            to_json_binary(&ProtocolFeesResponse {
+                protocol_fees_0,
+                protocol_fees_1,
+            })
+        }
+        QueryMsg::GetProtocolFeeConfig {} => {
+            to_json_binary(&PROTOCOL_FEE_CONFIG.load(deps.storage)?)
         }
     }
 }

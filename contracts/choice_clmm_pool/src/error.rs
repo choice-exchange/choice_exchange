@@ -18,6 +18,9 @@ pub enum ContractError {
     #[error("Insufficient output: expected at least {minimum}, got {actual}")]
     InsufficientOutput { minimum: String, actual: String },
 
+    #[error("Excessive input: cost {actual} exceeds maximum {maximum}")]
+    ExcessiveInput { maximum: String, actual: String },
+
     #[error("Deadline exceeded")]
     DeadlineExceeded {},
 
@@ -29,4 +32,14 @@ pub enum ContractError {
 
     #[error("Invalid config: {reason}")]
     InvalidConfig { reason: String },
+
+    #[error("Reentrant call: a flash loan is in progress")]
+    Reentrancy {},
+
+    #[error("Flash loan not repaid: token{token} requires {required}, pool holds {actual}")]
+    FlashNotRepaid {
+        token: u8,
+        required: String,
+        actual: String,
+    },
 }

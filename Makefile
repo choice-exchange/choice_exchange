@@ -16,6 +16,9 @@ help:
 	@echo "  build-factory             Build CLMM factory only"
 	@echo "  build-pool                Build CLMM pool only"
 	@echo "  build-manager             Build CLMM manager only"
+	@echo "  build-zap-lp              Build choice_zap_lp"
+	@echo "  build-mts-issuer          Build choice_mts_issuer"
+	@echo "  build-pool-seeder         Build choice_pool_seeder"
 	@echo "  build-release             Docker workspace-optimizer (all contracts, optimised)"
 	@echo "  test                      build-all + integration tests"
 	@echo ""
@@ -57,6 +60,14 @@ build-manager:
 build-zap-lp:
 	RUSTFLAGS=$(RUST_FLAGS) cargo build --release --lib --target wasm32-unknown-unknown -p choice-zap-lp
 	cp target/wasm32-unknown-unknown/release/choice_zap_lp.wasm artifacts/
+
+build-mts-issuer:
+	RUSTFLAGS=$(RUST_FLAGS) cargo build --release --lib --target wasm32-unknown-unknown -p choice-mts-issuer
+	cp target/wasm32-unknown-unknown/release/choice_mts_issuer.wasm artifacts/
+
+build-pool-seeder:
+	RUSTFLAGS=$(RUST_FLAGS) cargo build --release --lib --target wasm32-unknown-unknown -p choice-pool-seeder
+	cp target/wasm32-unknown-unknown/release/choice_pool_seeder.wasm artifacts/
 
 build-all: build-factory build-pool build-manager
 

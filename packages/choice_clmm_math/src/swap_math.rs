@@ -175,11 +175,9 @@ pub fn compute_swap_step(
 
 /// Variant of `compute_swap_step` for exact-output swaps.
 ///
-/// Exact-output isn't wired through the pool contract today. Left here so the
-/// math library exposes a complete V3-style surface; callers pass the *output*
-/// budget as `amount_remaining` and receive `amount_in` as the cost they must
-/// supply.
-#[allow(dead_code)]
+/// Callers pass the *output* budget as `amount_out_remaining` and receive
+/// `amount_in` as the cost they must supply (plus `fee_amount`). Used by the
+/// pool's `SwapExactOutput` path.
 pub fn compute_swap_step_exact_out(
     sqrt_ratio_current_x96: Uint256,
     sqrt_ratio_target_x96: Uint256,
@@ -344,5 +342,48 @@ mod tests {
         // Invariant: amount_in + fee == amount_remaining
         assert_eq!(r.amount_in + r.fee_amount, small);
         assert_ne!(r.sqrt_ratio_next_x96, target);
+    }
+
+    #[test]
+    fn exact_out_full_step_reaches_target() {
+        // Output budget large enough to consume the whole current→target range.
+        let p = q96();
+        let target = p * Uint256::from(2u128);
+        let l = 10u128.pow(18);
+        let huge_out = Uint256::from(10u128).pow(30);
+        let r = compute_swap_step_exact_out(p, target, l, huge_out, 3000, false).unwrap();
+        assert_eq!(r.sqrt_ratio_next_x96, target);
+        assert!(r.amount_in > Uint256::zero());
+        assert!(r.amount_out > Uint256::zero());
+        // Fee is charged on the input: fee = ceil(in * f / (1 - f)).
+        let expected_fee = mul_div_round_up(
+            r.amount_in,
+            Uint256::from(3000u128),
+            Uint256::from(FEE_DENOMINATOR - 3000),
+        )
+        .unwrap();
+        assert_eq!(r.fee_amount, expected_fee);
+    }
+
+    #[test]
+    fn exact_out_partial_step_delivers_exact_output() {
+        // Small output budget that won't reach the target: the step must deliver
+        // exactly the requested output and not move price past it.
+        let p = q96();
+        let target = p * Uint256::from(2u128);
+        let l = 10u128.pow(18);
+        let want_out = Uint256::from(1_000u128);
+        let r = compute_swap_step_exact_out(p, target, l, want_out, 3000, false).unwrap();
+        assert_eq!(r.amount_out, want_out);
+        assert_ne!(r.sqrt_ratio_next_x96, target);
+        assert!(r.amount_in > Uint256::zero());
+    }
+
+    #[test]
+    fn exact_out_rejects_zero_liquidity() {
+        let p = q96();
+        let target = p / Uint256::from(2u128);
+        let res = compute_swap_step_exact_out(p, target, 0, Uint256::from(100u128), 3000, true);
+        assert!(res.is_err());
     }
 }

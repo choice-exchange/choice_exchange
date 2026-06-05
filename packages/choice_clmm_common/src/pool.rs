@@ -2,10 +2,40 @@ use cosmwasm_schema::cw_serde;
 
 // Use U256 for high precision price math (Q64.96)
 // We use Uint256 from cosmwasm_std
-use cosmwasm_std::{Uint128, Uint256};
+use cosmwasm_std::{Addr, Binary, Uint128, Uint256};
 use cw20::Cw20ReceiveMsg;
 
 use crate::types::AssetInfo;
+
+/// Protocol-fee configuration: the carve rate per direction plus where collected
+/// protocol fees are routed when swept. Stored as a single item in the pool; all
+/// fields are controlled by the factory owner.
+///
+/// The carve is v3-style: `fee_protocol_{0,1}` is a divisor `n` meaning the
+/// protocol takes `fee_amount / n` of the fee charged on swaps in that token's
+/// direction, with the remainder going to LPs. `0` disables the carve. Valid
+/// nonzero values are `4..=10` (25%..10%), matching Uniswap V3.
+#[cw_serde]
+pub struct ProtocolFeeConfig {
+    /// Divisor for token0-denominated fees (swaps where `zero_for_one`). 0 = off.
+    pub fee_protocol_0: u8,
+    /// Divisor for token1-denominated fees (swaps where `!zero_for_one`). 0 = off.
+    pub fee_protocol_1: u8,
+    /// Recipient of the non-burn remainder when protocol fees are collected.
+    pub treasury: Addr,
+    /// `choice_send_to_auction` contract; collected fees routed here go to the
+    /// Injective burn auction. `None` disables the burn split (all to treasury).
+    pub burn_auction: Option<Addr>,
+    /// Fraction of collected protocol fees (basis points, 0..=10000) routed to
+    /// the burn auction. The remainder goes to `treasury`.
+    pub burn_share_bps: u16,
+}
+
+#[cw_serde]
+pub struct ProtocolFeesResponse {
+    pub protocol_fees_0: Uint128,
+    pub protocol_fees_1: Uint128,
+}
 
 // Slot0 contains the frequently accessed "hot" variables
 // to save gas (only 1 read needed for price/tick)
@@ -83,6 +113,19 @@ pub enum ExecuteMsg {
         recipient: Option<String>,
         deadline: Option<u64>,
     },
+    /// User-friendly exact-output swap: receive exactly `amount_out` of the
+    /// output token, paying at most `maximum_amount_in` of the input token.
+    /// `zero_for_one = true` pays token0 and receives token1. Native input is
+    /// attached as funds (surplus over the actual cost is refunded); CW20 input
+    /// is pulled via allowance (exactly the cost). Reverts if the full output
+    /// can't be delivered or the cost exceeds `maximum_amount_in`.
+    SwapExactOutput {
+        zero_for_one: bool,
+        amount_out: Uint128,
+        maximum_amount_in: Uint128,
+        recipient: Option<String>,
+        deadline: Option<u64>,
+    },
     Burn {
         lower_tick: i32,
         upper_tick: i32,
@@ -97,6 +140,56 @@ pub enum ExecuteMsg {
     },
     /// CW20 hook entry point for SwapExactInput via CW20 Send
     Receive(Cw20ReceiveMsg),
+
+    /// Set the protocol-fee carve divisors. Factory-owner only. Each value must
+    /// be `0` (off) or in `4..=10`. Mirrors Uniswap V3's `setFeeProtocol`.
+    SetFeeProtocol {
+        fee_protocol_0: u8,
+        fee_protocol_1: u8,
+    },
+    /// Update the protocol-fee routing (treasury / burn auction / burn share).
+    /// Factory-owner only. `clear_burn_auction` removes the burn split; any
+    /// `Some` field is updated, `None` left unchanged.
+    UpdateProtocolFeeConfig {
+        treasury: Option<String>,
+        burn_auction: Option<String>,
+        burn_share_bps: Option<u16>,
+        clear_burn_auction: bool,
+    },
+    /// Sweep accrued protocol fees. Factory-owner only. Splits each token by
+    /// `burn_share_bps` to the burn auction and the remainder to `treasury`.
+    /// `MAX_UINT128` (or any value `>=` accrued) collects all of that token.
+    CollectProtocol {
+        amount0_requested: Uint128,
+        amount1_requested: Uint128,
+    },
+
+    /// Flash loan `amount0` of token0 and/or `amount1` of token1 to `recipient`,
+    /// which must implement [`FlashCallbackMsg`] and repay the borrowed amounts
+    /// plus the flash fee (at the current dynamic fee rate) before the callback
+    /// returns. Repayment is by direct transfer back to the pool (native Send /
+    /// CW20 Transfer) and verified by balance delta in the reply. A reentrancy
+    /// lock blocks all other pool mutators for the duration of the callback.
+    Flash {
+        recipient: String,
+        amount0: Uint128,
+        amount1: Uint128,
+        data: Binary,
+    },
+}
+
+/// Message the pool sends to a flash-loan borrower mid-loan. The borrower's
+/// contract must handle this variant, do its work, and ensure the pool is repaid
+/// `amount_borrowed + fee{0,1}` of each token before this call returns (repay by
+/// transferring the tokens directly back to the pool — native bank Send or CW20
+/// `Transfer`, NOT `Send`, which would re-enter the locked pool).
+#[cw_serde]
+pub enum FlashCallbackMsg {
+    FlashCallback {
+        fee0: Uint128,
+        fee1: Uint128,
+        data: Binary,
+    },
 }
 
 /// CW20 hook messages for the pool contract
@@ -124,6 +217,14 @@ pub enum QueryMsg {
     Quote {
         token_in: AssetInfo,
         amount_in: Uint128,
+    },
+    /// Simulate an exact-output swap: given a desired `amount_out` of
+    /// `token_out`, return the input cost (in `amount_in_consumed`) and fee.
+    /// `amount_out` in the response is the actually-deliverable output (equals
+    /// the request when fully fillable, less if liquidity/price-limit bound).
+    QuoteExactOutput {
+        token_out: AssetInfo,
+        amount_out: Uint128,
     },
     /// Get position info including unclaimed fees.
     GetPosition {
@@ -153,6 +254,10 @@ pub enum QueryMsg {
         tick_lower: i32,
         tick_upper: i32,
     },
+    /// Accrued, not-yet-collected protocol fees for each token.
+    GetProtocolFees {},
+    /// Current protocol-fee carve rates and routing.
+    GetProtocolFeeConfig {},
 }
 
 #[cw_serde]

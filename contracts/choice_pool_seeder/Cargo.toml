@@ -1,0 +1,37 @@
+[package]
+name = "choice-pool-seeder"
+version = "1.0.0"
+authors = ["Dan Van Eijck"]
+edition = "2021"
+description = "Generic per-launch liquidity-bootstrap factory + sink for Choice pools. Single code-id, role-via-instantiate: a factory instance spawns deterministic instantiate2 sinks; each sink is single-shot Settled or Refunded."
+license = "MIT"
+
+exclude = [
+  "contract.wasm",
+  "hash.txt",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+library = []
+
+[dependencies]
+cw2                  = { version = "2.0.0" }
+cosmwasm-schema      = { version = "2.2.2" }
+cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
+cw-storage-plus      = { version = "2.0.0" }
+
+injective-cosmwasm   = { version = "0.3.4-1" }
+
+schemars             = { version = "0.8.22" }
+serde                = { version = "1.0.219", default-features = false, features = [ "derive" ] }
+serde-json-wasm      = { version = "1.0.0" }
+
+thiserror            = { version = "2.0.12" }
+
+choice               = { path = "../../packages/choice", default-features = false, version = "1.1.2" }
+
+[dev-dependencies]
+injective-test-tube  = { version = "1.16.3-1" }

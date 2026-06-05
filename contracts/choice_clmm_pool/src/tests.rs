@@ -2010,4 +2010,759 @@ mod tests {
         // base_fee_ppm in setup_oracle_pool is 0.
         assert_eq!(fee, 0);
     }
+
+    // ----------------------------------------------------------------------
+    // Phase 1: protocol fees
+    // ----------------------------------------------------------------------
+
+    use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage};
+    use cosmwasm_std::{
+        to_json_binary, ContractResult, OwnedDeps, SystemResult, WasmQuery,
+    };
+
+    /// Instantiate an INJ/USDT pool with liquidity and a querier that answers the
+    /// factory's `GetConfig` with `owner`. Returns (deps, owner_addr_string).
+    fn setup_protocol_pool() -> (OwnedDeps<MockStorage, MockApi, MockQuerier>, String) {
+        let mut deps = mock_dependencies();
+        let factory = deps.api.addr_make("factory");
+        let owner = deps.api.addr_make("factory_owner").to_string();
+
+        // Wire the querier so `assert_factory_owner` resolves the owner.
+        let owner_for_querier = owner.clone();
+        deps.querier.update_wasm(move |q| match q {
+            WasmQuery::Smart { msg, .. } => {
+                // Only the factory GetConfig query is expected here.
+                let _ = msg;
+                let resp = choice_clmm_common::factory::ConfigResponse {
+                    owner: owner_for_querier.clone(),
+                    pool_code_id: 1,
+                };
+                SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+            }
+            _ => SystemResult::Ok(ContractResult::Ok(Default::default())),
+        });
+
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: native("usdt"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 0,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&factory, &[]),
+            msg,
+        )
+        .unwrap();
+
+        let mint_msg = ExecuteMsg::Mint {
+            lower_tick: -200,
+            upper_tick: 200,
+            amount: Uint128::from(1_000_000u128),
+        };
+        let lp_info = message_info(
+            &deps.api.addr_make("lp_provider"),
+            &[
+                Coin::new(Uint128::new(1_000_000_000), "inj"),
+                Coin::new(Uint128::new(1_000_000_000), "usdt"),
+            ],
+        );
+        execute(deps.as_mut(), mock_env(), lp_info, mint_msg).unwrap();
+
+        (deps, owner)
+    }
+
+    fn do_swap_zero_for_one(
+        deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
+        amount: u128,
+    ) -> cosmwasm_std::Response {
+        let swap_msg = ExecuteMsg::Swap {
+            recipient: "trader".to_string(),
+            zero_for_one: true,
+            amount_specified: Uint128::from(amount),
+            sqrt_price_limit_x96: Uint256::from(4295128739u128 + 1),
+        };
+        let trader = message_info(
+            &deps.api.addr_make("trader"),
+            &[Coin::new(Uint128::new(amount), "inj")],
+        );
+        execute(deps.as_mut(), mock_env(), trader, swap_msg).unwrap()
+    }
+
+    fn attr(res: &cosmwasm_std::Response, key: &str) -> String {
+        res.attributes
+            .iter()
+            .find(|a| a.key == key)
+            .unwrap_or_else(|| panic!("missing attr {}", key))
+            .value
+            .clone()
+    }
+
+    #[test]
+    fn protocol_fee_off_by_default() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        let res = do_swap_zero_for_one(&mut deps, 1000);
+        assert_eq!(attr(&res, "protocol_fee"), "0");
+
+        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
+        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
+        assert!(fees.protocol_fees_0.is_zero());
+        assert!(fees.protocol_fees_1.is_zero());
+    }
+
+    #[test]
+    fn protocol_fee_carve_accrues_quarter_and_reduces_lp() {
+        let (mut deps, owner) = setup_protocol_pool();
+        let owner_addr = cosmwasm_std::Addr::unchecked(&owner);
+
+        // Owner enables a 1/4 (25%) carve on both directions.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 4,
+                fee_protocol_1: 4,
+            },
+        )
+        .unwrap();
+
+        // Single-step swap (no tick cross): protocol_fee == floor(fee_amount / 4).
+        let res = do_swap_zero_for_one(&mut deps, 1000);
+        let fee_amount: u128 = attr(&res, "fee_amount").parse().unwrap();
+        let protocol_fee: u128 = attr(&res, "protocol_fee").parse().unwrap();
+        assert!(fee_amount > 0, "swap should charge a fee");
+        assert_eq!(protocol_fee, fee_amount / 4);
+
+        // Accrued on the token0 side (zero_for_one input is token0 = inj).
+        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
+        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
+        assert_eq!(fees.protocol_fees_0.u128(), protocol_fee);
+        assert!(fees.protocol_fees_1.is_zero());
+    }
+
+    #[test]
+    fn set_fee_protocol_rejects_non_owner() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        let intruder = deps.api.addr_make("intruder");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&intruder, &[]),
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 4,
+                fee_protocol_1: 4,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::Unauthorized {}));
+    }
+
+    #[test]
+    fn set_fee_protocol_rejects_invalid_divisor() {
+        let (mut deps, owner) = setup_protocol_pool();
+        let owner_addr = cosmwasm_std::Addr::unchecked(&owner);
+        // 3 is out of the valid 0 || 4..=10 range.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 3,
+                fee_protocol_1: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn collect_protocol_splits_burn_and_treasury() {
+        let (mut deps, owner) = setup_protocol_pool();
+        let owner_addr = cosmwasm_std::Addr::unchecked(&owner);
+        let treasury = deps.api.addr_make("treasury").to_string();
+        let auction = deps.api.addr_make("burn_auction").to_string();
+
+        // Configure: 50% to burn auction, rest to treasury; 25% protocol carve.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::UpdateProtocolFeeConfig {
+                treasury: Some(treasury.clone()),
+                burn_auction: Some(auction.clone()),
+                burn_share_bps: Some(5000),
+                clear_burn_auction: false,
+            },
+        )
+        .unwrap();
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 4,
+                fee_protocol_1: 4,
+            },
+        )
+        .unwrap();
+
+        // Accrue some token0 protocol fees.
+        do_swap_zero_for_one(&mut deps, 100_000);
+        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
+        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
+        let accrued = fees.protocol_fees_0.u128();
+        assert!(accrued > 1, "need a non-dust protocol balance to split");
+
+        // Collect all.
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::CollectProtocol {
+                amount0_requested: Uint128::MAX,
+                amount1_requested: Uint128::MAX,
+            },
+        )
+        .unwrap();
+
+        let burn_amt = accrued * 5000 / 10000;
+        let treasury_amt = accrued - burn_amt;
+
+        // Expect a SendNative to the auction (funds == burn share) and a bank
+        // send to the treasury (remainder). token0 = native "inj".
+        let mut saw_auction = false;
+        let mut saw_treasury = false;
+        for m in &res.messages {
+            if let cosmwasm_std::CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
+                contract_addr,
+                funds,
+                ..
+            }) = &m.msg
+            {
+                if contract_addr == &auction {
+                    saw_auction = true;
+                    assert_eq!(funds[0].denom, "inj");
+                    assert_eq!(funds[0].amount.u128(), burn_amt);
+                }
+            }
+            if let cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount }) = &m.msg {
+                if to_address == &treasury {
+                    saw_treasury = true;
+                    assert_eq!(amount[0].amount.u128(), treasury_amt);
+                }
+            }
+        }
+        assert!(saw_auction, "expected a burn-auction SendNative message");
+        assert!(saw_treasury, "expected a treasury bank send");
+
+        // Accrued balance is now drained.
+        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
+        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
+        assert!(fees.protocol_fees_0.is_zero());
+    }
+
+    #[test]
+    fn collect_protocol_rejects_non_owner() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        let intruder = deps.api.addr_make("intruder");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&intruder, &[]),
+            ExecuteMsg::CollectProtocol {
+                amount0_requested: Uint128::MAX,
+                amount1_requested: Uint128::MAX,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::Unauthorized {}));
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 2: flash loans + reentrancy lock
+    // ----------------------------------------------------------------------
+
+    use crate::actions::flash::REPLY_FLASH;
+    use crate::contract::reply as contract_reply;
+    use crate::state::{is_locked, PENDING_FLASH};
+    use cosmwasm_std::{Binary, Reply, SubMsgResponse, SubMsgResult};
+
+    fn pool_addr() -> String {
+        mock_env().contract.address.to_string()
+    }
+
+    fn set_pool_balance(
+        deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>,
+        inj: u128,
+        usdt: u128,
+    ) {
+        deps.querier.bank.update_balance(
+            pool_addr(),
+            vec![
+                Coin::new(Uint128::new(inj), "inj"),
+                Coin::new(Uint128::new(usdt), "usdt"),
+            ],
+        );
+    }
+
+    fn flash_reply_msg() -> Reply {
+        Reply {
+            id: REPLY_FLASH,
+            payload: Binary::default(),
+            gas_used: 0,
+            result: SubMsgResult::Ok(
+                #[allow(deprecated)]
+                SubMsgResponse {
+                    events: vec![],
+                    data: None,
+                    msg_responses: vec![],
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn flash_lends_and_locks() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        set_pool_balance(&mut deps, 5_000_000, 5_000_000);
+        let borrower = deps.api.addr_make("borrower");
+        let caller = deps.api.addr_make("anyone");
+        let caller_info = message_info(&caller, &[]);
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            caller_info,
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1_000_000),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap();
+
+        // Loan transfer (bank send) + callback submessage.
+        let loan = res
+            .messages
+            .iter()
+            .find(|m| matches!(&m.msg, cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { .. })))
+            .expect("loan bank send");
+        if let cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount }) = &loan.msg {
+            assert_eq!(to_address, &borrower.to_string());
+            assert_eq!(amount[0].denom, "inj");
+            assert_eq!(amount[0].amount.u128(), 1_000_000);
+        }
+        let callback = res
+            .messages
+            .iter()
+            .find(|m| m.id == REPLY_FLASH)
+            .expect("callback submessage with flash reply id");
+        assert!(matches!(
+            &callback.msg,
+            cosmwasm_std::CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute { .. })
+        ));
+
+        // Lock held; pending context recorded. fee0 = ceil(1e6 * 3000 / 1e6) = 3000.
+        assert!(is_locked(&deps.storage));
+        let pending = PENDING_FLASH.load(&deps.storage).unwrap();
+        assert_eq!(pending.amount0.u128(), 1_000_000);
+        assert_eq!(pending.fee0.u128(), 3000);
+        assert_eq!(pending.snapshot0.u128(), 5_000_000);
+    }
+
+    #[test]
+    fn flash_blocks_reentrant_mutator() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        set_pool_balance(&mut deps, 5_000_000, 5_000_000);
+        let borrower = deps.api.addr_make("borrower");
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1_000_000),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap();
+
+        // While the lock is held, any fund-affecting mutator must revert.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[Coin::new(Uint128::new(100), "inj")]),
+            ExecuteMsg::Swap {
+                recipient: borrower.to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::new(100),
+                sqrt_price_limit_x96: Uint256::from(4295128739u128 + 1),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::Reentrancy {}));
+
+        // A nested flash is likewise rejected.
+        let err2 = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err2, ContractError::Reentrancy {}));
+    }
+
+    #[test]
+    fn flash_reply_accrues_lp_fee_and_unlocks() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        set_pool_balance(&mut deps, 5_000_000, 5_000_000);
+        let borrower = deps.api.addr_make("borrower");
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1_000_000),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap();
+
+        // Borrower repays loan + fee: balance returns to snapshot + fee.
+        set_pool_balance(&mut deps, 5_003_000, 5_000_000);
+
+        contract_reply(deps.as_mut(), mock_env(), flash_reply_msg()).unwrap();
+
+        // Lock released, pending cleared.
+        assert!(!is_locked(&deps.storage));
+        assert!(PENDING_FLASH.may_load(&deps.storage).unwrap().is_none());
+
+        // LP fee growth bumped by fee0 (protocol off). L = 1_000_000 (minted).
+        let fg0 = crate::state::FEE_GROWTH_GLOBAL_0
+            .load(&deps.storage)
+            .unwrap();
+        let expected = (Uint256::from(3000u128) << 128u32) / Uint256::from(1_000_000u128);
+        assert_eq!(fg0, expected);
+
+        // No protocol fee accrued.
+        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
+        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
+        assert!(fees.protocol_fees_0.is_zero());
+    }
+
+    #[test]
+    fn flash_reply_rejects_underpayment() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        set_pool_balance(&mut deps, 5_000_000, 5_000_000);
+        let borrower = deps.api.addr_make("borrower");
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1_000_000),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap();
+
+        // One unit short of snapshot + fee.
+        set_pool_balance(&mut deps, 5_002_999, 5_000_000);
+        let err = contract_reply(deps.as_mut(), mock_env(), flash_reply_msg()).unwrap_err();
+        assert!(matches!(err, ContractError::FlashNotRepaid { token: 0, .. }));
+    }
+
+    #[test]
+    fn flash_fee_carves_to_protocol() {
+        let (mut deps, owner) = setup_protocol_pool();
+        let owner_addr = cosmwasm_std::Addr::unchecked(&owner);
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner_addr, &[]),
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 4,
+                fee_protocol_1: 4,
+            },
+        )
+        .unwrap();
+
+        set_pool_balance(&mut deps, 5_000_000, 5_000_000);
+        let borrower = deps.api.addr_make("borrower");
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1_000_000),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap();
+        set_pool_balance(&mut deps, 5_003_000, 5_000_000);
+        contract_reply(deps.as_mut(), mock_env(), flash_reply_msg()).unwrap();
+
+        // fee0 = 3000; protocol takes floor(3000/4) = 750, LPs get 2250.
+        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
+        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
+        assert_eq!(fees.protocol_fees_0.u128(), 750);
+
+        let fg0 = crate::state::FEE_GROWTH_GLOBAL_0
+            .load(&deps.storage)
+            .unwrap();
+        let expected = (Uint256::from(2250u128) << 128u32) / Uint256::from(1_000_000u128);
+        assert_eq!(fg0, expected);
+    }
+
+    #[test]
+    fn flash_fee_routes_to_protocol_when_no_liquidity() {
+        // Fresh pool with NO minted liquidity (L = 0). The LP fee share has no
+        // recipient, so the whole flash fee must land in the protocol bucket.
+        let mut deps = mock_dependencies();
+        let factory = deps.api.addr_make("factory");
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: native("usdt"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 0,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        instantiate(deps.as_mut(), mock_env(), message_info(&factory, &[]), msg).unwrap();
+
+        set_pool_balance(&mut deps, 5_000_000, 5_000_000);
+        let borrower = deps.api.addr_make("borrower");
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1_000_000),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap();
+        set_pool_balance(&mut deps, 5_003_000, 5_000_000);
+        contract_reply(deps.as_mut(), mock_env(), flash_reply_msg()).unwrap();
+
+        // Entire fee0 (3000) routed to protocol; LP growth untouched.
+        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
+        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
+        assert_eq!(fees.protocol_fees_0.u128(), 3000);
+        assert!(crate::state::FEE_GROWTH_GLOBAL_0
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or_default()
+            .is_zero());
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 3: exact-output swaps
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn exact_output_delivers_requested_and_refunds() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        let trader = deps.api.addr_make("trader");
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(10_000), "inj")]);
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            trader_info,
+            ExecuteMsg::SwapExactOutput {
+                zero_for_one: true,
+                amount_out: Uint128::new(500),
+                maximum_amount_in: Uint128::new(10_000),
+                recipient: Some(trader.to_string()),
+                deadline: None,
+            },
+        )
+        .unwrap();
+
+        // Exactly the requested output is delivered.
+        let out_amt: u128 = attr(&res, "amount_out").parse().unwrap();
+        assert_eq!(out_amt, 500);
+        let in_amt: u128 = attr(&res, "amount_in").parse().unwrap();
+        // Cost is output + fee, comfortably under the 10_000 max.
+        assert!((500..10_000).contains(&in_amt));
+
+        // Output payout = 500 usdt to trader; surplus inj refunded.
+        let mut paid_out = false;
+        let mut refunded = false;
+        for m in &res.messages {
+            if let cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount }) = &m.msg {
+                if to_address == &trader.to_string() && amount[0].denom == "usdt" {
+                    paid_out = true;
+                    assert_eq!(amount[0].amount.u128(), 500);
+                }
+                if to_address == &trader.to_string() && amount[0].denom == "inj" {
+                    refunded = true;
+                    assert_eq!(amount[0].amount.u128(), 10_000 - in_amt);
+                }
+            }
+        }
+        assert!(paid_out, "expected 500 usdt payout");
+        assert!(refunded, "expected inj surplus refund");
+    }
+
+    #[test]
+    fn exact_output_quote_matches_execution() {
+        let (mut deps, _owner) = setup_protocol_pool();
+
+        let q = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::QuoteExactOutput {
+                token_out: native("usdt"),
+                amount_out: Uint128::new(500),
+            },
+        )
+        .unwrap();
+        let quote: choice_clmm_common::pool::QuoteResponse = from_json(&q).unwrap();
+        assert_eq!(quote.amount_out.u128(), 500);
+
+        let trader = deps.api.addr_make("trader");
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(10_000), "inj")]);
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            trader_info,
+            ExecuteMsg::SwapExactOutput {
+                zero_for_one: true,
+                amount_out: Uint128::new(500),
+                maximum_amount_in: Uint128::new(10_000),
+                recipient: Some(trader.to_string()),
+                deadline: None,
+            },
+        )
+        .unwrap();
+        let in_amt: u128 = attr(&res, "amount_in").parse().unwrap();
+        assert_eq!(quote.amount_in_consumed.u128(), in_amt);
+    }
+
+    #[test]
+    fn exact_output_excessive_input_reverts() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        let trader = deps.api.addr_make("trader");
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(100), "inj")]);
+
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            trader_info,
+            ExecuteMsg::SwapExactOutput {
+                zero_for_one: true,
+                amount_out: Uint128::new(500),
+                maximum_amount_in: Uint128::new(100), // less than 500 + fee
+                recipient: Some(trader.to_string()),
+                deadline: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::ExcessiveInput { .. }));
+    }
+
+    #[test]
+    fn exact_output_insufficient_liquidity_reverts() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        let trader = deps.api.addr_make("trader");
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(100_000_000), "inj")]);
+
+        // Far more token1 than the [-200, 200] range can deliver.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            trader_info,
+            ExecuteMsg::SwapExactOutput {
+                zero_for_one: true,
+                amount_out: Uint128::new(100_000_000),
+                maximum_amount_in: Uint128::new(100_000_000),
+                recipient: Some(trader.to_string()),
+                deadline: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::InsufficientOutput { .. }));
+    }
+
+    #[test]
+    fn exact_output_reverse_direction() {
+        let (mut deps, _owner) = setup_protocol_pool();
+        let trader = deps.api.addr_make("trader");
+        // Pay usdt (token1), receive inj (token0): zero_for_one = false.
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(10_000), "usdt")]);
+
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            trader_info,
+            ExecuteMsg::SwapExactOutput {
+                zero_for_one: false,
+                amount_out: Uint128::new(500),
+                maximum_amount_in: Uint128::new(10_000),
+                recipient: Some(trader.to_string()),
+                deadline: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(attr(&res, "amount_out").parse::<u128>().unwrap(), 500);
+        let mut paid_inj = false;
+        for m in &res.messages {
+            if let cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount }) = &m.msg {
+                if to_address == &trader.to_string() && amount[0].denom == "inj" {
+                    paid_inj = true;
+                    assert_eq!(amount[0].amount.u128(), 500);
+                }
+            }
+        }
+        assert!(paid_inj, "expected 500 inj payout");
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 4: hook seam (reserved, inert)
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn hook_seam_defaults_to_none() {
+        let (deps, _owner) = setup_protocol_pool();
+        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetConfig {}).unwrap();
+        let config: PoolConfig = from_json(&res).unwrap();
+        assert_eq!(config.hook, None);
+        assert_eq!(config.hook_permissions, 0);
+    }
 }

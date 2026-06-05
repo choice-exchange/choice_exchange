@@ -9,13 +9,16 @@ use crate::core::bitmap::next_initialized_tick_in_chunk;
 use crate::core::oracle::{get_dynamic_fee, update_oracle_and_fee};
 use crate::error::ContractError;
 use crate::state::{
-    PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, TICKS,
+    PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE,
+    PROTOCOL_FEES_0, PROTOCOL_FEES_1, PROTOCOL_FEE_CONFIG, TICKS,
 };
 
 use choice_clmm_common::pool::{QuoteResponse, TickInfo};
 use choice_clmm_common::types::AssetInfo;
 use choice_clmm_math::full_math::mul_div;
-use choice_clmm_math::swap_math::compute_swap_step;
+use choice_clmm_math::swap_math::{
+    compute_swap_step, compute_swap_step_exact_out, SwapStepResult,
+};
 use choice_clmm_math::tick_math::{
     get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, max_sqrt_ratio, MAX_TICK, MIN_SQRT_RATIO,
     MIN_TICK,
@@ -25,14 +28,31 @@ use choice_clmm_math::tick_math::{
 pub struct SwapComputation {
     pub amount_in: Uint128,
     pub amount_out: Uint128,
+    /// Total fee charged to the swapper (LP share + protocol share). The swapper
+    /// pays this regardless of the protocol carve; the split is internal.
     pub fee_amount: Uint128,
     pub sqrt_price_after: Uint256,
     pub tick_after: i32,
     pub liquidity_after: u128,
     pub fee_growth_global_0: Uint256,
     pub fee_growth_global_1: Uint256,
+    /// Protocol's carved share of the fee, by token. Accrued to `PROTOCOL_FEES_*`
+    /// and excluded from `fee_growth_global_*` (so LPs never earn it).
+    pub protocol_fee_0: Uint128,
+    pub protocol_fee_1: Uint128,
     /// Ticks that were crossed and need fee_growth_outside updated.
     pub tick_updates: Vec<(i32, TickInfo)>,
+}
+
+/// Load the protocol-fee carve divisors, defaulting to `(0, 0)` (off) when no
+/// protocol-fee config has been set.
+fn load_protocol_fee_rates(storage: &dyn Storage) -> (u8, u8) {
+    PROTOCOL_FEE_CONFIG
+        .may_load(storage)
+        .ok()
+        .flatten()
+        .map(|c| (c.fee_protocol_0, c.fee_protocol_1))
+        .unwrap_or((0, 0))
 }
 
 /// Core swap loop extracted as a read-only computation.
@@ -51,16 +71,31 @@ pub fn compute_swap(
     amount_specified: Uint128,
     sqrt_price_limit_x96: Uint256,
     fee_pips: u32,
+    fee_protocol_0: u8,
+    fee_protocol_1: u8,
+    // `true`: `amount_specified` is the input budget (exact-input). `false`:
+    // `amount_specified` is the desired output (exact-output); `amount_in` in the
+    // result is then the gross input cost the swapper must supply.
+    exact_input: bool,
 ) -> Result<SwapComputation, ContractError> {
     let mut state_amount_remaining = Uint256::from(amount_specified);
     let mut state_amount_calculated = Uint256::zero();
     let mut state_fee_total = Uint256::zero();
+    let mut state_protocol_fee = Uint256::zero();
     let mut state_sqrt_price = sqrt_price;
     let mut state_tick = tick;
     let mut state_liquidity = liquidity;
     let mut state_fg0 = fee_growth_global_0;
     let mut state_fg1 = fee_growth_global_1;
     let mut tick_updates: Vec<(i32, TickInfo)> = Vec::new();
+
+    // Fee is always charged in the input token, so a swap accrues protocol fee
+    // to exactly one side: token0 when `zero_for_one`, else token1.
+    let fee_protocol = if zero_for_one {
+        fee_protocol_0
+    } else {
+        fee_protocol_1
+    };
 
     while !state_amount_remaining.is_zero() && state_sqrt_price != sqrt_price_limit_x96 {
         let (mut step_tick_next, step_initialized) =
@@ -82,19 +117,54 @@ pub fn compute_swap(
             reached_limit = true;
         }
 
-        let step = compute_swap_step(
-            state_sqrt_price,
-            target_price,
-            state_liquidity,
-            state_amount_remaining,
-            fee_pips,
-            zero_for_one,
-        )?;
+        let step = if exact_input {
+            compute_swap_step(
+                state_sqrt_price,
+                target_price,
+                state_liquidity,
+                state_amount_remaining,
+                fee_pips,
+                zero_for_one,
+            )?
+        } else if state_liquidity == 0 || target_price == state_sqrt_price {
+            // Exact-out: the step helper rejects zero liquidity and a degenerate
+            // `target == current` (which occurs when the next initialized tick
+            // sits exactly at the current price). Advance to the target for free
+            // in both cases, mirroring how `compute_swap_step` handles them for
+            // exact-input; the crossing logic below then advances the tick.
+            SwapStepResult {
+                sqrt_ratio_next_x96: target_price,
+                amount_in: Uint256::zero(),
+                amount_out: Uint256::zero(),
+                fee_amount: Uint256::zero(),
+            }
+        } else {
+            compute_swap_step_exact_out(
+                state_sqrt_price,
+                target_price,
+                state_liquidity,
+                state_amount_remaining,
+                fee_pips,
+                zero_for_one,
+            )?
+        };
 
-        if state_liquidity > 0 && !step.fee_amount.is_zero() {
+        // Carve the protocol's share off the fee BEFORE it accrues to LPs.
+        // `fee_protocol` is a divisor (v3 convention): protocol takes
+        // `fee_amount / n` (floor, in the pool's favor), LPs get the remainder.
+        // The swapper's cost is unchanged — only the split differs.
+        let mut lp_fee = step.fee_amount;
+        if fee_protocol != 0 {
+            let protocol_delta = step.fee_amount / Uint256::from(fee_protocol);
+            lp_fee = lp_fee.checked_sub(protocol_delta).map_err(|_| {
+                StdError::generic_err("protocol fee exceeds step fee (invariant broken)")
+            })?;
+            state_protocol_fee += protocol_delta;
+        }
+
+        if state_liquidity > 0 && !lp_fee.is_zero() {
             let q128 = Uint256::one() << 128u32;
-            let fee_growth_delta =
-                mul_div(step.fee_amount, q128, Uint256::from(state_liquidity))?;
+            let fee_growth_delta = mul_div(lp_fee, q128, Uint256::from(state_liquidity))?;
 
             if zero_for_one {
                 state_fg0 = state_fg0.wrapping_add(fee_growth_delta);
@@ -104,8 +174,16 @@ pub fn compute_swap(
         }
 
         state_fee_total += step.fee_amount;
-        state_amount_remaining -= step.amount_in + step.fee_amount;
-        state_amount_calculated += step.amount_out;
+        if exact_input {
+            // Remaining tracks the input budget; calculated accrues output.
+            state_amount_remaining -= step.amount_in + step.fee_amount;
+            state_amount_calculated += step.amount_out;
+        } else {
+            // Remaining tracks the output budget; calculated accrues the gross
+            // input cost (in + fee), which is what the swapper must pay.
+            state_amount_remaining -= step.amount_out;
+            state_amount_calculated += step.amount_in + step.fee_amount;
+        }
         state_sqrt_price = step.sqrt_ratio_next_x96;
 
         if state_sqrt_price == step_sqrt_price_next && !reached_limit {
@@ -162,13 +240,30 @@ pub fn compute_swap(
     // of `.unwrap()` so the swap cannot panic on any input.
     let consumed_remaining = Uint128::try_from(state_amount_remaining)
         .map_err(|_| StdError::generic_err("swap: remaining amount exceeds u128"))?;
-    let amount_in = amount_specified.checked_sub(consumed_remaining).map_err(|_| {
+    let calculated = Uint128::try_from(state_amount_calculated)
+        .map_err(|_| StdError::generic_err("swap: calculated amount exceeds u128"))?;
+    // The amount actually drawn down from `amount_specified` (input budget for
+    // exact-input, output budget for exact-output).
+    let consumed = amount_specified.checked_sub(consumed_remaining).map_err(|_| {
         StdError::generic_err("swap: remaining exceeds specified amount (invariant broken)")
     })?;
-    let amount_out = Uint128::try_from(state_amount_calculated)
-        .map_err(|_| StdError::generic_err("swap: amount_out exceeds u128"))?;
+    // Exact-input: gross input = consumed budget, output = calculated.
+    // Exact-output: output delivered = consumed budget, gross input = calculated.
+    let (amount_in, amount_out) = if exact_input {
+        (consumed, calculated)
+    } else {
+        (calculated, consumed)
+    };
     let fee_amount = Uint128::try_from(state_fee_total)
         .map_err(|_| StdError::generic_err("swap: fee_amount exceeds u128"))?;
+    let protocol_fee = Uint128::try_from(state_protocol_fee)
+        .map_err(|_| StdError::generic_err("swap: protocol_fee exceeds u128"))?;
+    // Protocol fee accrues to the input-token side only.
+    let (protocol_fee_0, protocol_fee_1) = if zero_for_one {
+        (protocol_fee, Uint128::zero())
+    } else {
+        (Uint128::zero(), protocol_fee)
+    };
 
     Ok(SwapComputation {
         amount_in,
@@ -179,6 +274,8 @@ pub fn compute_swap(
         liquidity_after: state_liquidity,
         fee_growth_global_0: state_fg0,
         fee_growth_global_1: state_fg1,
+        protocol_fee_0,
+        protocol_fee_1,
         tick_updates,
     })
 }
@@ -200,6 +297,16 @@ enum SwapInputSource<'a> {
 ///
 /// Input handling: see `SwapInputSource`. Output is always a single transfer
 /// of `amount_out` to `recipient`.
+///
+/// RESERVED HOOK CALL SITES (see `PoolConfig.hook` — not implemented yet):
+/// - A `HOOK_BEFORE_SWAP` hook would be invoked in each swap entrypoint *before*
+///   `compute_swap` runs (so it could adjust the dynamic fee or short-circuit).
+/// - A `HOOK_AFTER_SWAP` hook would be invoked here, *after* state is persisted
+///   and the in/out transfer messages are built (appended as a submessage so the
+///   hook observes the final `SwapComputation`). Mirror this pattern for
+///   mint/burn (`HOOK_BEFORE_MINT`/`HOOK_AFTER_MINT`/...). Because CosmWasm hooks
+///   are cross-contract calls, any hook that re-enters the pool must respect the
+///   `REENTRANCY_LOCK` (see Phase 2).
 #[allow(clippy::too_many_arguments)]
 fn apply_swap(
     deps: DepsMut,
@@ -228,6 +335,24 @@ fn apply_swap(
     )?;
     FEE_GROWTH_GLOBAL_0.save(deps.storage, &result.fee_growth_global_0)?;
     FEE_GROWTH_GLOBAL_1.save(deps.storage, &result.fee_growth_global_1)?;
+
+    // Accrue carved protocol fees. These stay in the pool's balance (the swapper
+    // already paid them in as part of `amount_in`) but are tracked separately so
+    // they are excluded from LP withdrawals and swept via CollectProtocol.
+    if !result.protocol_fee_0.is_zero() {
+        let cur = PROTOCOL_FEES_0.may_load(deps.storage)?.unwrap_or_default();
+        let next = cur
+            .checked_add(result.protocol_fee_0)
+            .map_err(|e| StdError::generic_err(e.to_string()))?;
+        PROTOCOL_FEES_0.save(deps.storage, &next)?;
+    }
+    if !result.protocol_fee_1.is_zero() {
+        let cur = PROTOCOL_FEES_1.may_load(deps.storage)?.unwrap_or_default();
+        let next = cur
+            .checked_add(result.protocol_fee_1)
+            .map_err(|e| StdError::generic_err(e.to_string()))?;
+        PROTOCOL_FEES_1.save(deps.storage, &next)?;
+    }
 
     let mut messages: Vec<CosmosMsg> = vec![];
 
@@ -311,6 +436,10 @@ fn apply_swap(
         .add_attribute("amount_in", result.amount_in)
         .add_attribute("amount_out", result.amount_out)
         .add_attribute("fee_amount", result.fee_amount)
+        .add_attribute(
+            "protocol_fee",
+            (result.protocol_fee_0 + result.protocol_fee_1).to_string(),
+        )
         .add_attribute("fee_ppm", fee_pips.to_string())
         .add_attribute("zero_for_one", zero_for_one.to_string())
         .add_attribute("final_price", result.sqrt_price_after.to_string())
@@ -355,6 +484,7 @@ pub fn execute_swap(
     // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
     // change, and persists. Returns the rate-limited ppm to use for this swap.
     let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
 
     let result = compute_swap(
         deps.storage,
@@ -368,6 +498,9 @@ pub fn execute_swap(
         amount_specified,
         sqrt_price_limit_x96,
         fee_pips,
+        fee_protocol_0,
+        fee_protocol_1,
+        true,
     )?;
 
     let sender = info.sender.clone();
@@ -432,6 +565,7 @@ pub fn execute_swap_exact_input(
     // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
     // change, and persists. Returns the rate-limited ppm to use for this swap.
     let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
 
     let result = compute_swap(
         deps.storage,
@@ -445,6 +579,9 @@ pub fn execute_swap_exact_input(
         amount_specified,
         sqrt_price_limit_x96,
         fee_pips,
+        fee_protocol_0,
+        fee_protocol_1,
+        true,
     )?;
 
     // Slippage check
@@ -513,6 +650,7 @@ pub fn execute_swap_exact_input_cw20(
     // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
     // change, and persists. Returns the rate-limited ppm to use for this swap.
     let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
 
     let result = compute_swap(
         deps.storage,
@@ -526,6 +664,9 @@ pub fn execute_swap_exact_input_cw20(
         amount,
         sqrt_price_limit_x96,
         fee_pips,
+        fee_protocol_0,
+        fee_protocol_1,
+        true,
     )?;
 
     // Slippage check
@@ -585,6 +726,9 @@ pub fn query_quote(
     // Use current oracle state without updating (read-only)
     let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
 
+    // The protocol carve only redistributes the fee between LPs and the
+    // protocol; it does not change `amount_out`/`amount_in`/`fee_amount`, so the
+    // quote can pass `(0, 0)` rather than reading the config.
     let result = compute_swap(
         deps.storage,
         slot0.sqrt_price,
@@ -597,6 +741,163 @@ pub fn query_quote(
         amount_in,
         sqrt_price_limit_x96,
         fee_pips,
+        0,
+        0,
+        true,
+    )?;
+
+    Ok(QuoteResponse {
+        amount_out: result.amount_out,
+        amount_in_consumed: result.amount_in,
+        fee_amount: result.fee_amount,
+    })
+}
+
+/// User-friendly exact-output swap. Caller specifies the desired output amount
+/// and a maximum input; the pool charges only the input actually needed and
+/// refunds the surplus (native) or pulls exactly the cost (CW20 allowance).
+#[allow(clippy::too_many_arguments)]
+pub fn execute_swap_exact_output(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    zero_for_one: bool,
+    amount_out: Uint128,
+    maximum_amount_in: Uint128,
+    recipient: Option<String>,
+    deadline: Option<u64>,
+) -> Result<Response, ContractError> {
+    if amount_out.is_zero() {
+        return Err(ContractError::ZeroAmount {});
+    }
+    if let Some(deadline) = deadline {
+        if env.block.time.seconds() > deadline {
+            return Err(ContractError::DeadlineExceeded {});
+        }
+    }
+
+    let config = POOL_CONFIG.load(deps.storage)?;
+    let slot0 = POOL_STATE.load(deps.storage)?;
+    let fg0 = FEE_GROWTH_GLOBAL_0.load(deps.storage).unwrap_or_default();
+    let fg1 = FEE_GROWTH_GLOBAL_1.load(deps.storage).unwrap_or_default();
+
+    let sqrt_price_limit_x96 = if zero_for_one {
+        Uint256::from(MIN_SQRT_RATIO) + Uint256::one()
+    } else {
+        max_sqrt_ratio() - Uint256::one()
+    };
+
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
+
+    let result = compute_swap(
+        deps.storage,
+        slot0.sqrt_price,
+        slot0.tick,
+        slot0.liquidity.u128(),
+        fg0,
+        fg1,
+        config.tick_spacing as i32,
+        zero_for_one,
+        amount_out,
+        sqrt_price_limit_x96,
+        fee_pips,
+        fee_protocol_0,
+        fee_protocol_1,
+        false,
+    )?;
+
+    // Exact-out must deliver the full requested output, else liquidity or the
+    // price limit prevented it — revert rather than partially fill.
+    if result.amount_out < amount_out {
+        return Err(ContractError::InsufficientOutput {
+            minimum: amount_out.to_string(),
+            actual: result.amount_out.to_string(),
+        });
+    }
+    // Slippage: the input cost must not exceed the caller's maximum.
+    if result.amount_in > maximum_amount_in {
+        return Err(ContractError::ExcessiveInput {
+            maximum: maximum_amount_in.to_string(),
+            actual: result.amount_in.to_string(),
+        });
+    }
+
+    let recipient = recipient.unwrap_or_else(|| info.sender.to_string());
+    let sender = info.sender.clone();
+    let funds = info.funds.clone();
+
+    let in_token = if zero_for_one {
+        &config.token0
+    } else {
+        &config.token1
+    };
+    // Native: attached funds (apply_swap refunds the surplus over the cost).
+    // CW20: pull exactly the cost via allowance.
+    let input_source = match in_token {
+        AssetInfo::NativeToken { .. } => SwapInputSource::Native(&funds),
+        AssetInfo::Token { .. } => SwapInputSource::Cw20Allowance,
+    };
+
+    apply_swap(
+        deps,
+        &env,
+        &sender,
+        input_source,
+        &config,
+        zero_for_one,
+        &recipient,
+        &result,
+        fee_pips,
+    )
+}
+
+/// Read-only exact-output simulation: cost of buying `amount_out` of `token_out`.
+pub fn query_quote_exact_output(
+    deps: Deps,
+    env: Env,
+    token_out: AssetInfo,
+    amount_out: Uint128,
+) -> Result<QuoteResponse, ContractError> {
+    let config = POOL_CONFIG.load(deps.storage)?;
+    let slot0 = POOL_STATE.load(deps.storage)?;
+    let fg0 = FEE_GROWTH_GLOBAL_0.load(deps.storage).unwrap_or_default();
+    let fg1 = FEE_GROWTH_GLOBAL_1.load(deps.storage).unwrap_or_default();
+
+    // Output token determines direction: receiving token1 means paying token0.
+    let zero_for_one = if token_out == config.token1 {
+        true
+    } else if token_out == config.token0 {
+        false
+    } else {
+        return Err(ContractError::InvalidFunds {
+            reason: format!("token_out '{}' is not a pool token", token_out),
+        });
+    };
+
+    let sqrt_price_limit_x96 = if zero_for_one {
+        Uint256::from(MIN_SQRT_RATIO) + Uint256::one()
+    } else {
+        max_sqrt_ratio() - Uint256::one()
+    };
+
+    let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
+
+    let result = compute_swap(
+        deps.storage,
+        slot0.sqrt_price,
+        slot0.tick,
+        slot0.liquidity.u128(),
+        fg0,
+        fg1,
+        config.tick_spacing as i32,
+        zero_for_one,
+        amount_out,
+        sqrt_price_limit_x96,
+        fee_pips,
+        0,
+        0,
+        false,
     )?;
 
     Ok(QuoteResponse {

@@ -755,6 +755,159 @@ fn sweep_min_lp_out_uses_delta_not_total() {
     assert!(matches!(err, ContractError::MinLpAssertion { .. }));
 }
 
+/// A contract recipient (e.g. the Treasury cw3) must NOT receive `erc20:` dust
+/// via bank-send — that trips the Injective bank→EVM hook and panics the whole
+/// nested zap. The erc20 dust is retained in the zap contract; LP + non-erc20
+/// dust are still forwarded.
+#[test]
+fn sweep_retains_erc20_dust_for_contract_recipient() {
+    use cosmwasm_std::{BankMsg, CosmosMsg, SubMsg};
+
+    let mut deps = mock_deps_simple();
+    do_instantiate(&mut deps);
+    let env = mock_env();
+
+    let recipient = deps.api.addr_make("treasury_contract");
+    let creator = deps.api.addr_make("creator").to_string();
+    let lp_denom = "factory/pair/lp".to_string();
+    let erc20 = "erc20:0xa00C59fF5a080D2b954d0c75e46E22a0c371235a";
+
+    // The recipient resolves as a wasm contract; everything else does not.
+    let recipient_str = recipient.to_string();
+    deps.querier.update_wasm(move |q| match q {
+        cosmwasm_std::WasmQuery::ContractInfo { contract_addr }
+            if contract_addr == &recipient_str =>
+        {
+            cosmwasm_std::SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
+                to_json_binary(&serde_json::json!({
+                    "code_id": 2002,
+                    "creator": creator,
+                    "admin": null,
+                    "pinned": false,
+                    "ibc_port": null,
+                }))
+                .unwrap(),
+            ))
+        }
+        _ => cosmwasm_std::SystemResult::Err(cosmwasm_std::SystemError::NoSuchContract {
+            addr: "unknown".to_string(),
+        }),
+    });
+
+    let pre_a = Uint128::new(900);
+    let pre_b = Uint128::new(40_000);
+    let pre_lp = Uint128::new(7);
+    let bal_a = pre_a + Uint128::new(3);
+    let bal_b = pre_b + Uint128::new(11);
+    let bal_lp = pre_lp + Uint128::new(123);
+
+    deps.querier.bank.update_balance(
+        env.contract.address.clone(),
+        vec![
+            coin(bal_a.u128(), "inj"),
+            coin(bal_b.u128(), erc20),
+            coin(bal_lp.u128(), lp_denom.clone()),
+        ],
+    );
+
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&env.contract.address, &[]),
+        ExecuteMsg::Callback(CallbackMsg::Sweep {
+            recipient: recipient.to_string(),
+            asset_a: native("inj"),
+            asset_b: native(erc20),
+            lp_denom: lp_denom.clone(),
+            pre_a,
+            pre_b,
+            pre_lp,
+            min_lp_out: None,
+        }),
+    )
+    .unwrap();
+
+    // One bank send, carrying LP + inj dust but NOT the erc20 dust.
+    assert_eq!(res.messages.len(), 1);
+    let SubMsg { msg, .. } = res.messages[0].clone();
+    let CosmosMsg::Bank(BankMsg::Send { to_address, amount }) = msg else {
+        panic!("expected BankMsg::Send");
+    };
+    assert_eq!(to_address, recipient.to_string());
+    let by_denom: std::collections::HashMap<_, _> =
+        amount.iter().map(|c| (c.denom.as_str(), c.amount.u128())).collect();
+    assert_eq!(by_denom.get("inj"), Some(&3));
+    assert_eq!(by_denom.get(lp_denom.as_str()), Some(&123));
+    assert_eq!(by_denom.get(erc20), None, "erc20 dust must be retained");
+
+    // The retention is surfaced as an attribute for the keeper/audit.
+    let retained_b = res
+        .attributes
+        .iter()
+        .find(|a| a.key == "dust_retained_b")
+        .map(|a| a.value.clone())
+        .unwrap();
+    assert_eq!(retained_b, "11");
+}
+
+/// An EOA recipient (frontend user) keeps the legacy behavior: all dust,
+/// including `erc20:`, is forwarded so they get their full return.
+#[test]
+fn sweep_forwards_erc20_dust_for_eoa_recipient() {
+    use cosmwasm_std::{BankMsg, CosmosMsg, SubMsg};
+
+    let mut deps = mock_deps_simple();
+    do_instantiate(&mut deps);
+    let env = mock_env();
+
+    // No wasm mock → ContractInfo query errors → recipient treated as an EOA.
+    let recipient = deps.api.addr_make("eoa_user");
+    let lp_denom = "factory/pair/lp".to_string();
+    let erc20 = "erc20:0xa00C59fF5a080D2b954d0c75e46E22a0c371235a";
+
+    let pre_b = Uint128::new(40_000);
+    let bal_b = pre_b + Uint128::new(11);
+
+    deps.querier.bank.update_balance(
+        env.contract.address.clone(),
+        vec![coin(bal_b.u128(), erc20)],
+    );
+
+    let res = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&env.contract.address, &[]),
+        ExecuteMsg::Callback(CallbackMsg::Sweep {
+            recipient: recipient.to_string(),
+            asset_a: native("inj"),
+            asset_b: native(erc20),
+            lp_denom,
+            pre_a: Uint128::zero(),
+            pre_b,
+            pre_lp: Uint128::zero(),
+            min_lp_out: None,
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(res.messages.len(), 1);
+    let SubMsg { msg, .. } = res.messages[0].clone();
+    let CosmosMsg::Bank(BankMsg::Send { to_address, amount }) = msg else {
+        panic!("expected BankMsg::Send");
+    };
+    assert_eq!(to_address, recipient.to_string());
+    let erc20_sent = amount.iter().find(|c| c.denom == erc20).map(|c| c.amount.u128());
+    assert_eq!(erc20_sent, Some(11), "EOA recipient keeps erc20 dust");
+
+    let retained_b = res
+        .attributes
+        .iter()
+        .find(|a| a.key == "dust_retained_b")
+        .map(|a| a.value.clone())
+        .unwrap();
+    assert_eq!(retained_b, "0");
+}
+
 // -------- execute: auth --------
 
 #[test]

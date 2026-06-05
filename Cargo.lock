@@ -484,6 +484,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "choice-mts-issuer"
+version = "1.0.0"
+dependencies = [
+ "choice",
+ "cosmwasm-schema 2.2.2",
+ "cosmwasm-std 2.2.2",
+ "cw-storage-plus 2.0.0",
+ "cw2 2.0.0",
+ "injective-cosmwasm",
+ "injective-test-tube",
+ "prost",
+ "schemars 0.8.22",
+ "serde",
+ "serde-json-wasm 1.0.1",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "choice-pair"
 version = "1.1.2"
 dependencies = [
@@ -504,6 +522,23 @@ dependencies = [
  "serde-json-wasm 1.0.1",
  "serde_json",
  "serde_repr",
+ "thiserror 2.0.12",
+]
+
+[[package]]
+name = "choice-pool-seeder"
+version = "1.0.0"
+dependencies = [
+ "choice",
+ "cosmwasm-schema 2.2.2",
+ "cosmwasm-std 2.2.2",
+ "cw-storage-plus 2.0.0",
+ "cw2 2.0.0",
+ "injective-cosmwasm",
+ "injective-test-tube",
+ "schemars 0.8.22",
+ "serde",
+ "serde-json-wasm 1.0.1",
  "thiserror 2.0.12",
 ]
 

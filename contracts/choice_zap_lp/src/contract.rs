@@ -762,6 +762,17 @@ fn callback_sweep(
         }
     }
 
+    // Bank-sending an `erc20:`-linked denom TO A CONTRACT trips the Injective
+    // bank→EVM hook and panics the whole nested execution (code 9). The royalty
+    // recipient is the Treasury cw3 contract, so its erc20 dust must stay here
+    // instead of being forwarded; an EOA recipient (frontend user) is unchanged
+    // and keeps the full dust return. Retained dust (~1 base unit per zap) can be
+    // `Sweep`-ed to an EOA later. `Err` from the query means a non-contract addr.
+    let recipient_is_contract = deps
+        .querier
+        .query_wasm_contract_info(recipient_addr.as_str())
+        .is_ok();
+
     // LP is always native; native dust bundles into the same `BankMsg::Send`
     // for cheaper gas. CW20 dust goes via `Cw20::Transfer`.
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
@@ -772,8 +783,22 @@ fn callback_sweep(
             amount: lp_out,
         });
     }
-    push_dust(&asset_a, dust_a, &recipient_addr, &mut bank_coins, &mut messages)?;
-    push_dust(&asset_b, dust_b, &recipient_addr, &mut bank_coins, &mut messages)?;
+    let retained_a = push_dust(
+        &asset_a,
+        dust_a,
+        &recipient_addr,
+        recipient_is_contract,
+        &mut bank_coins,
+        &mut messages,
+    )?;
+    let retained_b = push_dust(
+        &asset_b,
+        dust_b,
+        &recipient_addr,
+        recipient_is_contract,
+        &mut bank_coins,
+        &mut messages,
+    )?;
 
     if !bank_coins.is_empty() {
         bank_coins.sort_by(|x, y| x.denom.cmp(&y.denom));
@@ -789,7 +814,9 @@ fn callback_sweep(
         .add_attribute("recipient", recipient_addr)
         .add_attribute("lp_amount", lp_out)
         .add_attribute("dust_a", dust_a)
-        .add_attribute("dust_b", dust_b))
+        .add_attribute("dust_b", dust_b)
+        .add_attribute("dust_retained_a", retained_a)
+        .add_attribute("dust_retained_b", retained_b))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1190,24 +1217,35 @@ fn transfer_asset_msg(
     }
 }
 
+/// Forward `amount` of `asset` to `recipient`, returning the amount RETAINED in
+/// the zap contract (non-zero only when an `erc20:` native denom is withheld
+/// from a contract recipient to dodge the bank→EVM hook panic).
 fn push_dust(
     asset: &AssetInfo,
     amount: Uint128,
     recipient: &Addr,
+    recipient_is_contract: bool,
     bank_coins: &mut Vec<Coin>,
     messages: &mut Vec<CosmosMsg<InjectiveMsgWrapper>>,
-) -> StdResult<()> {
+) -> StdResult<Uint128> {
     if amount.is_zero() {
-        return Ok(());
+        return Ok(Uint128::zero());
     }
     match asset {
-        AssetInfo::NativeToken { denom } => bank_coins.push(Coin {
-            denom: denom.clone(),
-            amount,
-        }),
+        AssetInfo::NativeToken { denom } => {
+            // `erc20:`-linked denom → contract recipient = bank→EVM hook panic.
+            // Retain it here rather than forwarding (and reverting the whole zap).
+            if recipient_is_contract && denom.starts_with("erc20:") {
+                return Ok(amount);
+            }
+            bank_coins.push(Coin {
+                denom: denom.clone(),
+                amount,
+            });
+        }
         AssetInfo::Token { .. } => messages.push(transfer_asset_msg(asset, recipient, amount)?),
     }
-    Ok(())
+    Ok(Uint128::zero())
 }
 
 fn assert_deadline(blocktime: u64, deadline: Option<u64>) -> Result<(), ContractError> {
