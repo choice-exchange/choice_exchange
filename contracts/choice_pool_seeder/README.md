@@ -152,11 +152,21 @@ on-chain between the callbacks is exercised by directly invoking the
 callback with a pre-populated mock factory, since the chain-only message
 ordering can't be observed from unit tests.
 
-Integration tests cover `Role` / `FactoryConfig` query round-trips and
-admin rotation in `injective_test_tube`. The full `CreateSink` → `Settle`
-lifecycle is `#[ignore]`'d until a wired `choice_factory` deployment fits
-inside one integration test file; in the meantime the launchpad-side
-E2E (phase-3 step 11) exercises that round trip with a real deployment.
+Integration tests (`tests/integration.rs`, `injective_test_tube`) cover
+`Role` / `FactoryConfig` query round-trips and admin rotation, plus two full
+on-chain lifecycles against real DEX stacks:
+
+- **XYK** — `CreateSink` → fund → permissionless `Settle` → `choice_factory`
+  creates the pair, liquidity is provided, the LP is burned, and the seed
+  balances are fully drained.
+- **CLMM** — `CreateLocker` + `CreateSink` → fund → `Settle` → the CLMM
+  factory creates the pool at the seed ratio, a full-range position NFT is
+  minted to the locker, the caller tip lands, dust is swept, and
+  `locker.CollectFees` routes swap fees to the beneficiary.
+
+Both need `make build-all` artifacts (the legacy + CLMM stack wasm). The
+launchpad-side E2E (phase-3 step 11) additionally exercises the round trip
+end-to-end with a real keeper.
 
 ## Consumer integration
 

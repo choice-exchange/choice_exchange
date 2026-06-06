@@ -65,6 +65,6 @@ Funds the contract touches: bank balances of two native denoms in the sink; the 
 3. For each finding give: **severity** (Critical/High/Medium/Low/Info), **file:line**, a concrete **exploit or failure scenario**, and a **concrete fix**. Adversarially try to *refute* your own High/Critical findings before reporting them — note residual uncertainty.
 4. End with an explicit **sign-off on the value-handling invariants**: (a) a sink can never send seed funds anywhere except the pool/tip/refund_receiver/issuer per its config; (b) a locker can never move principal, only route fees to its beneficiary; (c) the seeded pool price always equals the seed ratio (or is safely clamped) and a full-range mint can't be made lopsided by an attacker; (d) no role/state path strands value irrecoverably.
 
-Build/test: `cd choice/choice_exchange && cargo test -p choice-pool-seeder --lib`. (Integration tests need `make build-all` artifacts and the CLMM-stack wasm; the live CLMM cross-contract test is currently an `#[ignore]` stub.)
+Build/test: `cd choice/choice_exchange && cargo test -p choice-pool-seeder --lib`. (Integration tests need `make build-all` artifacts and the CLMM-stack wasm; `cargo test --test integration -p choice-pool-seeder` then drives the full XYK and CLMM cross-contract lifecycles against real factory/pair/pool/manager deployments.)
 
 Produce a single ranked findings report. Do not change contract logic except throwaway tests to prove a finding — propose fixes, don't apply them, unless asked.
