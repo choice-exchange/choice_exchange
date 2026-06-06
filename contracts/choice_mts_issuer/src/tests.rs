@@ -17,8 +17,8 @@
 
 use cosmwasm_std::testing::{message_info, mock_env, MockApi, MockStorage};
 use cosmwasm_std::{
-    coin, coins, from_json, BankMsg, Binary, Coin, CosmosMsg, OwnedDeps, Reply, ReplyOn,
-    SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
+    coin, coins, from_json, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, OwnedDeps, Reply,
+    ReplyOn, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
 };
 
 use choice::mock_querier::{mock_dependencies, WasmMockQuerier};
@@ -33,6 +33,9 @@ use crate::proto::{
     TokenPair,
 };
 use crate::state::{LaunchStatus, LAUNCHES};
+use choice_pool_seeder::msg::{
+    ExecuteMsg as SeederExecuteMsg, LpDestination, PoolKind, SinkInit,
+};
 use prost::Message;
 
 const PREFIX: &str = "shroom";
@@ -87,6 +90,7 @@ fn register_with_choice_factory(
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
+    let payload = xyk_sink_payload(deps, internal_id);
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
@@ -96,7 +100,7 @@ fn register_with_choice_factory(
         pair_denom: PAIR_DENOM.to_string(),
         seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
-        create_sink_payload: Binary::from(br#"{"create_sink":{"salt":"","sink_init":{}}}"#.to_vec()),
+        create_sink_payload: payload,
         choice_factory,
         salt_suffix: None,
         clmm_pool_auth: None,
@@ -106,6 +110,67 @@ fn register_with_choice_factory(
 
 fn expected_denom(internal_id: u64) -> String {
     format!("factory/{}/{}_{}", mock_env().contract.address, PREFIX, internal_id)
+}
+
+fn denom_with_salt(internal_id: u64, salt: &str) -> String {
+    format!(
+        "factory/{}/{}_{}_{}",
+        mock_env().contract.address,
+        PREFIX,
+        internal_id,
+        salt
+    )
+}
+
+/// Build a coherent XYK `CreateSink` payload whose `token_denom`/`pair_denom`
+/// match what `RegisterLaunch` will derive for `internal_id`. The issuer now
+/// decodes and cross-checks this payload (anti-squat enforcement).
+fn xyk_sink_payload(deps: &Deps, internal_id: u64) -> Binary {
+    sink_payload(
+        deps,
+        expected_denom(internal_id),
+        PoolKind::Xyk {
+            choice_factory: deps.api.addr_make("choice_factory").to_string(),
+            lp_destination: LpDestination::Burn,
+        },
+    )
+}
+
+/// Build a coherent CLMM `CreateSink` payload.
+fn clmm_sink_payload(
+    deps: &Deps,
+    token_denom: String,
+    clmm_factory: String,
+    fee_tier: u32,
+) -> Binary {
+    sink_payload(
+        deps,
+        token_denom,
+        PoolKind::Clmm {
+            clmm_factory,
+            clmm_manager: deps.api.addr_make("clmm_manager").to_string(),
+            fee_tier,
+            position_recipient: deps.api.addr_make("locker").to_string(),
+        },
+    )
+}
+
+fn sink_payload(deps: &Deps, token_denom: String, pool_kind: PoolKind) -> Binary {
+    to_json_binary(&SeederExecuteMsg::CreateSink {
+        salt: Binary::default(),
+        sink_init: SinkInit {
+            issuer: mock_env().contract.address.to_string(),
+            token_denom,
+            pair_denom: PAIR_DENOM.to_string(),
+            token_decimals: 18,
+            pair_decimals: 18,
+            pool_kind,
+            refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
+            deadline_seconds: REFUND_DEADLINE,
+            tip_bps: 0,
+        },
+    })
+    .unwrap()
 }
 
 #[test]
@@ -826,6 +891,9 @@ fn two_authorities_share_internal_id_without_record_collision() {
     let seeder_factory = deps.api.addr_make("seeder_factory").to_string();
     let seeder_addr = deps.api.addr_make("seeder_addr").to_string();
 
+    // Both authorities share internal_id 0, so the launch denom (which doesn't
+    // embed the authority) is identical — one coherent XYK payload serves both.
+    let payload = xyk_sink_payload(&deps, 0);
     for auth in [&auth_a, &auth_b] {
         let msg = ExecuteMsg::RegisterLaunch {
             internal_id: 0,
@@ -835,7 +903,7 @@ fn two_authorities_share_internal_id_without_record_collision() {
             pair_denom: PAIR_DENOM.to_string(),
             seeder_factory: seeder_factory.clone(),
             seeder_addr: seeder_addr.clone(),
-            create_sink_payload: Binary::from(br#"{"create_sink":{}}"#.to_vec()),
+            create_sink_payload: payload.clone(),
             choice_factory: None,
             salt_suffix: None,
             clmm_pool_auth: None,
@@ -1036,6 +1104,27 @@ fn register_full(
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
+    // Build a payload coherent with the args: token_denom tracks the salt and
+    // pool_kind tracks whether a CLMM reservation is supplied. (Tests that
+    // expect a pre-decode rejection — bad/empty/overlong salt — still reject
+    // before the payload is inspected.)
+    let token_denom = match &salt_suffix {
+        Some(s) => denom_with_salt(internal_id, s),
+        None => expected_denom(internal_id),
+    };
+    let pool_kind = match &clmm_pool_auth {
+        Some(a) => PoolKind::Clmm {
+            clmm_factory: a.clmm_factory.clone(),
+            clmm_manager: deps.api.addr_make("clmm_manager").to_string(),
+            fee_tier: a.fee,
+            position_recipient: deps.api.addr_make("locker").to_string(),
+        },
+        None => PoolKind::Xyk {
+            choice_factory: deps.api.addr_make("choice_factory").to_string(),
+            lp_destination: LpDestination::Burn,
+        },
+    };
+    let payload = sink_payload(deps, token_denom, pool_kind);
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
@@ -1044,7 +1133,7 @@ fn register_full(
         pair_denom: PAIR_DENOM.to_string(),
         seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
-        create_sink_payload: Binary::from(br#"{"create_sink":{"salt":"","sink_init":{}}}"#.to_vec()),
+        create_sink_payload: payload,
         choice_factory: None,
         salt_suffix,
         clmm_pool_auth,
@@ -1169,4 +1258,122 @@ fn register_launch_without_clmm_pool_auth_keeps_legacy_chain() {
     let mut deps = setup();
     let res = register_full(&mut deps, 42, None, None).unwrap();
     assert_eq!(res.messages.len(), 5, "no auth message when clmm_pool_auth is None");
+}
+
+// --------------------------------------------------------------------------
+// Anti-squat enforcement: the issuer decodes create_sink_payload and refuses
+// any launch whose reservation / denom is incoherent with what the sink seeds.
+// --------------------------------------------------------------------------
+
+/// Register with an explicit payload + auth, bypassing the coherent helpers so
+/// we can exercise the rejection paths.
+fn register_raw(
+    deps: &mut Deps,
+    internal_id: u64,
+    create_sink_payload: Binary,
+    clmm_pool_auth: Option<crate::msg::ClmmPoolAuth>,
+) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
+    let caller = deps.api.addr_make("keeper");
+    let info = message_info(&caller, &fee_funds());
+    let msg = ExecuteMsg::RegisterLaunch {
+        internal_id,
+        evm_authority: deps.api.addr_make("evm_authority").to_string(),
+        total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
+        evm_supply: Uint128::new(800_000_000u128) * Uint128::new(10u128.pow(18)),
+        pair_denom: PAIR_DENOM.to_string(),
+        seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
+        seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
+        create_sink_payload,
+        choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth,
+    };
+    execute(deps.as_mut(), mock_env(), info, msg)
+}
+
+#[test]
+fn register_launch_rejects_clmm_payload_without_auth() {
+    let mut deps = setup();
+    let clmm_factory = deps.api.addr_make("clmm_factory").to_string();
+    let payload = clmm_sink_payload(&deps, expected_denom(1), clmm_factory, 3000);
+    // CLMM sink but no reservation → squattable slot, must be refused.
+    let err = register_raw(&mut deps, 1, payload, None).unwrap_err();
+    assert!(matches!(err, ContractError::ClmmAuthRequired {}), "{err:?}");
+}
+
+#[test]
+fn register_launch_rejects_clmm_auth_fee_mismatch() {
+    let mut deps = setup();
+    let clmm_factory = deps.api.addr_make("clmm_factory").to_string();
+    // Sink seeds the 3000 tier but the reservation guards the 500 tier.
+    let payload = clmm_sink_payload(&deps, expected_denom(1), clmm_factory.clone(), 3000);
+    let auth = crate::msg::ClmmPoolAuth {
+        clmm_factory,
+        fee: 500,
+        ttl_seconds: 0,
+    };
+    let err = register_raw(&mut deps, 1, payload, Some(auth)).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ContractError::ClmmAuthFeeMismatch {
+                auth_fee: 500,
+                sink_fee: 3000
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn register_launch_rejects_clmm_auth_factory_mismatch() {
+    let mut deps = setup();
+    let sink_factory = deps.api.addr_make("clmm_factory_a").to_string();
+    let payload = clmm_sink_payload(&deps, expected_denom(1), sink_factory, 3000);
+    let auth = crate::msg::ClmmPoolAuth {
+        clmm_factory: deps.api.addr_make("clmm_factory_b").to_string(),
+        fee: 3000,
+        ttl_seconds: 0,
+    };
+    let err = register_raw(&mut deps, 1, payload, Some(auth)).unwrap_err();
+    assert!(
+        matches!(err, ContractError::ClmmAuthFactoryMismatch { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn register_launch_rejects_xyk_payload_with_stray_auth() {
+    let mut deps = setup();
+    let payload = xyk_sink_payload(&deps, 1);
+    let auth = crate::msg::ClmmPoolAuth {
+        clmm_factory: deps.api.addr_make("clmm_factory").to_string(),
+        fee: 3000,
+        ttl_seconds: 0,
+    };
+    let err = register_raw(&mut deps, 1, payload, Some(auth)).unwrap_err();
+    assert!(matches!(err, ContractError::ClmmAuthUnexpected {}), "{err:?}");
+}
+
+#[test]
+fn register_launch_rejects_sink_token_denom_substitution() {
+    let mut deps = setup();
+    // Sink claims to seed a DIFFERENT denom than the one this launch creates.
+    let payload = xyk_sink_payload(&deps, 999);
+    let err = register_raw(&mut deps, 1, payload, None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ContractError::SinkPayloadMismatch { ref field, .. } if field == "token_denom"
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn register_launch_rejects_undecodable_sink_payload() {
+    let mut deps = setup();
+    let payload = Binary::from(br#"{"not_create_sink":{}}"#.to_vec());
+    let err = register_raw(&mut deps, 1, payload, None).unwrap_err();
+    assert!(matches!(err, ContractError::SinkPayloadDecode(_)), "{err:?}");
 }

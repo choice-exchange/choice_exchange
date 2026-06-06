@@ -10,6 +10,7 @@ use crate::state::{Config, LaunchRecord, LaunchStatus, CONFIG, LAUNCHES};
 
 use choice_clmm_common::factory::ExecuteMsg as ClmmFactoryExecuteMsg;
 use choice_clmm_common::types::AssetInfo as ClmmAssetInfo;
+use choice_pool_seeder::msg::{ExecuteMsg as SeederExecuteMsg, PoolKind};
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -296,6 +297,69 @@ fn execute_register_launch(
         });
     }
     let denom = format!("factory/{}/{}", env.contract.address, subdenom);
+
+    // Decode the opaque seeder payload so the issuer can guarantee, on-chain:
+    //   (a) the sink seeds EXACTLY the launch denom + pair we create/reserve
+    //       here (a misbehaving keeper can't point the sink at a different
+    //       denom/pair than the one this record and any reservation cover),
+    //   (b) a CLMM launch ALWAYS reserves its pool slot — `clmm_pool_auth` is
+    //       mandatory and its `fee`/`clmm_factory` must match the sink's, else
+    //       the slot is squattable between RegisterLaunch and Settle, and
+    //   (c) an XYK launch carries no stray CLMM reservation.
+    // Importing the real seeder `msg` types makes a future field rename a
+    // compile error here rather than a silent enforcement bypass.
+    let sink_init = match cosmwasm_std::from_json::<SeederExecuteMsg>(&create_sink_payload)
+        .map_err(|e| ContractError::SinkPayloadDecode(e.to_string()))?
+    {
+        SeederExecuteMsg::CreateSink { sink_init, .. } => sink_init,
+        _ => {
+            return Err(ContractError::SinkPayloadDecode(
+                "expected a CreateSink message".to_string(),
+            ))
+        }
+    };
+    if sink_init.token_denom != denom {
+        return Err(ContractError::SinkPayloadMismatch {
+            field: "token_denom".to_string(),
+            got: sink_init.token_denom,
+            expected: denom.clone(),
+        });
+    }
+    if sink_init.pair_denom != pair_denom {
+        return Err(ContractError::SinkPayloadMismatch {
+            field: "pair_denom".to_string(),
+            got: sink_init.pair_denom,
+            expected: pair_denom.clone(),
+        });
+    }
+    match &sink_init.pool_kind {
+        PoolKind::Clmm {
+            clmm_factory: sink_clmm_factory,
+            fee_tier,
+            ..
+        } => {
+            let auth = clmm_pool_auth
+                .as_ref()
+                .ok_or(ContractError::ClmmAuthRequired {})?;
+            if auth.fee != *fee_tier {
+                return Err(ContractError::ClmmAuthFeeMismatch {
+                    auth_fee: auth.fee,
+                    sink_fee: *fee_tier,
+                });
+            }
+            if &auth.clmm_factory != sink_clmm_factory {
+                return Err(ContractError::ClmmAuthFactoryMismatch {
+                    auth_factory: auth.clmm_factory.clone(),
+                    sink_factory: sink_clmm_factory.clone(),
+                });
+            }
+        }
+        PoolKind::Xyk { .. } => {
+            if clmm_pool_auth.is_some() {
+                return Err(ContractError::ClmmAuthUnexpected {});
+            }
+        }
+    }
 
     // Persist the record up front. `erc20_address` lands in the reply
     // handler; the rest of the record is final at this point and the tx
@@ -909,6 +973,12 @@ pub fn migrate(
     msg: MigrateMsg,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let current = cw2::get_contract_version(deps.storage)?;
+    if current.contract != CONTRACT_NAME {
+        return Err(ContractError::MigrationWrongContract {
+            found: current.contract,
+            expected: CONTRACT_NAME.to_string(),
+        });
+    }
     match msg {
         MigrateMsg::FromV1 {} => {
             if !current.version.starts_with("1.") {

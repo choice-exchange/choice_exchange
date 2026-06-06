@@ -125,4 +125,7 @@ pub enum ContractError {
         "Invalid migration: cannot apply variant `{requested}` from current version `{from}`"
     )]
     InvalidMigration { from: String, requested: String },
+
+    #[error("Cannot migrate: stored contract is `{found}`, expected `{expected}`")]
+    MigrationWrongContract { found: String, expected: String },
 }

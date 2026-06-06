@@ -490,6 +490,7 @@ version = "1.0.0"
 dependencies = [
  "choice",
  "choice-clmm-common",
+ "choice-pool-seeder",
  "cosmwasm-schema 2.2.2",
  "cosmwasm-std 2.2.2",
  "cw-storage-plus 2.0.0",

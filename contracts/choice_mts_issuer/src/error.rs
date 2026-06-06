@@ -120,4 +120,32 @@ pub enum ContractError {
 
     #[error("MsgCreateTokenPair reply could not be decoded: {0}")]
     CreateTokenPairReplyDecode(String),
+
+    #[error("Cannot migrate: stored contract is `{found}`, expected `{expected}`")]
+    MigrationWrongContract { found: String, expected: String },
+
+    #[error("create_sink_payload is not a `CreateSink` message: {0}")]
+    SinkPayloadDecode(String),
+
+    #[error("create_sink_payload {field} `{got}` does not match RegisterLaunch `{expected}`")]
+    SinkPayloadMismatch {
+        field: String,
+        got: String,
+        expected: String,
+    },
+
+    #[error("CLMM launch requires `clmm_pool_auth` to reserve the pool slot (anti-squat)")]
+    ClmmAuthRequired {},
+
+    #[error("clmm_pool_auth.fee {auth_fee} does not match the sink's CLMM fee_tier {sink_fee}")]
+    ClmmAuthFeeMismatch { auth_fee: u32, sink_fee: u32 },
+
+    #[error("clmm_pool_auth.clmm_factory `{auth_factory}` does not match the sink's clmm_factory `{sink_factory}`")]
+    ClmmAuthFactoryMismatch {
+        auth_factory: String,
+        sink_factory: String,
+    },
+
+    #[error("clmm_pool_auth was supplied for a non-CLMM (XYK) launch")]
+    ClmmAuthUnexpected {},
 }

@@ -248,8 +248,8 @@ fn execute_create_pool(
     }
 
     let (token0, token1) = sort_tokens(token_a, token_b);
-    let key0 = token0.key().to_string();
-    let key1 = token1.key().to_string();
+    let key0 = token0.registry_key();
+    let key1 = token1.registry_key();
 
     // 2. Anti-squat gate. If this slot is reserved (and unexpired), only the
     //    authorized creator may proceed; otherwise creation is fully
@@ -427,8 +427,8 @@ fn execute_authorize_creation(
     let config = CONFIG.load(deps.storage)?;
     ensure_can_authorize(deps.api, &config, &info.sender, &token0, &token1)?;
 
-    let key0 = token0.key().to_string();
-    let key1 = token1.key().to_string();
+    let key0 = token0.registry_key();
+    let key1 = token1.registry_key();
 
     // `ttl_seconds == 0` ⇒ no expiry (the graduation default: the launch denom
     // is unique, so an indefinite reservation harms nobody and can never lapse
@@ -471,8 +471,8 @@ fn execute_cancel_creation_auth(
     let config = CONFIG.load(deps.storage)?;
     ensure_can_authorize(deps.api, &config, &info.sender, &token0, &token1)?;
 
-    let key0 = token0.key().to_string();
-    let key1 = token1.key().to_string();
+    let key0 = token0.registry_key();
+    let key1 = token1.registry_key();
     if !POOL_CREATION_AUTH.has(deps.storage, (&key0, &key1, fee)) {
         return Err(StdError::generic_err("No reservation for this slot"));
     }
@@ -542,8 +542,8 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 (token_b, token_a)
             };
 
-            let key0 = token0.key().to_string();
-            let key1 = token1.key().to_string();
+            let key0 = token0.registry_key();
+            let key1 = token1.registry_key();
             let pool_address = POOLS.load(deps.storage, (&key0, &key1, fee))?;
 
             to_json_binary(&pool_address)
@@ -596,8 +596,8 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
             fee,
         } => {
             let (token0, token1) = sort_tokens(token_a, token_b);
-            let key0 = token0.key().to_string();
-            let key1 = token1.key().to_string();
+            let key0 = token0.registry_key();
+            let key1 = token1.registry_key();
             let auth = POOL_CREATION_AUTH
                 .may_load(deps.storage, (&key0, &key1, fee))?
                 .map(|a| CreationAuthResponse {

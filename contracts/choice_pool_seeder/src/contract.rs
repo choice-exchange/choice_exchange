@@ -1187,6 +1187,12 @@ pub fn migrate(
     msg: MigrateMsg,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let current = cw2::get_contract_version(deps.storage)?;
+    if current.contract != CONTRACT_NAME {
+        return Err(ContractError::MigrationWrongContract {
+            found: current.contract,
+            expected: CONTRACT_NAME.to_string(),
+        });
+    }
     match msg {
         MigrateMsg::FromV1 {} => {
             if !current.version.starts_with("1.") {

@@ -17,10 +17,29 @@ impl AssetInfo {
     }
 
     /// Returns the canonical string key (denom or contract address).
+    ///
+    /// This is the *value* of the asset (the bank denom or the CW20 address)
+    /// and is what callers use when building bank/cw20 messages. It deliberately
+    /// drops the variant tag, so it MUST NOT be used to build storage keys or
+    /// deterministic salts — use [`AssetInfo::registry_key`] for that.
     pub fn key(&self) -> &str {
         match self {
             AssetInfo::NativeToken { denom } => denom,
             AssetInfo::Token { contract_addr } => contract_addr,
+        }
+    }
+
+    /// Variant-qualified key for use in storage maps and Instantiate2 salts.
+    ///
+    /// Unlike [`AssetInfo::key`], this prefixes the variant (`n:` for native,
+    /// `c:` for CW20) so a native bank denom whose string happens to equal a
+    /// CW20 contract address cannot collide on the same storage key / pool
+    /// address. (`Ord` already distinguishes the variants, so two semantically
+    /// different pairs must never share a registry key.)
+    pub fn registry_key(&self) -> String {
+        match self {
+            AssetInfo::NativeToken { denom } => format!("n:{denom}"),
+            AssetInfo::Token { contract_addr } => format!("c:{contract_addr}"),
         }
     }
 
@@ -110,5 +129,26 @@ impl Ord for AssetInfo {
                 a.cmp(b)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A native bank denom whose string equals a CW20 contract address must NOT
+    /// share a registry key (storage / salt collision → pool squat/DoS).
+    #[test]
+    fn registry_key_distinguishes_variants_with_same_string() {
+        let s = "inj1samestring";
+        let native = AssetInfo::NativeToken { denom: s.to_string() };
+        let cw20 = AssetInfo::Token { contract_addr: s.to_string() };
+
+        // `key()` (the raw value, for building messages) is identical...
+        assert_eq!(native.key(), cw20.key());
+        // ...but the registry key (for storage/salt) is not.
+        assert_ne!(native.registry_key(), cw20.registry_key());
+        assert_eq!(native.registry_key(), "n:inj1samestring");
+        assert_eq!(cw20.registry_key(), "c:inj1samestring");
     }
 }

@@ -154,9 +154,12 @@ mod tests {
                 assert_eq!(pool_msg.fee_config.base_fee_ppm, 500);
                 assert_eq!(pool_msg.tick_spacing, 10);
 
+                // Salt is derived from the variant-qualified registry keys
+                // (`n:` native / `c:` cw20) so a native denom can't collide
+                // with a CW20 address of the same string.
                 let mut hasher = Sha256::new();
-                hasher.update("ATOM".as_bytes());
-                hasher.update("OSMO".as_bytes());
+                hasher.update("n:ATOM".as_bytes());
+                hasher.update("n:OSMO".as_bytes());
                 hasher.update(500u32.to_le_bytes());
                 let expected_salt = hasher.finalize().to_vec();
                 assert_eq!(salt.as_slice(), expected_salt.as_slice());
@@ -214,11 +217,12 @@ mod tests {
     fn test_create_pool_duplicate() {
         let mut deps = setup_factory();
 
-        // Manually save a pool in the registry
+        // Manually save a pool in the registry, under the variant-qualified
+        // keys the contract uses (`n:` native prefix).
         POOLS
             .save(
                 &mut deps.storage,
-                ("ATOM", "OSMO", 500),
+                ("n:ATOM", "n:OSMO", 500),
                 &Addr::unchecked("existing_pool"),
             )
             .unwrap();
@@ -366,7 +370,7 @@ mod tests {
         let chosen = deps.api.addr_make("chosen");
         authorize(&mut deps, &owner, native("uusdc"), native("inj"), 500, &chosen, 0).unwrap();
         assert!(POOL_CREATION_AUTH
-            .may_load(&deps.storage, ("inj", "uusdc", 500))
+            .may_load(&deps.storage, ("n:inj", "n:uusdc", 500))
             .unwrap()
             .is_some());
     }

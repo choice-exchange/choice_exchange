@@ -46,5 +46,14 @@ choice                = { path = "../../packages/choice", default-features = fal
 # gate). Same reuse-the-shared-schema rationale as the `choice` dep above.
 choice-clmm-common    = { workspace = true }
 
+# Used to decode the opaque `create_sink_payload` at RegisterLaunch so the
+# issuer can enforce that a CLMM launch carries a coherent `clmm_pool_auth`
+# reservation (anti-squat) and that the sink seeds exactly the denom the issuer
+# reserves. The `library` feature drops the seeder's `entry_point`s so its
+# exported wasm symbols don't clash with the issuer's own. Importing the real
+# `msg` types (rather than a hand-mirrored copy) makes any future ABI drift a
+# compile error instead of a silent enforcement bypass.
+choice-pool-seeder    = { path = "../choice_pool_seeder", default-features = false, features = ["library"] }
+
 [dev-dependencies]
 injective-test-tube  = { version = "1.16.3-1" }
