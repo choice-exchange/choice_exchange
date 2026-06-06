@@ -288,9 +288,32 @@ enum SwapInputSource<'a> {
     /// CW20 tokens already transferred to the pool via `Cw20ExecuteMsg::Send`
     /// (Receive hook). `total_sent` is the full amount that arrived; if the
     /// swap consumes less (partial fill), the delta is refunded via `Transfer`.
-    Cw20AlreadySent { total_sent: Uint128 },
+    /// `attached_native` is any native coin attached to the `Receive` envelope
+    /// (normally empty); it is refunded in full to `sender` (the original user
+    /// carried in the hook).
+    Cw20AlreadySent {
+        total_sent: Uint128,
+        attached_native: &'a [Coin],
+    },
     /// CW20 via allowance — pool pulls exactly `amount_in` via `TransferFrom`.
-    Cw20Allowance,
+    /// `attached_native` is any native coin the caller wrongly attached to the
+    /// (payable-classified) swap message; the in-token is a CW20 so none of it
+    /// is consumed and it is refunded in full to `sender`.
+    Cw20Allowance { attached_native: &'a [Coin] },
+}
+
+/// Append a `BankMsg::Send` refunding every (non-zero) attached native coin
+/// back to `recipient`. No-op when nothing was attached. Used by the CW20-input
+/// branches: a CW20 swap consumes no native coins, so any attached funds must be
+/// returned rather than silently absorbed into reserves (C-L1).
+fn push_native_refund(messages: &mut Vec<CosmosMsg>, recipient: &Addr, funds: &[Coin]) {
+    let refunds: Vec<Coin> = funds.iter().filter(|c| !c.amount.is_zero()).cloned().collect();
+    if !refunds.is_empty() {
+        messages.push(CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+            to_address: recipient.to_string(),
+            amount: refunds,
+        }));
+    }
 }
 
 /// Apply a swap computation's side effects to storage and build transfer messages.
@@ -418,7 +441,10 @@ fn apply_swap(
                 }));
             }
         }
-        SwapInputSource::Cw20AlreadySent { total_sent } => {
+        SwapInputSource::Cw20AlreadySent {
+            total_sent,
+            attached_native,
+        } => {
             // V3 parity: if the swap did not consume all attached input
             // (partial fill due to liquidity exhaustion or price limit),
             // return the unused CW20 amount to the original sender. Without
@@ -435,8 +461,11 @@ fn apply_swap(
             if !refund.is_zero() {
                 messages.push(in_token.transfer_msg(sender.as_ref(), refund)?);
             }
+            // The swap consumes only the CW20 input; refund any native coins
+            // attached to the `Receive` envelope back to the original user.
+            push_native_refund(&mut messages, sender, attached_native);
         }
-        SwapInputSource::Cw20Allowance => {
+        SwapInputSource::Cw20Allowance { attached_native } => {
             if let Some(msg) = in_token.transfer_from_msg(
                 sender.as_ref(),
                 env.contract.address.as_ref(),
@@ -444,6 +473,11 @@ fn apply_swap(
             )? {
                 messages.push(msg);
             }
+            // The in-token is a CW20 (pulled via TransferFrom); the swap never
+            // consumes native coins, so refund the FULL `info.funds` the caller
+            // wrongly attached to this payable-classified swap message. Without
+            // this, those coins are silently absorbed into reserves (C-L1).
+            push_native_refund(&mut messages, sender, attached_native);
         }
     }
 
@@ -536,7 +570,9 @@ pub fn execute_swap(
     };
     let input_source = match in_token {
         AssetInfo::NativeToken { .. } => SwapInputSource::Native(&funds),
-        AssetInfo::Token { .. } => SwapInputSource::Cw20Allowance,
+        AssetInfo::Token { .. } => SwapInputSource::Cw20Allowance {
+            attached_native: &funds,
+        },
     };
     apply_swap(
         deps,
@@ -644,6 +680,9 @@ pub fn execute_swap_exact_input_cw20(
     minimum_amount_out: Uint128,
     recipient: Option<String>,
     deadline: Option<u64>,
+    // Native coins attached to the `Receive` envelope (normally empty); refunded
+    // in full to the original user (`sender`) since the CW20 swap consumes none.
+    attached_native: Vec<Coin>,
 ) -> Result<Response, ContractError> {
     if amount.is_zero() {
         return Err(ContractError::ZeroAmount {});
@@ -708,7 +747,10 @@ pub fn execute_swap_exact_input_cw20(
         deps,
         &env,
         &sender,
-        SwapInputSource::Cw20AlreadySent { total_sent: amount },
+        SwapInputSource::Cw20AlreadySent {
+            total_sent: amount,
+            attached_native: &attached_native,
+        },
         &config,
         zero_for_one,
         &recipient,
@@ -855,10 +897,13 @@ pub fn execute_swap_exact_output(
         &config.token1
     };
     // Native: attached funds (apply_swap refunds the surplus over the cost).
-    // CW20: pull exactly the cost via allowance.
+    // CW20: pull exactly the cost via allowance, refunding any wrongly-attached
+    // native coins (C-L1).
     let input_source = match in_token {
         AssetInfo::NativeToken { .. } => SwapInputSource::Native(&funds),
-        AssetInfo::Token { .. } => SwapInputSource::Cw20Allowance,
+        AssetInfo::Token { .. } => SwapInputSource::Cw20Allowance {
+            attached_native: &funds,
+        },
     };
 
     apply_swap(

@@ -1389,6 +1389,37 @@ fn clmm_settle_rejects_preexisting_pool() {
 }
 
 #[test]
+fn settle_clmm_extreme_ratio_errors_instead_of_mispricing() {
+    // An extreme seed ratio (a single raw pair unit against ~Uint128::MAX of
+    // the token) yields a sqrt price below MIN_SQRT_RATIO. Previously this was
+    // silently clamped to the boundary, creating a mispriced pool whose
+    // `amount*_min = 0` mint would draw one side only and refund the rest. It
+    // must now error so the keeper can triage instead.
+    let extreme_balances = vec![
+        coin(u128::MAX, TOKEN_DENOM),
+        coin(1u128, PAIR_DENOM),
+    ];
+    // No pre-existing pool, so the price guard is the thing that fires.
+    let mut deps = clmm_settle_deps(extreme_balances, default_tiers(), None);
+    instantiate_clmm_sink(&mut deps);
+
+    let caller = deps.api.addr_make("cranker");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap_err();
+    // On real chain the in-tx revert rolls back the status flip; here we just
+    // assert the loud error so a mispriced pool is never created.
+    assert!(
+        matches!(err, ContractError::SeedRatioOutOfRange { .. }),
+        "expected SeedRatioOutOfRange, got {err:?}"
+    );
+}
+
+#[test]
 fn clmm_settle_rejects_unsupported_fee_tier() {
     // Sink wants fee tier 3000 but the factory only enables 500.
     let mut deps = clmm_settle_deps(

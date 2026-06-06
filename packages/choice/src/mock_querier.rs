@@ -1,6 +1,6 @@
 use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, Coin, ContractResult, Empty, OwnedDeps, Querier,
+    from_json, to_json_binary, Addr, Binary, Coin, ContractResult, Empty, OwnedDeps, Querier,
     QuerierResult, QueryRequest, SystemError, SystemResult, Uint128, WasmQuery,
 };
 use injective_cosmwasm::tokenfactory::response::TokenFactoryCreateDenomFeeResponse;
@@ -45,6 +45,10 @@ pub struct WasmMockQuerier {
     token_factory_denom_total_supply_handler: Option<Box<dyn HandlesDenomSupplyQuery>>,
     token_factory_denom_creation_fee_handler: Option<Box<dyn HandlesFeeQuery>>,
     inj: InjWasmMockQuerier,
+    /// Addresses that should answer `WasmQuery::ContractInfo` as if they host
+    /// contract code. Empty by default → such a query errors `NoSuchContract`,
+    /// matching the real chain for an EOA/ghost address.
+    wasm_contracts: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -272,6 +276,22 @@ impl WasmMockQuerier {
                     },
                 },
             },
+            QueryRequest::Wasm(WasmQuery::ContractInfo { contract_addr }) => {
+                if self.wasm_contracts.contains(contract_addr) {
+                    let resp = cosmwasm_std::ContractInfoResponse::new(
+                        1,
+                        Addr::unchecked(contract_addr.clone()),
+                        None,
+                        false,
+                        None,
+                    );
+                    SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                } else {
+                    SystemResult::Err(SystemError::NoSuchContract {
+                        addr: contract_addr.clone(),
+                    })
+                }
+            }
             QueryRequest::Custom(custom) => {
                 match custom {
                     // Match on our token factory total supply query variant
@@ -419,7 +439,14 @@ impl WasmMockQuerier {
             token_factory_denom_total_supply_handler: None,
             token_factory_denom_creation_fee_handler: None,
             inj: InjWasmMockQuerier::default(),
+            wasm_contracts: std::collections::HashSet::new(),
         }
+    }
+
+    /// Mark `addr` as hosting contract code so `WasmQuery::ContractInfo`
+    /// against it succeeds (others still error `NoSuchContract`).
+    pub fn register_wasm_contract(&mut self, addr: &str) {
+        self.wasm_contracts.insert(addr.to_string());
     }
 
     // configure the mint whitelist mock querier

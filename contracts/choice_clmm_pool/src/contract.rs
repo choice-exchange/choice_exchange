@@ -2,7 +2,7 @@
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
     from_json, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply, Response,
-    StdError, StdResult, Uint128,
+    StdError, StdResult, Uint128, Uint256,
 };
 use cw_storage_plus::Bound;
 use cw2::set_contract_version;
@@ -32,7 +32,9 @@ use choice_clmm_common::pool::{
     ProtocolFeesResponse, QueryMsg,
 };
 use choice_clmm_common::types::AssetInfo;
-use choice_clmm_math::tick_math::{get_tick_at_sqrt_ratio, MAX_TICK, MIN_TICK};
+use choice_clmm_math::tick_math::{
+    get_tick_at_sqrt_ratio, max_sqrt_ratio, MAX_TICK, MIN_SQRT_RATIO, MIN_TICK,
+};
 
 // Version info for migration info
 const CONTRACT_NAME: &str = "crates.io:choice-clmm-pool";
@@ -103,14 +105,30 @@ pub fn instantiate(
     // Any positive value is valid; the clamp math uses `saturating_mul`/`min`
     // so there is no upper bound to check.
 
-    // Instantiate-time sanity check on initial price: it must be within the
-    // valid sqrt_price range or the oracle's first swap will panic on a
-    // divide-by-zero or similar. `get_tick_at_sqrt_ratio` already enforces
-    // this below (returns an error out of range), but we repeat the check
-    // explicitly so the error message names the field.
+    // C-L7 (pool-side, defense-in-depth): the factory forwards a caller-supplied
+    // `init_sqrt_price` unvalidated, so the pool must reject a zero or
+    // out-of-range opening price on instantiate rather than trust it.
+    //
+    // `get_tick_at_sqrt_ratio` below already rejects anything outside
+    // `[MIN_SQRT_RATIO, max_sqrt_ratio())` (returns an error), so out-of-range is
+    // already caught. We add an explicit guard here anyway so the error names the
+    // offending field and the bounds, instead of the opaque "Invalid initial
+    // price" remap, and so the non-zero / range contract is enforced at the
+    // contract boundary independent of the math helper's internals.
     if msg.initial_sqrt_price.is_zero() {
         return Err(ContractError::InvalidConfig {
             reason: "initial_sqrt_price must be > 0".to_string(),
+        });
+    }
+    if msg.initial_sqrt_price < Uint256::from(MIN_SQRT_RATIO)
+        || msg.initial_sqrt_price >= max_sqrt_ratio()
+    {
+        return Err(ContractError::InvalidConfig {
+            reason: format!(
+                "initial_sqrt_price must be within [{}, {}) (Q64.96 tick bounds)",
+                MIN_SQRT_RATIO,
+                max_sqrt_ratio()
+            ),
         });
     }
 
@@ -359,6 +377,10 @@ fn receive_cw20(
             minimum_amount_out,
             recipient,
             deadline,
+            // `Receive` is classified non-payable (rejected by `ensure_nonpayable`
+            // before reaching here), so this is normally empty; forwarded so that
+            // if it ever carries native coins they are refunded to the user (C-L1).
+            info.funds,
         ),
     }
 }

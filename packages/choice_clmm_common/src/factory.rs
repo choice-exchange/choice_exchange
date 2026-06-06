@@ -17,11 +17,30 @@ pub enum ExecuteMsg {
         fee: u32,
         init_sqrt_price: Uint256,
     },
-    /// Updates the owner of the factory
-    UpdateConfig {
-        owner: Option<String>,
-        pool_code_id: Option<u64>,
-    },
+    /// Updates mutable factory config. NOTE: `owner` and `pool_code_id` are
+    /// deliberately NOT settable here — they are the system's root of trust and
+    /// each moves only through an explicit two-step propose/accept handshake
+    /// (`ProposeOwner`/`AcceptOwner`, `ProposePoolCodeId`/`AcceptPoolCodeId`).
+    /// This struct is kept for forward compatibility / future mutable fields.
+    UpdateConfig {},
+    /// Step 1 of the two-step owner handover (owner-only). Records
+    /// `new_owner` as `pending_owner`; the current owner keeps all powers until
+    /// the proposed owner calls `AcceptOwner`. A typo'd-but-valid address is
+    /// therefore recoverable (just re-propose) instead of bricking the factory
+    /// and every pool's protocol-fee controls. See audit C-L2.
+    ProposeOwner { new_owner: String },
+    /// Step 2 of the two-step owner handover. Callable ONLY by the address set
+    /// as `pending_owner`; promotes it to `owner` and clears `pending_owner`.
+    AcceptOwner {},
+    /// Step 1 of the two-step `pool_code_id` repoint (owner-only). Records
+    /// `code_id` as `pending_pool_code_id`. `pool_code_id` is the manager's
+    /// trust anchor (every future `CreatePool` instantiates this code and the
+    /// manager trusts its reply attributes), so changing it is gated behind an
+    /// explicit accept. See audit C-L3.
+    ProposePoolCodeId { code_id: u64 },
+    /// Step 2 of the two-step `pool_code_id` repoint (owner-only). Applies the
+    /// pending code id and emits old→new for observability.
+    AcceptPoolCodeId {},
     /// Enable a new fee tier (e.g. 100 pips, spacing 1)
     EnableFeeAmount { fee: u32, tick_spacing: u32 },
     /// Reserve the canonical pool slot `(token0, token1, fee)` for `creator`.

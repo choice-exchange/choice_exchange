@@ -156,6 +156,7 @@ fn deliver_to_seeder_requires_keeper_for_unknown_launch() {
         .execute(
             &env.issuer,
             &ExecuteMsg::DeliverToSeeder {
+                evm_authority: env.stranger.address(),
                 internal_id: 7,
                 leftover: Uint128::zero(),
             },
@@ -170,6 +171,7 @@ fn deliver_to_seeder_requires_keeper_for_unknown_launch() {
         .execute(
             &env.issuer,
             &ExecuteMsg::DeliverToSeeder {
+                evm_authority: env.stranger.address(),
                 internal_id: 7,
                 leftover: Uint128::zero(),
             },

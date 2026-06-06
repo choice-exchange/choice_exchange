@@ -15,6 +15,7 @@ use choice_clmm_common::factory::{
 };
 use choice_clmm_common::pool::{FeeConfig, InstantiateMsg as PoolInstantiateMsg};
 use choice_clmm_common::types::AssetInfo;
+use choice_clmm_math::tick_math::{max_sqrt_ratio, MIN_SQRT_RATIO};
 
 const CONTRACT_NAME: &str = "crates.io:choice-clmm-factory";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -30,7 +31,9 @@ pub fn instantiate(
 
     let config = Config {
         owner: info.sender.clone(),
+        pending_owner: None,
         pool_code_id: msg.pool_code_id,
+        pending_pool_code_id: None,
     };
     CONFIG.save(deps.storage, &config)?;
 
@@ -95,28 +98,120 @@ pub fn execute(
                 .add_attribute("fee", fee.to_string())
                 .add_attribute("tick_spacing", tick_spacing.to_string()))
         }
-        ExecuteMsg::UpdateConfig {
-            owner,
-            pool_code_id,
-        } => {
-            let mut config = CONFIG.load(deps.storage)?;
+        ExecuteMsg::UpdateConfig {} => {
+            // `owner` and `pool_code_id` are intentionally NOT settable here —
+            // they move only through the two-step propose/accept handshakes
+            // (audit C-L2 / C-L3). This arm currently mutates nothing but keeps
+            // the entrypoint + owner gate for future mutable fields.
+            let config = CONFIG.load(deps.storage)?;
             if info.sender != config.owner {
                 return Err(StdError::generic_err("Unauthorized"));
             }
-            if let Some(new_owner) = owner {
-                config.owner = deps.api.addr_validate(&new_owner)?;
-            }
-            if let Some(new_code_id) = pool_code_id {
-                config.pool_code_id = new_code_id;
-            }
-            CONFIG.save(deps.storage, &config)?;
             Ok(Response::new()
                 .add_attribute("action", "update_config")
                 .add_attribute("factory_action", "update_config")
                 .add_attribute("owner", config.owner.as_str())
                 .add_attribute("pool_code_id", config.pool_code_id.to_string()))
         }
+        ExecuteMsg::ProposeOwner { new_owner } => execute_propose_owner(deps, info, new_owner),
+        ExecuteMsg::AcceptOwner {} => execute_accept_owner(deps, info),
+        ExecuteMsg::ProposePoolCodeId { code_id } => {
+            execute_propose_pool_code_id(deps, info, code_id)
+        }
+        ExecuteMsg::AcceptPoolCodeId {} => execute_accept_pool_code_id(deps, info),
     }
+}
+
+/// `inj1qqqq…e2hm49` — the 20-zero-byte burn address. Proposing it as the new
+/// owner is almost certainly a mistake (it would brick the factory the same way
+/// the single-step transfer used to), so reject it up front. See memory
+/// `feedback_inj_tokenfactory_admin_revoke_burn_bech32`.
+const DEAD_OWNER_ADDRESS: &str = "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49";
+
+/// C-L2 step 1 — owner-only. Records `pending_owner`; no power changes hands
+/// until `AcceptOwner`.
+fn execute_propose_owner(
+    deps: DepsMut,
+    info: MessageInfo,
+    new_owner: String,
+) -> Result<Response, StdError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+    if new_owner == DEAD_OWNER_ADDRESS {
+        return Err(StdError::generic_err(
+            "Refusing to propose the dead burn address as owner",
+        ));
+    }
+    let new_owner = deps.api.addr_validate(&new_owner)?;
+    config.pending_owner = Some(new_owner.clone());
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "propose_owner")
+        .add_attribute("current_owner", config.owner.as_str())
+        .add_attribute("pending_owner", new_owner.as_str()))
+}
+
+/// C-L2 step 2 — callable ONLY by `pending_owner`. Promotes it to `owner` and
+/// clears the pending slot.
+fn execute_accept_owner(deps: DepsMut, info: MessageInfo) -> Result<Response, StdError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    let pending = config
+        .pending_owner
+        .clone()
+        .ok_or_else(|| StdError::generic_err("No pending owner"))?;
+    if info.sender != pending {
+        return Err(StdError::generic_err(
+            "Unauthorized: only the pending owner may accept",
+        ));
+    }
+    let previous_owner = config.owner.clone();
+    config.owner = pending.clone();
+    config.pending_owner = None;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "accept_owner")
+        .add_attribute("previous_owner", previous_owner.as_str())
+        .add_attribute("new_owner", pending.as_str()))
+}
+
+/// C-L3 step 1 — owner-only. Records `pending_pool_code_id`; the live
+/// `pool_code_id` is untouched until `AcceptPoolCodeId`.
+fn execute_propose_pool_code_id(
+    deps: DepsMut,
+    info: MessageInfo,
+    code_id: u64,
+) -> Result<Response, StdError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+    config.pending_pool_code_id = Some(code_id);
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "propose_pool_code_id")
+        .add_attribute("current_pool_code_id", config.pool_code_id.to_string())
+        .add_attribute("pending_pool_code_id", code_id.to_string()))
+}
+
+/// C-L3 step 2 — owner-only. Applies the pending pool code id, emitting old→new.
+fn execute_accept_pool_code_id(deps: DepsMut, info: MessageInfo) -> Result<Response, StdError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+    let new_code_id = config
+        .pending_pool_code_id
+        .ok_or_else(|| StdError::generic_err("No pending pool code id"))?;
+    let old_code_id = config.pool_code_id;
+    config.pool_code_id = new_code_id;
+    config.pending_pool_code_id = None;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "accept_pool_code_id")
+        .add_attribute("old_pool_code_id", old_code_id.to_string())
+        .add_attribute("new_pool_code_id", new_code_id.to_string()))
 }
 
 fn execute_create_pool(
@@ -131,6 +226,17 @@ fn execute_create_pool(
     // 1. Sort Tokens
     if token_a == token_b {
         return Err(StdError::generic_err("Same tokens"));
+    }
+
+    // C-L7: validate the caller-supplied opening price BEFORE instantiating the
+    // pool. Bounds mirror the pool/tick-math invariant: a valid Q64.96 sqrt
+    // price is in `[MIN_SQRT_RATIO, max_sqrt_ratio())` (upper bound exclusive,
+    // matching `get_tick_at_sqrt_ratio`). Rejecting 0 / out-of-range here turns
+    // an opaque nested instantiate revert into a clear factory-level error.
+    if init_sqrt_price < Uint256::from(MIN_SQRT_RATIO) || init_sqrt_price >= max_sqrt_ratio() {
+        return Err(StdError::generic_err(
+            "init_sqrt_price out of range: must be in [MIN_SQRT_RATIO, MAX_SQRT_RATIO)",
+        ));
     }
 
     // Validate CW20 addresses

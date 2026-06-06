@@ -3,7 +3,9 @@ use crate::msg::{
     ClmmPoolAuth, ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchResponse, LaunchesResponse,
     MigrateMsg, QueryMsg,
 };
-use crate::proto::{MsgBurn, MsgCreateDenom, MsgCreateTokenPair, ProtoCoin, TokenPair};
+use crate::proto::{
+    MsgBurn, MsgChangeAdmin, MsgCreateDenom, MsgCreateTokenPair, ProtoCoin, TokenPair,
+};
 use crate::state::{Config, LaunchRecord, LaunchStatus, CONFIG, LAUNCHES};
 
 use choice_clmm_common::factory::ExecuteMsg as ClmmFactoryExecuteMsg;
@@ -49,6 +51,21 @@ const MAX_QUERY_LIMIT: u32 = 100;
 /// handler decodes the response data and patches `erc20_address` into the
 /// matching `LaunchRecord`.
 const REPLY_CREATE_TOKEN_PAIR: u64 = 1;
+
+/// 20-zero-byte bech32 burn address. `MsgChangeAdmin` to this address is the
+/// canonical tokenfactory-admin "renounce" on Injective (an empty `new_admin`
+/// is chain-rejected). See `feedback_inj_tokenfactory_admin_revoke_burn_bech32`
+/// and finding C-M2.
+const DEAD_TOKENFACTORY_ADMIN: &str = "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49";
+
+/// Payload carried into the `MsgCreateTokenPair` reply so the handler can
+/// locate the launch by its composite `(evm_authority, internal_id)` key
+/// (finding C-H1 — `internal_id` alone is no longer globally unique).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReplyPayload {
+    evm_authority: String,
+    internal_id: u64,
+}
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -151,13 +168,19 @@ pub fn execute(
             clmm_pool_auth,
         ),
         ExecuteMsg::DeliverToSeeder {
+            evm_authority,
             internal_id,
             leftover,
-        } => execute_deliver_to_seeder(deps, env, info, internal_id, leftover),
+        } => execute_deliver_to_seeder(deps, env, info, evm_authority, internal_id, leftover),
         ExecuteMsg::RefundFailedLaunch {
+            evm_authority,
             internal_id,
             reason,
-        } => execute_refund_failed_launch(deps, env, info, internal_id, reason),
+        } => execute_refund_failed_launch(deps, env, info, evm_authority, internal_id, reason),
+        ExecuteMsg::RenounceDenomAdmin {
+            evm_authority,
+            internal_id,
+        } => execute_renounce_denom_admin(deps, env, info, evm_authority, internal_id),
         ExecuteMsg::UpdateAdmin { new_admin } => execute_update_admin(deps, info, new_admin),
         ExecuteMsg::UpdateKeeper { new_keeper } => execute_update_keeper(deps, info, new_keeper),
         ExecuteMsg::UpdateForwarder { new_forwarder } => {
@@ -185,6 +208,17 @@ fn execute_register_launch(
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
+    // Keeper-gated (finding C-H1). Previously permissionless, which let anyone
+    // front-run/squat an `internal_id` for one create-denom fee and brick a
+    // launch. The keeper is the only legitimate caller.
+    if info.sender != config.keeper {
+        return Err(ContractError::NotKeeper {});
+    }
+
+    // Validate the authority up front: it is half of the launch's storage key
+    // (finding C-H1), so the collision check below needs it.
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
+
     // Tokenfactory creation fee for the launch denom (`MsgCreateDenom` below).
     // The chain debits this from the issuer's bank balance at dispatch time.
     // Caller must attach the fee in `info.funds` EXACTLY — same denom set,
@@ -194,7 +228,9 @@ fn execute_register_launch(
     let create_fee = choice::querier::query_token_factory_denom_create_fee(&deps.querier)?;
     require_exact_create_fee_funds(&info, &create_fee)?;
 
-    if LAUNCHES.has(deps.storage, internal_id) {
+    // Per-`evm_authority` id namespace: a redeploy that resets its counter to
+    // 0 cannot collide with a prior deployment's records.
+    if LAUNCHES.has(deps.storage, (&evm_authority, internal_id)) {
         return Err(ContractError::LaunchAlreadyRegistered { id: internal_id });
     }
     if total_supply.is_zero() {
@@ -208,7 +244,6 @@ fn execute_register_launch(
     }
     let mut cw_held = total_supply.checked_sub(evm_supply)?;
 
-    let evm_authority = deps.api.addr_validate(&evm_authority)?;
     let seeder_factory = deps.api.addr_validate(&seeder_factory)?;
     let seeder_addr = deps.api.addr_validate(&seeder_addr)?;
     let choice_factory_addr = choice_factory
@@ -236,6 +271,14 @@ fn execute_register_launch(
     // launch denom is unguessable until this tx exists. Validate the suffix and
     // the resulting subdenom length up front — a too-long subdenom would only
     // surface as a cryptic chain-side error on `MsgCreateDenom`.
+    //
+    // NOTE (C-H1 caveat): the storage key is namespaced by `evm_authority`, but
+    // the denom string is `{prefix}_{internal_id}[_{salt}]` and does NOT embed
+    // the authority. To run multiple LaunchpadCore deployments under ONE issuer
+    // instance without an on-chain denom collision on a reused `internal_id`,
+    // the operator must give each deployment a distinct `subdenom_prefix` (own
+    // issuer instance) OR a per-deployment `salt_suffix`. The keeper-gate +
+    // per-authority storage key already prevent any record hijack/overwrite.
     let subdenom = match &salt_suffix {
         Some(salt) => {
             if salt.is_empty() || !salt.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -271,8 +314,9 @@ fn execute_register_launch(
         registered_at: env.block.time.seconds(),
         erc20_address: None,
         choice_factory: choice_factory_addr.clone(),
+        admin_renounced: false,
     };
-    LAUNCHES.save(deps.storage, internal_id, &record)?;
+    LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
 
     // Build the message chain in dispatch order — chain semantics require
     // CreateDenom and Mint to land before the CreateTokenPair SubMsg can
@@ -320,7 +364,10 @@ fn execute_register_launch(
     //    abort the whole tx (state changes above roll back).
     submsgs.push(SubMsg {
         id: REPLY_CREATE_TOKEN_PAIR,
-        payload: Binary::from(internal_id.to_be_bytes().to_vec()),
+        payload: to_json_binary(&ReplyPayload {
+            evm_authority: evm_authority.to_string(),
+            internal_id,
+        })?,
         msg: MsgCreateTokenPair {
             sender: env.contract.address.to_string(),
             token_pair: Some(TokenPair {
@@ -423,6 +470,7 @@ fn execute_deliver_to_seeder(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
     info: MessageInfo,
+    evm_authority: String,
     internal_id: u64,
     leftover: Uint128,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
@@ -431,8 +479,9 @@ fn execute_deliver_to_seeder(
         return Err(ContractError::NotKeeper {});
     }
 
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
     let mut record = LAUNCHES
-        .may_load(deps.storage, internal_id)?
+        .may_load(deps.storage, (&evm_authority, internal_id))?
         .ok_or(ContractError::LaunchNotFound { id: internal_id })?;
 
     if record.status != LaunchStatus::Registered {
@@ -446,6 +495,24 @@ fn execute_deliver_to_seeder(
         return Err(ContractError::LeftoverExceedsEvmSupply {
             leftover: leftover.to_string(),
             evm_supply: record.evm_supply.to_string(),
+        });
+    }
+
+    // Finding C-M3: refuse to bank-send `cw_held` to a `seeder_addr` that
+    // holds no contract code. The sink is instantiated in the RegisterLaunch
+    // tx (the forwarded `CreateSink`), so by the time the keeper cranks
+    // DeliverToSeeder it must exist; a missing contract means the off-chain
+    // instantiate2 address was wrong and the funds would land at a ghost
+    // address unrecoverably. `query_wasm_contract_info` errors when there is
+    // no contract at the address.
+    if !record.cw_held.is_zero()
+        && deps
+            .querier
+            .query_wasm_contract_info(record.seeder_addr.as_str())
+            .is_err()
+    {
+        return Err(ContractError::SeederAddrNotAContract {
+            addr: record.seeder_addr.to_string(),
         });
     }
 
@@ -478,7 +545,7 @@ fn execute_deliver_to_seeder(
     }
 
     record.status = LaunchStatus::Delivered;
-    LAUNCHES.save(deps.storage, internal_id, &record)?;
+    LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
 
     Ok(Response::new()
         .add_messages(messages)
@@ -494,13 +561,15 @@ fn execute_refund_failed_launch(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
     info: MessageInfo,
+    evm_authority: String,
     internal_id: u64,
     reason: String,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
     let mut record = LAUNCHES
-        .may_load(deps.storage, internal_id)?
+        .may_load(deps.storage, (&evm_authority, internal_id))?
         .ok_or(ContractError::LaunchNotFound { id: internal_id })?;
 
     if record.status != LaunchStatus::Registered {
@@ -543,7 +612,7 @@ fn execute_refund_failed_launch(
     }
 
     record.status = LaunchStatus::Refunded;
-    LAUNCHES.save(deps.storage, internal_id, &record)?;
+    LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
 
     Ok(Response::new()
         .add_messages(messages)
@@ -552,6 +621,59 @@ fn execute_refund_failed_launch(
         .add_attribute("denom", record.denom)
         .add_attribute("cw_held_burned", record.cw_held)
         .add_attribute("reason", reason))
+}
+
+/// Finding C-M2: relinquish this contract's tokenfactory admin over a launch
+/// denom once the launch is `Delivered`, by rotating the admin to the
+/// burn-address convention. After this the issuer can no longer `MsgMint` or
+/// admin-`MsgBurn`-from for the denom. Callable by `keeper` or `admin`.
+fn execute_renounce_denom_admin(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+    evm_authority: String,
+    internal_id: u64,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.keeper && info.sender != config.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
+    let mut record = LAUNCHES
+        .may_load(deps.storage, (&evm_authority, internal_id))?
+        .ok_or(ContractError::LaunchNotFound { id: internal_id })?;
+
+    // Only after delivery: while a launch is still `Registered`, the issuer
+    // may still need admin-burn (DeliverToSeeder Leg A) or refund-burn.
+    if record.status != LaunchStatus::Delivered {
+        return Err(ContractError::InvalidLaunchStatus {
+            id: internal_id,
+            actual: format!("{:?}", record.status),
+            expected: "Delivered".to_string(),
+        });
+    }
+    if record.admin_renounced {
+        return Err(ContractError::DenomAdminAlreadyRenounced { id: internal_id });
+    }
+
+    record.admin_renounced = true;
+    LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
+
+    let msg: CosmosMsg<InjectiveMsgWrapper> = MsgChangeAdmin {
+        sender: env.contract.address.to_string(),
+        denom: record.denom.clone(),
+        new_admin: DEAD_TOKENFACTORY_ADMIN.to_string(),
+    }
+    .into();
+
+    Ok(Response::new()
+        .add_message(msg)
+        .add_attribute("action", "renounce_denom_admin")
+        .add_attribute("evm_authority", evm_authority)
+        .add_attribute("internal_id", internal_id.to_string())
+        .add_attribute("denom", record.denom)
+        .add_attribute("new_admin", DEAD_TOKENFACTORY_ADMIN))
 }
 
 fn execute_update_admin(
@@ -621,7 +743,11 @@ fn handle_create_token_pair_reply(
     deps: DepsMut<InjectiveQueryWrapper>,
     msg: Reply,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    let internal_id = decode_internal_id(&msg.payload)?;
+    let ReplyPayload {
+        evm_authority,
+        internal_id,
+    } = decode_reply_payload(&msg.payload)?;
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
 
     let response = match msg.result {
         SubMsgResult::Ok(r) => r,
@@ -649,7 +775,7 @@ fn handle_create_token_pair_reply(
 
     LAUNCHES.update(
         deps.storage,
-        internal_id,
+        (&evm_authority, internal_id),
         |maybe| -> Result<LaunchRecord, ContractError> {
             let mut rec = maybe.ok_or(ContractError::LaunchNotFound { id: internal_id })?;
             rec.erc20_address = Some(erc20.clone());
@@ -705,24 +831,24 @@ pub(crate) fn require_exact_create_fee_funds(
     Ok(())
 }
 
-fn decode_internal_id(payload: &Binary) -> Result<u64, ContractError> {
-    let bytes: [u8; 8] = payload.as_slice().try_into().map_err(|_| {
-        ContractError::CreateTokenPairReplyDecode(format!(
-            "expected 8-byte payload, got {}",
-            payload.len()
-        ))
-    })?;
-    Ok(u64::from_be_bytes(bytes))
+fn decode_reply_payload(payload: &Binary) -> Result<ReplyPayload, ContractError> {
+    cosmwasm_std::from_json(payload)
+        .map_err(|e| ContractError::CreateTokenPairReplyDecode(e.to_string()))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
-        QueryMsg::Launch { internal_id } => to_json_binary(&query_launch(deps, internal_id)?),
-        QueryMsg::Launches { start_after, limit } => {
-            to_json_binary(&query_launches(deps, start_after, limit)?)
-        }
+        QueryMsg::Launch {
+            evm_authority,
+            internal_id,
+        } => to_json_binary(&query_launch(deps, evm_authority, internal_id)?),
+        QueryMsg::Launches {
+            evm_authority,
+            start_after,
+            limit,
+        } => to_json_binary(&query_launches(deps, evm_authority, start_after, limit)?),
     }
 }
 
@@ -738,23 +864,37 @@ fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> 
     })
 }
 
-fn query_launch(deps: Deps<InjectiveQueryWrapper>, internal_id: u64) -> StdResult<LaunchResponse> {
+fn query_launch(
+    deps: Deps<InjectiveQueryWrapper>,
+    evm_authority: String,
+    internal_id: u64,
+) -> StdResult<LaunchResponse> {
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
     let record = LAUNCHES
-        .may_load(deps.storage, internal_id)?
-        .ok_or_else(|| cosmwasm_std::StdError::not_found(format!("launch {}", internal_id)))?;
+        .may_load(deps.storage, (&evm_authority, internal_id))?
+        .ok_or_else(|| {
+            cosmwasm_std::StdError::not_found(format!(
+                "launch {} for authority {}",
+                internal_id, evm_authority
+            ))
+        })?;
     Ok(record.into())
 }
 
 fn query_launches(
     deps: Deps<InjectiveQueryWrapper>,
+    evm_authority: String,
     start_after: Option<u64>,
     limit: Option<u32>,
 ) -> StdResult<LaunchesResponse> {
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
     let limit = limit
         .unwrap_or(DEFAULT_QUERY_LIMIT)
         .min(MAX_QUERY_LIMIT) as usize;
     let min = start_after.map(Bound::exclusive);
+    // Paginate within one authority's `internal_id` namespace.
     let launches: Vec<LaunchResponse> = LAUNCHES
+        .prefix(&evm_authority)
         .range(deps.storage, min, None, Order::Ascending)
         .take(limit)
         .map(|item| item.map(|(_, r)| r.into()))

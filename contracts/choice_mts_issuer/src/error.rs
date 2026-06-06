@@ -106,6 +106,12 @@ pub enum ContractError {
     )]
     InvalidMigration { from: String, requested: String },
 
+    #[error("Seeder address `{addr}` holds no contract code — refusing to deliver cw_held to a ghost/EOA address")]
+    SeederAddrNotAContract { addr: String },
+
+    #[error("Launch {id} denom admin already renounced")]
+    DenomAdminAlreadyRenounced { id: u64 },
+
     #[error("Reply id {id} is not handled by this contract")]
     UnknownReplyId { id: u64 },
 

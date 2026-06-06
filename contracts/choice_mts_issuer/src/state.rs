@@ -99,10 +99,24 @@ pub struct LaunchRecord {
     /// is registering decimals separately. Stored for audit / dashboards;
     /// not used to gate any downstream action.
     pub choice_factory: Option<Addr>,
+    /// `true` once `RenounceDenomAdmin` has rotated this denom's tokenfactory
+    /// admin to the burn-address convention, relinquishing the issuer's
+    /// `MsgMint` / admin-`MsgBurn`-from powers over the denom. Audit + a guard
+    /// against a double-renounce (the second `MsgChangeAdmin` would revert
+    /// anyway, but we reject early with a clear error). See finding C-M2.
+    pub admin_renounced: bool,
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
 
-/// Per-launch state, keyed by `internal_id`. The launchpad / consumer dApp
-/// assigns these — typically a monotonic uint64 from its EVM-side counter.
-pub const LAUNCHES: Map<u64, LaunchRecord> = Map::new("launches");
+/// Per-launch state, keyed by `(evm_authority, internal_id)`.
+///
+/// The `internal_id` alone is NOT globally unique — a consumer dApp's EVM-side
+/// counter resets to 0 on every LaunchpadCore redeploy, so two deployments (or
+/// two distinct consumer dApps sharing one issuer) can legitimately present the
+/// same `internal_id`. Keying by the launch's `evm_authority` (one per
+/// LaunchpadCore deployment) gives each authority its own id namespace, so a
+/// redeploy can't collide with a prior instance's records. Combined with the
+/// keeper-gate on `RegisterLaunch`, this closes the squat/collision class
+/// (finding C-H1). The key is `(&evm_authority, internal_id)`.
+pub const LAUNCHES: Map<(&Addr, u64), LaunchRecord> = Map::new("launches");

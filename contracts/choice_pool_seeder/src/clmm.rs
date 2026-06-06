@@ -11,6 +11,7 @@
 //! are reproduced here rather than imported so the seeder doesn't take a
 //! dependency on the math crate for two `const`s.
 
+use crate::error::ContractError;
 use cosmwasm_std::{Isqrt, StdError, StdResult, Uint128, Uint256, Uint512};
 use std::str::FromStr;
 
@@ -35,15 +36,23 @@ fn max_sqrt_ratio_exclusive() -> Uint256 {
 ///
 /// `sqrt_price_x96 = isqrt(amount1 << 192 / amount0)`, i.e.
 /// `sqrt(amount1/amount0) * 2^96`, computed in `Uint512` to avoid overflow on
-/// the `<< 192` (max input `~2^128 << 192 = 2^320 < 2^512`). The result is
-/// clamped into `[MIN_SQRT_RATIO, max_sqrt_ratio_exclusive() - 1]` so it is
-/// always a price the pool will accept; extreme seed ratios saturate at the
-/// boundary rather than erroring.
-pub fn init_sqrt_price_from_amounts(amount0: Uint128, amount1: Uint128) -> StdResult<Uint256> {
+/// the `<< 192` (max input `~2^128 << 192 = 2^320 < 2^512`).
+///
+/// The computed price must land inside `[MIN_SQRT_RATIO, max_sqrt_ratio_exclusive())`
+/// — the exact range the CLMM pool accepts on instantiate. An extreme seed
+/// ratio (e.g. a few raw units against `Uint128::MAX`) would push the price
+/// outside that window; rather than silently clamping to the boundary (which
+/// would create the pool at a price that does *not* match the seed ratio and
+/// let the `amount*_min = 0` mint draw only one side, leaking the rest to the
+/// refund receiver), we return `SeedRatioOutOfRange` so the keeper can triage
+/// (different fee tier, rescaled seed, or Refund). Sane 18-decimal launches are
+/// nowhere near these bounds and are unaffected.
+pub fn init_sqrt_price_from_amounts(
+    amount0: Uint128,
+    amount1: Uint128,
+) -> Result<Uint256, ContractError> {
     if amount0.is_zero() || amount1.is_zero() {
-        return Err(StdError::generic_err(
-            "init_sqrt_price requires both seed amounts > 0",
-        ));
+        return Err(StdError::generic_err("init_sqrt_price requires both seed amounts > 0").into());
     }
 
     let numerator = Uint512::from(amount1) << 192u32;
@@ -51,15 +60,17 @@ pub fn init_sqrt_price_from_amounts(amount0: Uint128, amount1: Uint128) -> StdRe
     let sqrt_x96 = ratio_x192.isqrt();
 
     // sqrt of a value < 2^320 is < 2^160, so this never truncates.
-    let mut price = Uint256::try_from(sqrt_x96)
+    let price = Uint256::try_from(sqrt_x96)
         .map_err(|_| StdError::generic_err("init_sqrt_price overflowed Uint256"))?;
 
     let min = Uint256::from(MIN_SQRT_RATIO);
-    let max_inclusive = max_sqrt_ratio_exclusive() - Uint256::one();
-    if price < min {
-        price = min;
-    } else if price > max_inclusive {
-        price = max_inclusive;
+    let max_exclusive = max_sqrt_ratio_exclusive();
+    if price < min || price >= max_exclusive {
+        return Err(ContractError::SeedRatioOutOfRange {
+            sqrt_price: price.to_string(),
+            min: min.to_string(),
+            max_exclusive: max_exclusive.to_string(),
+        });
     }
     Ok(price)
 }
@@ -117,17 +128,38 @@ mod tests {
     }
 
     #[test]
-    fn extreme_high_ratio_clamps_to_max() {
-        // Huge amount1, tiny amount0 → price saturates just below the ceiling.
-        let p = init_sqrt_price_from_amounts(Uint128::new(1), Uint128::MAX).unwrap();
-        assert_eq!(p, max_sqrt_ratio_exclusive() - Uint256::one());
+    fn extreme_high_ratio_errors_instead_of_clamping() {
+        // Huge amount1, tiny amount0 → price would exceed the ceiling. Rather
+        // than silently clamp (and seed a mispriced pool), we error so the
+        // keeper can triage.
+        let err = init_sqrt_price_from_amounts(Uint128::new(1), Uint128::MAX).unwrap_err();
+        assert!(
+            matches!(err, ContractError::SeedRatioOutOfRange { .. }),
+            "expected SeedRatioOutOfRange, got {err:?}"
+        );
     }
 
     #[test]
-    fn extreme_low_ratio_clamps_to_min() {
-        // Tiny amount1, huge amount0 → price floors at MIN_SQRT_RATIO.
-        let p = init_sqrt_price_from_amounts(Uint128::MAX, Uint128::new(1)).unwrap();
-        assert_eq!(p, Uint256::from(MIN_SQRT_RATIO));
+    fn extreme_low_ratio_errors_instead_of_clamping() {
+        // Tiny amount1, huge amount0 → price would fall below MIN_SQRT_RATIO.
+        let err = init_sqrt_price_from_amounts(Uint128::MAX, Uint128::new(1)).unwrap_err();
+        assert!(
+            matches!(err, ContractError::SeedRatioOutOfRange { .. }),
+            "expected SeedRatioOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn boundary_ratio_just_inside_range_still_succeeds() {
+        // A large-but-in-range ratio must still produce a valid price unchanged:
+        // amount1/amount0 = 2^40 → sqrt = 2^20 → sqrt_price = 2^20 * 2^96 = 2^116,
+        // comfortably below max_sqrt_ratio_exclusive (~2^160) and above MIN.
+        let amount0 = Uint128::new(1);
+        let amount1 = Uint128::new(1u128 << 40);
+        let p = init_sqrt_price_from_amounts(amount0, amount1).unwrap();
+        assert_eq!(p, Uint256::one() << 116u32);
+        assert!(p >= Uint256::from(MIN_SQRT_RATIO));
+        assert!(p < max_sqrt_ratio_exclusive());
     }
 
     #[test]

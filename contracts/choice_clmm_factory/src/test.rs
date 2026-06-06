@@ -13,6 +13,7 @@ mod tests {
         SubMsgResult, Uint256, WasmMsg,
     };
     use sha2::{Digest, Sha256};
+    use std::str::FromStr;
 
     fn native(denom: &str) -> AssetInfo {
         AssetInfo::NativeToken {
@@ -227,7 +228,7 @@ mod tests {
             token_a: native("ATOM"),
             token_b: native("OSMO"),
             fee: 500,
-            init_sqrt_price: Uint256::zero(),
+            init_sqrt_price: init_price(),
         };
 
         let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
@@ -515,5 +516,269 @@ mod tests {
         let err =
             execute(deps.as_mut(), mock_env(), message_info(&attacker, &[]), msg).unwrap_err();
         assert!(err.to_string().contains("Unauthorized"), "{}", err);
+    }
+
+    // ----------------------------------------------------------------------
+    // C-L2 — two-step owner transfer
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn owner_transfer_requires_propose_then_accept() {
+        let mut deps = setup_factory();
+        let owner = deps.api.addr_make("creator");
+        let new_owner = deps.api.addr_make("new_owner");
+        let random = deps.api.addr_make("random");
+
+        // UpdateConfig no longer carries owner/pool_code_id and changes nothing,
+        // but is still owner-gated.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&random, &[]),
+            ExecuteMsg::UpdateConfig {},
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: Unauthorized");
+
+        // A non-owner cannot propose.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&random, &[]),
+            ExecuteMsg::ProposeOwner {
+                new_owner: new_owner.to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: Unauthorized");
+
+        // Owner proposes; ownership has NOT yet moved.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::ProposeOwner {
+                new_owner: new_owner.to_string(),
+            },
+        )
+        .unwrap();
+        let config = CONFIG.load(&deps.storage).unwrap();
+        assert_eq!(config.owner, owner);
+        assert_eq!(config.pending_owner, Some(new_owner.clone()));
+
+        // A random caller (not the pending owner) cannot accept.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&random, &[]),
+            ExecuteMsg::AcceptOwner {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"), "{}", err);
+
+        // The pending owner accepts; ownership moves and pending clears.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&new_owner, &[]),
+            ExecuteMsg::AcceptOwner {},
+        )
+        .unwrap();
+        let config = CONFIG.load(&deps.storage).unwrap();
+        assert_eq!(config.owner, new_owner);
+        assert_eq!(config.pending_owner, None);
+
+        // The OLD owner can no longer act (e.g. enable a fee tier).
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::EnableFeeAmount {
+                fee: 250,
+                tick_spacing: 5,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: Unauthorized");
+
+        // The NEW owner can act.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&new_owner, &[]),
+            ExecuteMsg::EnableFeeAmount {
+                fee: 250,
+                tick_spacing: 5,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn accept_owner_without_proposal_fails() {
+        let mut deps = setup_factory();
+        let random = deps.api.addr_make("random");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&random, &[]),
+            ExecuteMsg::AcceptOwner {},
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: No pending owner");
+    }
+
+    #[test]
+    fn propose_owner_rejects_dead_address() {
+        let mut deps = setup_factory();
+        let owner = deps.api.addr_make("creator");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::ProposeOwner {
+                new_owner: "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("dead burn address"), "{}", err);
+    }
+
+    // ----------------------------------------------------------------------
+    // C-L3 — two-step pool_code_id repoint
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn pool_code_id_change_requires_propose_then_accept() {
+        let mut deps = setup_factory();
+        let owner = deps.api.addr_make("creator");
+        let random = deps.api.addr_make("random");
+
+        // Sanity: starts at 123 (setup_factory).
+        assert_eq!(CONFIG.load(&deps.storage).unwrap().pool_code_id, 123);
+
+        // Non-owner cannot propose.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&random, &[]),
+            ExecuteMsg::ProposePoolCodeId { code_id: 456 },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: Unauthorized");
+
+        // Owner proposes; live code id unchanged, pending set.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::ProposePoolCodeId { code_id: 456 },
+        )
+        .unwrap();
+        let config = CONFIG.load(&deps.storage).unwrap();
+        assert_eq!(config.pool_code_id, 123);
+        assert_eq!(config.pending_pool_code_id, Some(456));
+
+        // Non-owner cannot accept.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&random, &[]),
+            ExecuteMsg::AcceptPoolCodeId {},
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: Unauthorized");
+
+        // Owner accepts; live code id repointed, pending cleared, event emitted.
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::AcceptPoolCodeId {},
+        )
+        .unwrap();
+        assert!(res.attributes.contains(&attr("old_pool_code_id", "123")));
+        assert!(res.attributes.contains(&attr("new_pool_code_id", "456")));
+        let config = CONFIG.load(&deps.storage).unwrap();
+        assert_eq!(config.pool_code_id, 456);
+        assert_eq!(config.pending_pool_code_id, None);
+    }
+
+    #[test]
+    fn accept_pool_code_id_without_proposal_fails() {
+        let mut deps = setup_factory();
+        let owner = deps.api.addr_make("creator");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::AcceptPoolCodeId {},
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: No pending pool code id");
+    }
+
+    // ----------------------------------------------------------------------
+    // C-L7 — init_sqrt_price validation on CreatePool
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn create_pool_rejects_zero_and_out_of_range_init_sqrt_price() {
+        let mut deps = setup_factory();
+        let info = message_info(&deps.api.addr_make("user"), &[]);
+
+        // 1. Zero is rejected.
+        let msg = ExecuteMsg::CreatePool {
+            token_a: native("ATOM"),
+            token_b: native("OSMO"),
+            fee: 500,
+            init_sqrt_price: Uint256::zero(),
+        };
+        let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
+        assert!(
+            err.to_string().contains("init_sqrt_price out of range"),
+            "{}",
+            err
+        );
+
+        // 2. Just below MIN_SQRT_RATIO (4295128739) is rejected.
+        let msg = ExecuteMsg::CreatePool {
+            token_a: native("ATOM"),
+            token_b: native("OSMO"),
+            fee: 500,
+            init_sqrt_price: Uint256::from(4295128738u128),
+        };
+        let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
+        assert!(
+            err.to_string().contains("init_sqrt_price out of range"),
+            "{}",
+            err
+        );
+
+        // 3. At/above the exclusive upper bound is rejected.
+        let max = Uint256::from_str("1461446703485210103287273052203988822378723970342").unwrap();
+        let msg = ExecuteMsg::CreatePool {
+            token_a: native("ATOM"),
+            token_b: native("OSMO"),
+            fee: 500,
+            init_sqrt_price: max,
+        };
+        let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
+        assert!(
+            err.to_string().contains("init_sqrt_price out of range"),
+            "{}",
+            err
+        );
+
+        // 4. The inclusive lower bound MIN_SQRT_RATIO is accepted (proceeds to
+        //    instantiate submsg).
+        let msg = ExecuteMsg::CreatePool {
+            token_a: native("ATOM"),
+            token_b: native("OSMO"),
+            fee: 500,
+            init_sqrt_price: Uint256::from(4295128739u128),
+        };
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+        assert_eq!(res.messages.len(), 1);
     }
 }

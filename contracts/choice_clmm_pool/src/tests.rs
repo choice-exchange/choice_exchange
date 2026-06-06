@@ -1790,6 +1790,7 @@ mod tests {
             Uint128::zero(),
             None,
             None,
+            vec![], // no native funds attached to the Receive envelope
         )
         .unwrap();
 
@@ -2975,5 +2976,164 @@ mod tests {
         let config: PoolConfig = from_json(&res).unwrap();
         assert_eq!(config.hook, None);
         assert_eq!(config.hook_permissions, 0);
+    }
+
+    // ----------------------------------------------------------------------
+    // C-L1: native funds attached to a CW20-input swap must be refunded
+    // ----------------------------------------------------------------------
+
+    /// Regression for C-L1 (audit 2026-06-06): `Swap`/`SwapExactInput`/
+    /// `SwapExactOutput` are classified payable, so a caller can attach native
+    /// coins. When the in-token is a CW20 (pulled via `TransferFrom`), the swap
+    /// consumes NO native coins — they used to be silently absorbed into
+    /// reserves. The fix appends a `BankMsg::Send` returning the full attached
+    /// `info.funds` to the caller.
+    #[test]
+    fn swap_cw20_input_refunds_attached_native_funds() {
+        let mut deps = mock_dependencies();
+        let cw20_addr = deps.api.addr_make("cw20_usdt");
+
+        // token0 = native (inj), token1 = CW20 (Native < Token ordering).
+        let msg = InstantiateMsg {
+            token0: native("inj"),
+            token1: AssetInfo::Token {
+                contract_addr: cw20_addr.to_string(),
+            },
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 100,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: get_price_one(),
+        };
+        let creator = message_info(&deps.api.addr_make("factory"), &[]);
+        instantiate(deps.as_mut(), mock_env(), creator, msg).unwrap();
+
+        // Sell the CW20 (token1) for native token0 via the allowance path
+        // (`zero_for_one = false`), wrongly attaching native coins. Those coins
+        // are not the consumed input (the CW20 is), so all of them must refund.
+        let trader = deps.api.addr_make("trader");
+        let recipient = deps.api.addr_make("recipient");
+        let max_sqrt_ratio = Uint256::from_str(
+            "1461446703485210103287273052203988822378723970341",
+        )
+        .unwrap()
+            - Uint256::one();
+
+        let trader_info = message_info(
+            &trader,
+            &[
+                Coin::new(Uint128::new(1234), "inj"),
+                Coin::new(Uint128::new(500), "stranded"),
+            ],
+        );
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            trader_info,
+            ExecuteMsg::Swap {
+                recipient: recipient.to_string(),
+                zero_for_one: false, // selling token1 (CW20) for token0
+                amount_specified: Uint128::from(1000u128),
+                sqrt_price_limit_x96: max_sqrt_ratio,
+            },
+        )
+        .unwrap();
+
+        // The attached native coins must be refunded in FULL to the trader.
+        let refund = res
+            .messages
+            .iter()
+            .find_map(|m| match &m.msg {
+                cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount })
+                    if to_address == trader.as_str() =>
+                {
+                    Some(amount.clone())
+                }
+                _ => None,
+            })
+            .expect("expected a native refund BankMsg::Send to the trader");
+
+        let find = |denom: &str| {
+            refund
+                .iter()
+                .find(|c| c.denom == denom)
+                .map(|c| c.amount)
+                .unwrap_or_default()
+        };
+        assert_eq!(find("inj"), Uint128::new(1234));
+        assert_eq!(find("stranded"), Uint128::new(500));
+    }
+
+    // ----------------------------------------------------------------------
+    // C-L7 (pool-side): reject zero / out-of-range init_sqrt_price on instantiate
+    // ----------------------------------------------------------------------
+
+    /// Regression for C-L7 (audit 2026-06-06): the factory forwards a
+    /// caller-supplied `init_sqrt_price` unvalidated, so the pool must reject a
+    /// zero or out-of-Q64.96-range opening price on instantiate (defense in
+    /// depth) rather than seed slot0 with a nonsensical price.
+    #[test]
+    fn instantiate_rejects_zero_or_out_of_range_init_sqrt_price() {
+        use choice_clmm_math::tick_math::{max_sqrt_ratio, MIN_SQRT_RATIO};
+
+        let base_msg = |sqrt_price: Uint256| InstantiateMsg {
+            token0: native("inj"),
+            token1: native("usdt"),
+            tick_spacing: 10,
+            fee_config: FeeConfig {
+                base_fee_ppm: 3000,
+                max_fee_ppm: 10000,
+                volatility_multiplier: 100,
+                ema_halflife_seconds: 600,
+                max_fee_change_per_second_ppm: 0,
+            },
+            initial_sqrt_price: sqrt_price,
+        };
+
+        // Zero is rejected.
+        {
+            let mut deps = mock_dependencies();
+            let info = message_info(&deps.api.addr_make("factory"), &[]);
+            let err =
+                instantiate(deps.as_mut(), mock_env(), info, base_msg(Uint256::zero()))
+                    .unwrap_err();
+            assert!(matches!(err, ContractError::InvalidConfig { .. }));
+        }
+
+        // Below MIN_SQRT_RATIO is rejected.
+        {
+            let mut deps = mock_dependencies();
+            let info = message_info(&deps.api.addr_make("factory"), &[]);
+            let below = Uint256::from(MIN_SQRT_RATIO) - Uint256::one();
+            let err = instantiate(deps.as_mut(), mock_env(), info, base_msg(below))
+                .unwrap_err();
+            assert!(matches!(err, ContractError::InvalidConfig { .. }));
+        }
+
+        // At/above max_sqrt_ratio() is rejected (the upper bound is exclusive).
+        {
+            let mut deps = mock_dependencies();
+            let info = message_info(&deps.api.addr_make("factory"), &[]);
+            let err = instantiate(
+                deps.as_mut(),
+                mock_env(),
+                info,
+                base_msg(max_sqrt_ratio()),
+            )
+            .unwrap_err();
+            assert!(matches!(err, ContractError::InvalidConfig { .. }));
+        }
+
+        // A valid in-range price (1.0) still instantiates successfully.
+        {
+            let mut deps = mock_dependencies();
+            let info = message_info(&deps.api.addr_make("factory"), &[]);
+            instantiate(deps.as_mut(), mock_env(), info, base_msg(get_price_one()))
+                .expect("valid init_sqrt_price should instantiate");
+        }
     }
 }

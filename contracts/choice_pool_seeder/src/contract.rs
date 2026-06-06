@@ -690,8 +690,10 @@ fn settle_clmm(
     // 2. Mint a full-range position to `position_recipient`, attaching both
     //    seed amounts. The manager resolves the pool, computes liquidity, and
     //    refunds any one-sided surplus back to this sink. `amount*_min = 0` is
-    //    safe: we created the pool at our price in this same atomic tx, so no
-    //    one can move the price between create and mint. `deadline = 0`
+    //    safe: `init_sqrt_price_from_amounts` errored out above if the seed
+    //    ratio could not be priced in-range, so the pool price matches the seed
+    //    ratio and the mint draws both sides; we created it in this same atomic
+    //    tx, so no one can move the price between create and mint. `deadline = 0`
     //    disables the manager's deadline check.
     let mut mint_funds = vec![
         Coin {

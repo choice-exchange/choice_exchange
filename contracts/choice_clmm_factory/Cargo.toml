@@ -34,3 +34,4 @@ serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 sha2 = "0.10.9"
 
 choice-clmm-common = { workspace = true }
+choice-clmm-math   = { workspace = true }

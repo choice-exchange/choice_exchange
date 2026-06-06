@@ -54,11 +54,15 @@ pub const POSITIONS: Map<&str, PositionState> = Map::new("positions");
 
 // --- Reply-chain pending-action context ---
 //
-// CosmWasm 2.x supports `SubMsg::with_payload(Binary)` but plumbing typed
-// payloads through the submessage boundary is noisy. We stash the context in
-// storage keyed by reply-id instead. Each reply handler reads, processes, and
-// removes its entry. Any failure in the submsg reverts the whole tx, so stale
-// entries are not a concern.
+// Each pending-action context is keyed by the `token_id` (u64) the operation
+// concerns, and the same `token_id` is carried into the reply via
+// `SubMsg::with_payload(token_id.to_be_bytes())`. The reply handler decodes the
+// payload, loads its entry, processes it, and removes it.
+//
+// Keying by `token_id` (rather than a single global `Item`) means a future
+// pool variant that re-enters the manager mid-reply cannot clobber an
+// unrelated in-flight operation's pending slot (audit C-L5). Any failure in
+// the submsg reverts the whole tx, so stale entries never leak.
 
 #[cw_serde]
 pub struct PendingMint {
@@ -114,10 +118,12 @@ pub struct PendingCollect {
     pub amount1_requested: Uint128,
 }
 
-pub const PENDING_MINT: Item<PendingMint> = Item::new("pending_mint");
-pub const PENDING_INCREASE: Item<PendingIncrease> = Item::new("pending_increase");
-pub const PENDING_DECREASE: Item<PendingDecrease> = Item::new("pending_decrease");
-pub const PENDING_COLLECT: Item<PendingCollect> = Item::new("pending_collect");
+// Pending-action context, keyed by the `token_id` (u64) the operation
+// concerns. See the note above for why this is a `Map` and not an `Item`.
+pub const PENDING_MINT: Map<u64, PendingMint> = Map::new("pending_mint");
+pub const PENDING_INCREASE: Map<u64, PendingIncrease> = Map::new("pending_increase");
+pub const PENDING_DECREASE: Map<u64, PendingDecrease> = Map::new("pending_decrease");
+pub const PENDING_COLLECT: Map<u64, PendingCollect> = Map::new("pending_collect");
 
 // Reply IDs
 pub const REPLY_MINT_POSITION: u64 = 1;

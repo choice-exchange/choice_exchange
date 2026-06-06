@@ -86,6 +86,30 @@ fn ensure_nonpayable(info: &MessageInfo) -> Result<(), ContractError> {
     Ok(())
 }
 
+/// Parse a `token_id` string (decimal u64, as produced by `next_token_id`)
+/// into the numeric key used for the `PENDING_*` maps and the SubMsg payload.
+fn token_id_key(token_id: &str) -> Result<u64, ContractError> {
+    token_id
+        .parse::<u64>()
+        .map_err(|e| ContractError::Std(StdError::generic_err(format!(
+            "invalid token_id {token_id}: {e}"
+        ))))
+}
+
+/// Recover the `token_id` numeric key a reply was tagged with via
+/// `SubMsg::with_payload(token_id.to_be_bytes())`.
+fn token_id_from_payload(payload: &Binary) -> Result<u64, ContractError> {
+    let bytes = <[u8; 8]>::try_from(payload.as_slice()).map_err(|_| {
+        ContractError::InvalidReply {
+            reason: format!(
+                "expected 8-byte token_id payload, got {} bytes",
+                payload.len()
+            ),
+        }
+    })?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
 fn validate_deadline(env: &Env, deadline: u64) -> Result<(), ContractError> {
     if deadline > 0 && env.block.time.seconds() > deadline {
         return Err(ContractError::DeadlineExceeded {});
@@ -311,9 +335,30 @@ fn execute_mint_position(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    params: MintParams,
+    mut params: MintParams,
 ) -> Result<Response, ContractError> {
     validate_deadline(&env, params.deadline)?;
+
+    // C-M1: canonicalize token order BEFORE any computation, pool query, or
+    // liquidity calc. The factory's `GetPool` sorts `(token0, token1)` with
+    // `AssetInfo`'s `Ord` (NativeToken < Token, then lexicographic) and the
+    // pool stores its tokens in that canonical order, so a caller may pass
+    // either order and still resolve the same pool. If we kept the caller's
+    // order we would mislabel amounts, mis-route funds, and persist a swapped
+    // `PositionState`. We canonicalize transparently so integrators that pass
+    // either order work.
+    //
+    // Tick bounds are NOT swapped: they are price-range bounds expressed in the
+    // pool's canonical orientation (we feed them straight to `pool.Mint`, which
+    // interprets them against its canonical slot0 that we also query here). They
+    // are independent of which token the caller happens to label `token0`. Only
+    // the token/amount pairs follow the sort so `get_liquidity_for_amounts`
+    // receives `amount0` paired with the canonical `token0`.
+    if params.token0 >= params.token1 {
+        std::mem::swap(&mut params.token0, &mut params.token1);
+        std::mem::swap(&mut params.amount0_desired, &mut params.amount1_desired);
+        std::mem::swap(&mut params.amount0_min, &mut params.amount1_min);
+    }
 
     if params.tick_lower >= params.tick_upper {
         return Err(ContractError::Std(StdError::generic_err(
@@ -338,6 +383,9 @@ fn execute_mint_position(
     let counter = TOKEN_ID_COUNTER.load(deps.storage)?;
     let (token_id, next_counter) = next_token_id(counter);
     TOKEN_ID_COUNTER.save(deps.storage, &next_counter)?;
+    // Numeric key for the PENDING_MINT map / reply payload. `counter` is the
+    // exact u64 that `next_token_id` stringified.
+    let token_id_key = counter;
 
     // Current slot0 to compute actuals.
     let slot0: PoolState = deps
@@ -447,7 +495,7 @@ fn execute_mint_position(
         amount1_sent_to_pool: amount1_actual,
         native_refunds: native_refunds.clone(),
     };
-    PENDING_MINT.save(deps.storage, &pending)?;
+    PENDING_MINT.save(deps.storage, token_id_key, &pending)?;
 
     let pool_mint_msg = PoolExecuteMsg::Mint {
         lower_tick: params.tick_lower,
@@ -461,7 +509,8 @@ fn execute_mint_position(
             funds: funds_to_pool,
         },
         REPLY_MINT_POSITION,
-    );
+    )
+    .with_payload(token_id_key.to_be_bytes().to_vec());
 
     // Build response: pre-messages, then the submsg.
     let mut response = Response::new().add_messages(pre_messages);
@@ -484,8 +533,9 @@ fn execute_mint_position(
 }
 
 fn reply_mint_position(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
-    let pending = PENDING_MINT.load(deps.storage)?;
-    PENDING_MINT.remove(deps.storage);
+    let token_id_key = token_id_from_payload(&reply.payload)?;
+    let pending = PENDING_MINT.load(deps.storage, token_id_key)?;
+    PENDING_MINT.remove(deps.storage, token_id_key);
 
     // Verify the pool consumed exactly what we sent. Matches the increase-
     // liquidity reply's invariant — surfaces any future mint-math divergence
@@ -578,6 +628,7 @@ fn execute_increase_liquidity(
 ) -> Result<Response, ContractError> {
     validate_deadline(&env, params.deadline)?;
     assert_owner_or_approved(deps.as_ref(), &env, &info, &params.token_id)?;
+    let token_id_key = token_id_key(&params.token_id)?;
 
     let state = POSITIONS
         .load(deps.storage, &params.token_id)
@@ -669,7 +720,7 @@ fn execute_increase_liquidity(
         amount1_sent_to_pool: amount1_actual,
         native_refunds: native_refunds.clone(),
     };
-    PENDING_INCREASE.save(deps.storage, &pending)?;
+    PENDING_INCREASE.save(deps.storage, token_id_key, &pending)?;
 
     let pool_mint_msg = PoolExecuteMsg::Mint {
         lower_tick: state.tick_lower,
@@ -683,7 +734,8 @@ fn execute_increase_liquidity(
             funds: funds_to_pool,
         },
         REPLY_INCREASE_LIQUIDITY,
-    );
+    )
+    .with_payload(token_id_key.to_be_bytes().to_vec());
 
     let mut response = Response::new().add_messages(pre_messages);
     for coin in native_refunds {
@@ -700,8 +752,9 @@ fn execute_increase_liquidity(
 }
 
 fn reply_increase_liquidity(deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
-    let pending = PENDING_INCREASE.load(deps.storage)?;
-    PENDING_INCREASE.remove(deps.storage);
+    let token_id_key = token_id_from_payload(&reply.payload)?;
+    let pending = PENDING_INCREASE.load(deps.storage, token_id_key)?;
+    PENDING_INCREASE.remove(deps.storage, token_id_key);
 
     let mut state = POSITIONS.load(deps.storage, &pending.token_id)?;
 
@@ -768,6 +821,7 @@ fn execute_decrease_liquidity(
 ) -> Result<Response, ContractError> {
     validate_deadline(&env, params.deadline)?;
     assert_owner_or_approved(deps.as_ref(), &env, &info, &params.token_id)?;
+    let token_id_key = token_id_key(&params.token_id)?;
 
     let state = POSITIONS.load(deps.storage, &params.token_id)?;
 
@@ -788,7 +842,7 @@ fn execute_decrease_liquidity(
         amount0_min: params.amount0_min,
         amount1_min: params.amount1_min,
     };
-    PENDING_DECREASE.save(deps.storage, &pending)?;
+    PENDING_DECREASE.save(deps.storage, token_id_key, &pending)?;
 
     let burn_msg = PoolExecuteMsg::Burn {
         lower_tick: state.tick_lower,
@@ -802,7 +856,8 @@ fn execute_decrease_liquidity(
             funds: vec![],
         },
         REPLY_DECREASE_LIQUIDITY,
-    );
+    )
+    .with_payload(token_id_key.to_be_bytes().to_vec());
 
     Ok(Response::new()
         .add_submessage(submsg)
@@ -816,8 +871,9 @@ fn reply_decrease_liquidity(
     _env: Env,
     reply: Reply,
 ) -> Result<Response, ContractError> {
-    let pending = PENDING_DECREASE.load(deps.storage)?;
-    PENDING_DECREASE.remove(deps.storage);
+    let token_id_key = token_id_from_payload(&reply.payload)?;
+    let pending = PENDING_DECREASE.load(deps.storage, token_id_key)?;
+    PENDING_DECREASE.remove(deps.storage, token_id_key);
 
     let mut state = POSITIONS.load(deps.storage, &pending.token_id)?;
 
@@ -977,8 +1033,10 @@ fn execute_collect(
             .add_attribute("amount1", pay1));
     }
 
+    let token_id_key = token_id_key(&token_id)?;
     PENDING_COLLECT.save(
         deps.storage,
+        token_id_key,
         &PendingCollect {
             token_id: token_id.clone(),
             amount0_requested: pay0,
@@ -1000,7 +1058,8 @@ fn execute_collect(
             funds: vec![],
         },
         REPLY_COLLECT,
-    );
+    )
+    .with_payload(token_id_key.to_be_bytes().to_vec());
 
     let mut response = Response::new();
     for m in messages {
@@ -1021,8 +1080,9 @@ fn reply_collect(
     _env: Env,
     reply: Reply,
 ) -> Result<Response, ContractError> {
-    let pending = PENDING_COLLECT.load(deps.storage)?;
-    PENDING_COLLECT.remove(deps.storage);
+    let token_id_key = token_id_from_payload(&reply.payload)?;
+    let pending = PENDING_COLLECT.load(deps.storage, token_id_key)?;
+    PENDING_COLLECT.remove(deps.storage, token_id_key);
 
     let mut state = POSITIONS.load(deps.storage, &pending.token_id)?;
 

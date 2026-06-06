@@ -142,25 +142,41 @@ mod tests {
         }
     }
 
+    /// Encode a `token_id` (decimal string) into the 8-byte big-endian reply
+    /// payload the contract tags every SubMsg with (C-L5).
+    fn payload_for(token_id: &str) -> cosmwasm_std::Binary {
+        let key: u64 = token_id.parse().unwrap();
+        cosmwasm_std::Binary::from(key.to_be_bytes().to_vec())
+    }
+
     fn ok_reply_with_burn_attrs(
         id: u64,
+        token_id: &str,
         amount0: u128,
         amount1: u128,
         emitter: &str,
     ) -> Reply {
-        ok_reply_with_burn_attrs_and_fg(id, amount0, amount1, Uint256::zero(), Uint256::zero(), emitter)
+        ok_reply_with_burn_attrs_and_fg(
+            id, token_id, amount0, amount1, Uint256::zero(), Uint256::zero(), emitter,
+        )
     }
 
     /// Build a reply that mimics the pool's `Collect` response — carries
     /// `amount0` / `amount1` (actual paid amounts) keyed to the emitter.
-    fn ok_reply_with_collect_attrs(id: u64, amount0: u128, amount1: u128, emitter: &str) -> Reply {
+    fn ok_reply_with_collect_attrs(
+        id: u64,
+        token_id: &str,
+        amount0: u128,
+        amount1: u128,
+        emitter: &str,
+    ) -> Reply {
         let ev = Event::new("wasm")
             .add_attribute("_contract_address", emitter)
             .add_attribute("amount0", Uint128::new(amount0).to_string())
             .add_attribute("amount1", Uint128::new(amount1).to_string());
         Reply {
             id,
-            payload: Default::default(),
+            payload: payload_for(token_id),
             gas_used: 0,
             result: SubMsgResult::Ok(ok_submsg_response(vec![ev])),
         }
@@ -168,6 +184,7 @@ mod tests {
 
     fn ok_reply_with_burn_attrs_and_fg(
         id: u64,
+        token_id: &str,
         amount0: u128,
         amount1: u128,
         fg_inside_0: Uint256,
@@ -182,7 +199,7 @@ mod tests {
             .add_attribute("fee_growth_inside_1_x128", fg_inside_1.to_string());
         Reply {
             id,
-            payload: Default::default(),
+            payload: payload_for(token_id),
             gas_used: 0,
             result: SubMsgResult::Ok(ok_submsg_response(vec![ev])),
         }
@@ -195,13 +212,15 @@ mod tests {
     fn ok_reply_consumed(
         deps: &OwnedDeps<MockStorage, MockApi, CustomMockQuerier>,
         id: u64,
+        token_id: &str,
         emitter: &str,
     ) -> Reply {
+        let key: u64 = token_id.parse().unwrap();
         let (amount0, amount1) = if id == REPLY_MINT_POSITION {
-            let p = PENDING_MINT.load(&deps.storage).unwrap();
+            let p = PENDING_MINT.load(&deps.storage, key).unwrap();
             (p.amount0_sent_to_pool, p.amount1_sent_to_pool)
         } else if id == REPLY_INCREASE_LIQUIDITY {
-            let p = PENDING_INCREASE.load(&deps.storage).unwrap();
+            let p = PENDING_INCREASE.load(&deps.storage, key).unwrap();
             (p.amount0_sent_to_pool, p.amount1_sent_to_pool)
         } else {
             panic!("ok_reply_consumed only supports mint/increase reply ids");
@@ -212,7 +231,7 @@ mod tests {
             .add_attribute("amount1_consumed", amount1.to_string());
         Reply {
             id,
-            payload: Default::default(),
+            payload: payload_for(token_id),
             gas_used: 0,
             result: SubMsgResult::Ok(ok_submsg_response(vec![ev])),
         }
@@ -370,7 +389,7 @@ mod tests {
 
         // 2. simulate the pool submsg having succeeded -> run reply
         let pool_addr = deps.api.addr_make("pool_addr").to_string();
-        let r = ok_reply_consumed(deps, REPLY_MINT_POSITION, &pool_addr);
+        let r = ok_reply_consumed(deps, REPLY_MINT_POSITION, &token_id, &pool_addr);
         reply(deps.as_mut(), mock_env(), r).unwrap();
 
         token_id
@@ -519,7 +538,7 @@ mod tests {
 
         // Reply fires after pool mint.
         let pool_addr = deps.api.addr_make("pool_addr").to_string();
-        let r = ok_reply_consumed(&deps, REPLY_INCREASE_LIQUIDITY, &pool_addr);
+        let r = ok_reply_consumed(&deps, REPLY_INCREASE_LIQUIDITY, &token_id, &pool_addr);
         reply(deps.as_mut(), mock_env(), r).unwrap();
 
         let after = POSITIONS.load(&deps.storage, &token_id).unwrap();
@@ -575,6 +594,7 @@ mod tests {
             mock_env(),
             ok_reply_with_burn_attrs_and_fg(
                 REPLY_DECREASE_LIQUIDITY,
+                &token_id,
                 400,
                 600,
                 q128,
@@ -621,7 +641,7 @@ mod tests {
         let err = reply(
             deps.as_mut(),
             mock_env(),
-            ok_reply_with_burn_attrs(REPLY_DECREASE_LIQUIDITY, 100, 100, &pool_addr),
+            ok_reply_with_burn_attrs(REPLY_DECREASE_LIQUIDITY, &token_id, 100, 100, &pool_addr),
         )
         .unwrap_err();
         assert!(err.to_string().contains("Slippage"), "got: {}", err);
@@ -705,7 +725,7 @@ mod tests {
         reply(
             deps.as_mut(),
             mock_env(),
-            ok_reply_with_collect_attrs(REPLY_COLLECT, alice_share, 0, &pool_addr),
+            ok_reply_with_collect_attrs(REPLY_COLLECT, &alice_id, alice_share, 0, &pool_addr),
         )
         .unwrap();
 
@@ -756,7 +776,7 @@ mod tests {
         reply(
             deps.as_mut(),
             mock_env(),
-            ok_reply_with_collect_attrs(REPLY_COLLECT, half.u128(), 0, &pool_addr),
+            ok_reply_with_collect_attrs(REPLY_COLLECT, &token_id, half.u128(), 0, &pool_addr),
         )
         .unwrap();
 
@@ -907,6 +927,291 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    // ------------------------------------------------------------
+    // C-M1: token0/token1 canonicalization in mint
+    // ------------------------------------------------------------
+
+    /// Find the pool.Mint submsg funds in a mint response.
+    fn pool_mint_funds(res: &cosmwasm_std::Response) -> Vec<Coin> {
+        res.messages
+            .iter()
+            .find_map(|m| match &m.msg {
+                CosmosMsg::Wasm(WasmMsg::Execute { funds, msg: bin, .. }) => {
+                    let pe: Result<choice_clmm_common::pool::ExecuteMsg, _> = from_json(bin);
+                    if matches!(pe, Ok(choice_clmm_common::pool::ExecuteMsg::Mint { .. })) {
+                        Some(funds.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .expect("expected pool.Mint submsg")
+    }
+
+    #[test]
+    fn mint_with_reversed_token_order_is_canonicalized() {
+        // Pass tokens in NON-canonical order (token0=OSMO, token1=ATOM; ATOM <
+        // OSMO so this is reversed) with ASYMMETRIC amounts. The manager must
+        // canonicalize to (token0=ATOM, token1=OSMO) and re-map the amounts so
+        // the stored PositionState is canonical and funds route correctly.
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+
+        // Range entirely ABOVE current price (tick 0): only canonical token0
+        // (ATOM) is consumed. Caller passes token0=OSMO, so amount0_desired
+        // is tied to OSMO; after canonicalization it must move to amount1.
+        let info = message_info(
+            &user,
+            &[
+                Coin::new(Uint128::new(7_000), "ATOM"),
+                Coin::new(Uint128::new(3_000), "OSMO"),
+            ],
+        );
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::MintPosition {
+                token0: native("OSMO"),
+                token1: native("ATOM"),
+                fee: 500,
+                tick_lower: 10,
+                tick_upper: 100,
+                // amounts are in CALLER order: amount0 pairs with OSMO.
+                amount0_desired: Uint128::new(3_000),
+                amount1_desired: Uint128::new(7_000),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                recipient: None,
+                deadline: 0,
+            },
+        )
+        .unwrap();
+
+        let token_id = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "token_id")
+            .unwrap()
+            .value
+            .clone();
+
+        // Pending mint must record CANONICAL order: token0 == ATOM.
+        let key: u64 = token_id.parse().unwrap();
+        let pending = PENDING_MINT.load(&deps.storage, key).unwrap();
+        assert_eq!(pending.token0, native("ATOM"), "token0 must canonicalize to ATOM");
+        assert_eq!(pending.token1, native("OSMO"), "token1 must canonicalize to OSMO");
+
+        // Range above current => only canonical token0 (ATOM) consumed.
+        assert!(
+            !pending.amount0_sent_to_pool.is_zero(),
+            "canonical token0 (ATOM) must be consumed"
+        );
+        assert!(
+            pending.amount1_sent_to_pool.is_zero(),
+            "canonical token1 (OSMO) must NOT be consumed for above-range position"
+        );
+
+        // Funds forwarded to the pool must be ATOM only (denom routed correctly).
+        let funds = pool_mint_funds(&res);
+        assert_eq!(funds.len(), 1, "only one denom forwarded");
+        assert_eq!(funds[0].denom, "ATOM", "forwarded denom must be canonical token0 ATOM");
+
+        // Complete the reply and assert the persisted PositionState is canonical.
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        let r = ok_reply_consumed(&deps, REPLY_MINT_POSITION, &token_id, &pool_addr);
+        reply(deps.as_mut(), mock_env(), r).unwrap();
+
+        let pos = POSITIONS.load(&deps.storage, &token_id).unwrap();
+        assert_eq!(pos.token0, native("ATOM"));
+        assert_eq!(pos.token1, native("OSMO"));
+    }
+
+    #[test]
+    fn increase_liquidity_routes_correct_denom_after_reversed_mint() {
+        // After a reversed-order mint canonicalizes to (ATOM, OSMO), a later
+        // IncreaseLiquidity (which reads token order from stored PositionState)
+        // must forward the correct denom.
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+
+        // Reversed-order mint, range above current => token0 (ATOM) only.
+        let info = message_info(
+            &user,
+            &[Coin::new(Uint128::new(5_000), "ATOM")],
+        );
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::MintPosition {
+                token0: native("OSMO"),
+                token1: native("ATOM"),
+                fee: 500,
+                tick_lower: 10,
+                tick_upper: 100,
+                amount0_desired: Uint128::zero(),      // OSMO (caller order)
+                amount1_desired: Uint128::new(5_000),  // ATOM (caller order)
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                recipient: None,
+                deadline: 0,
+            },
+        )
+        .unwrap();
+        let token_id = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "token_id")
+            .unwrap()
+            .value
+            .clone();
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        let r = ok_reply_consumed(&deps, REPLY_MINT_POSITION, &token_id, &pool_addr);
+        reply(deps.as_mut(), mock_env(), r).unwrap();
+
+        // IncreaseLiquidity uses stored (canonical) order: amount0 == ATOM.
+        let info = message_info(&user, &[Coin::new(Uint128::new(2_000), "ATOM")]);
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::IncreaseLiquidity {
+                token_id: token_id.clone(),
+                amount0_desired: Uint128::new(2_000),
+                amount1_desired: Uint128::zero(),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                deadline: 0,
+            },
+        )
+        .unwrap();
+
+        let funds = pool_mint_funds(&res);
+        assert_eq!(funds.len(), 1, "only one denom forwarded on increase");
+        assert_eq!(
+            funds[0].denom, "ATOM",
+            "increase must forward canonical token0 (ATOM)"
+        );
+    }
+
+    // ------------------------------------------------------------
+    // C-L5: pending reply state keyed by token_id
+    // ------------------------------------------------------------
+
+    #[test]
+    fn pending_mint_state_is_keyed_by_token_id() {
+        // Two concurrent in-flight mints must each park their pending context
+        // under their own token_id key, so a reply for one cannot clobber or
+        // load the other's state.
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+
+        // First mint (token_id 1) — DO NOT run its reply, leaving it pending.
+        let info = message_info(
+            &user,
+            &[Coin::new(Uint128::new(1_000), "ATOM")],
+        );
+        let res1 = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::MintPosition {
+                token0: native("ATOM"),
+                token1: native("OSMO"),
+                fee: 500,
+                tick_lower: 10, // above current => token0 (ATOM) only
+                tick_upper: 100,
+                amount0_desired: Uint128::new(1_000),
+                amount1_desired: Uint128::zero(),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                recipient: None,
+                deadline: 0,
+            },
+        )
+        .unwrap();
+        let id1 = res1
+            .attributes
+            .iter()
+            .find(|a| a.key == "token_id")
+            .unwrap()
+            .value
+            .clone();
+
+        // Second mint (token_id 2), also left pending, with a DIFFERENT amount.
+        let info = message_info(
+            &user,
+            &[Coin::new(Uint128::new(2_000), "ATOM")],
+        );
+        let res2 = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::MintPosition {
+                token0: native("ATOM"),
+                token1: native("OSMO"),
+                fee: 500,
+                tick_lower: 10,
+                tick_upper: 100,
+                amount0_desired: Uint128::new(2_000),
+                amount1_desired: Uint128::zero(),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                recipient: None,
+                deadline: 0,
+            },
+        )
+        .unwrap();
+        let id2 = res2
+            .attributes
+            .iter()
+            .find(|a| a.key == "token_id")
+            .unwrap()
+            .value
+            .clone();
+
+        assert_ne!(id1, id2, "ids must differ");
+        let k1: u64 = id1.parse().unwrap();
+        let k2: u64 = id2.parse().unwrap();
+
+        // Both pending entries coexist under distinct keys.
+        let p1 = PENDING_MINT.load(&deps.storage, k1).unwrap();
+        let p2 = PENDING_MINT.load(&deps.storage, k2).unwrap();
+        assert_eq!(p1.token_id, id1);
+        assert_eq!(p2.token_id, id2);
+        assert_eq!(p1.amount0_sent_to_pool, Uint128::new(1_000));
+        assert_eq!(p2.amount0_sent_to_pool, Uint128::new(2_000));
+
+        // Run the reply for id1 (payload carries k1). It must consume ONLY
+        // id1's entry and leave id2's untouched.
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        let r1 = ok_reply_consumed(&deps, REPLY_MINT_POSITION, &id1, &pool_addr);
+        reply(deps.as_mut(), mock_env(), r1).unwrap();
+
+        assert!(
+            PENDING_MINT.may_load(&deps.storage, k1).unwrap().is_none(),
+            "id1 pending entry must be removed after its reply"
+        );
+        let p2_still = PENDING_MINT
+            .may_load(&deps.storage, k2)
+            .unwrap()
+            .expect("id2 pending entry must survive id1's reply");
+        assert_eq!(
+            p2_still.amount0_sent_to_pool,
+            Uint128::new(2_000),
+            "id2 pending state must be intact (not clobbered)"
+        );
+
+        // id1's position is now persisted; id2's is not yet.
+        assert!(POSITIONS.may_load(&deps.storage, &id1).unwrap().is_some());
+        assert!(POSITIONS.may_load(&deps.storage, &id2).unwrap().is_none());
     }
 
     fn _ensure_position_default_construction_compiles() {

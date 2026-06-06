@@ -31,17 +31,18 @@ pub struct InstantiateMsg {
 // expected and boxing it would only obscure the wire shape.
 #[allow(clippy::large_enum_variant)]
 pub enum ExecuteMsg {
-    /// Permissionless. Creates the launch denom, mints `total_supply` to
-    /// self, ships `evm_supply` to `evm_authority`, pairs the denom to a
-    /// freshly auto-deployed `MintBurnBankERC20` via `MsgCreateTokenPair`,
-    /// and routes the bundled `create_sink_payload` to the consumer dApp's
-    /// chosen `seeder_factory`. All five steps are atomic — any failure
-    /// reverts the launch (no partial denom creation, no orphaned mint).
+    /// Keeper-only. Creates the launch denom, mints `total_supply` to self,
+    /// ships `evm_supply` to `evm_authority`, pairs the denom to a freshly
+    /// auto-deployed `MintBurnBankERC20` via `MsgCreateTokenPair`, and routes
+    /// the bundled `create_sink_payload` to the consumer dApp's chosen
+    /// `seeder_factory`. All five steps are atomic — any failure reverts the
+    /// launch (no partial denom creation, no orphaned mint).
     ///
-    /// The caller is typically the consumer dApp's keeper after it observed
-    /// the EVM-side `LaunchCreated`, but no auth check is enforced: the
-    /// security model relies on the fact that the only place `cw_held` flows
-    /// is to `seeder_addr`, which the consumer dApp already trusts.
+    /// Gated to [`crate::state::Config::keeper`] (finding C-H1). It was
+    /// previously permissionless, which let anyone front-run/squat an
+    /// `internal_id` for one create-denom fee and permanently brick a launch.
+    /// The launch is keyed by `(evm_authority, internal_id)`, so each EVM
+    /// authority gets its own id namespace (no cross-deployment collision).
     RegisterLaunch {
         internal_id: u64,
         /// dApp's EVM authority contract bech32 (lower-20-byte form). Becomes
@@ -120,7 +121,16 @@ pub enum ExecuteMsg {
     /// doesn't need to query the EVM authority's bank balance. Caller
     /// (keeper) is trusted to relay it faithfully; bounded by `leftover ≤
     /// evm_supply`. Public tippable cranking is deferred for v1.
-    DeliverToSeeder { internal_id: u64, leftover: Uint128 },
+    ///
+    /// `evm_authority` identifies the launch namespace (the record is keyed by
+    /// `(evm_authority, internal_id)` — finding C-H1). Before sending
+    /// `cw_held`, the issuer verifies `seeder_addr` actually holds contract
+    /// code, refusing to deliver to a ghost/EOA address (finding C-M3).
+    DeliverToSeeder {
+        evm_authority: String,
+        internal_id: u64,
+        leftover: Uint128,
+    },
 
     /// Failure path: burns the CW-side `cw_held` so the launch leaves no
     /// zombie supply on this contract. EVM-side circulating supply cleanup
@@ -129,12 +139,30 @@ pub enum ExecuteMsg {
     /// logic; the issuer doesn't reach into EVM here.
     ///
     /// Callable by `keeper` before [`crate::state::Config::refund_deadline_seconds`],
-    /// by anyone after.
+    /// by anyone after. `evm_authority` identifies the launch namespace (the
+    /// record is keyed by `(evm_authority, internal_id)` — finding C-H1).
     RefundFailedLaunch {
+        evm_authority: String,
         internal_id: u64,
         /// Free-text reason — surfaced as an event attribute for
         /// observability. Not validated.
         reason: String,
+    },
+
+    /// Keeper-or-admin, post-`Delivered`: relinquish this contract's
+    /// tokenfactory admin over the launch denom by rotating the admin to the
+    /// 20-zero-byte burn-address convention via `MsgChangeAdmin` (finding
+    /// C-M2). After this the issuer can no longer `MsgMint` new supply or
+    /// admin-`MsgBurn`-from holders for the denom.
+    ///
+    /// NOTE: this renounces the *tokenfactory* admin only. The auto-deployed
+    /// `MintBurnBankERC20` owner is the issuer's lower-20-byte EVM address; a
+    /// CosmWasm contract cannot sign the EVM tx to renounce that ERC20
+    /// ownership, so that step must be performed separately by the issuer's
+    /// controller on the EVM side (deployment runbook item).
+    RenounceDenomAdmin {
+        evm_authority: String,
+        internal_id: u64,
     },
 
     /// Admin-only: rotate the admin key.
@@ -167,9 +195,17 @@ pub struct ClmmPoolAuth {
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
     Config {},
-    Launch { internal_id: u64 },
-    /// Paginated listing for indexers / dashboards. Returns oldest-first.
+    /// Look up one launch by its `(evm_authority, internal_id)` key.
+    Launch {
+        evm_authority: String,
+        internal_id: u64,
+    },
+    /// Paginated listing of a single `evm_authority`'s launches (its `internal_id`
+    /// namespace), oldest-first. `start_after` is an `internal_id` within that
+    /// authority. Per-authority because `internal_id` is no longer globally
+    /// unique (finding C-H1).
     Launches {
+        evm_authority: String,
         start_after: Option<u64>,
         limit: Option<u32>,
     },
@@ -203,6 +239,9 @@ pub struct LaunchResponse {
     /// `AddNativeTokenDecimals` call to a `choice_factory`. `None` if the
     /// consumer dApp opted out and is registering decimals separately.
     pub choice_factory: Option<String>,
+    /// `true` once `RenounceDenomAdmin` has relinquished this contract's
+    /// tokenfactory admin over the denom (finding C-M2).
+    pub admin_renounced: bool,
 }
 
 impl From<LaunchRecord> for LaunchResponse {
@@ -221,6 +260,7 @@ impl From<LaunchRecord> for LaunchResponse {
             registered_at: r.registered_at,
             erc20_address: r.erc20_address,
             choice_factory: r.choice_factory.map(|a| a.into_string()),
+            admin_renounced: r.admin_renounced,
         }
     }
 }

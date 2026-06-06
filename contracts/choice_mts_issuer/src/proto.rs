@@ -76,6 +76,29 @@ impl MsgBurn {
     pub const TYPE_URL: &'static str = "/injective.tokenfactory.v1beta1.MsgBurn";
 }
 
+/// `injective.tokenfactory.v1beta1.MsgChangeAdmin`. Rotates the tokenfactory
+/// admin of `denom` from the current admin (`sender`) to `new_admin`.
+///
+/// Used by `RenounceDenomAdmin` (finding C-M2) to hand the admin to the
+/// 20-zero-byte burn-address convention
+/// (`inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49`), relinquishing the issuer's
+/// `MsgMint` / admin-`MsgBurn`-from authority. An empty `new_admin` is chain-
+/// rejected, so the burn-address convention is the canonical "renounce" — see
+/// `feedback_inj_tokenfactory_admin_revoke_burn_bech32`.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct MsgChangeAdmin {
+    #[prost(string, tag = "1")]
+    pub sender: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub denom: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub new_admin: ::prost::alloc::string::String,
+}
+
+impl MsgChangeAdmin {
+    pub const TYPE_URL: &'static str = "/injective.tokenfactory.v1beta1.MsgChangeAdmin";
+}
+
 /// `injective.erc20.v1beta1.TokenPair`.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct TokenPair {
@@ -129,4 +152,5 @@ macro_rules! impl_stargate_msg {
 
 impl_stargate_msg!(MsgCreateDenom);
 impl_stargate_msg!(MsgBurn);
+impl_stargate_msg!(MsgChangeAdmin);
 impl_stargate_msg!(MsgCreateTokenPair);

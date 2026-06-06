@@ -29,7 +29,8 @@ use crate::contract::{execute, instantiate, query, reply, MAX_DECIMALS, MAX_SUBD
 use crate::error::ContractError;
 use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchesResponse, QueryMsg};
 use crate::proto::{
-    MsgBurn, MsgCreateDenom, MsgCreateTokenPair, MsgCreateTokenPairResponse, TokenPair,
+    MsgBurn, MsgChangeAdmin, MsgCreateDenom, MsgCreateTokenPair, MsgCreateTokenPairResponse,
+    TokenPair,
 };
 use crate::state::{LaunchStatus, LAUNCHES};
 use prost::Message;
@@ -84,7 +85,7 @@ fn register_with_choice_factory(
     internal_id: u64,
     choice_factory: Option<String>,
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
@@ -179,7 +180,12 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
         .iter()
         .find(|sm| sm.reply_on == ReplyOn::Success)
         .expect("create_token_pair submsg");
-    assert_eq!(sub.payload.as_slice(), 42u64.to_be_bytes());
+    // Payload is a JSON `ReplyPayload {evm_authority, internal_id}` (C-H1).
+    let expected_payload = format!(
+        r#"{{"evm_authority":"{}","internal_id":42}}"#,
+        deps.api.addr_make("evm_authority")
+    );
+    assert_eq!(sub.payload.as_slice(), expected_payload.as_bytes());
 
     // Dispatch position matters: chain runs messages in `res.messages` order.
     // CreateTokenPair MUST land AFTER CreateDenom/Mint and BEFORE
@@ -268,7 +274,7 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
         other => panic!("expected BankMsg::Send, got {:?}", other),
     }
 
-    let stored = LAUNCHES.load(deps.as_ref().storage, 42).unwrap();
+    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 42)).unwrap();
     assert_eq!(stored.status, LaunchStatus::Registered);
     assert_eq!(stored.cw_held, Uint128::new(200_000_000u128) * Uint128::new(10u128.pow(18)));
     assert_eq!(stored.erc20_address, None, "filled in by reply handler");
@@ -285,7 +291,7 @@ fn register_launch_rejects_duplicate_internal_id() {
 #[test]
 fn register_launch_rejects_zero_total_supply() {
     let mut deps = setup();
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id: 1,
@@ -307,7 +313,7 @@ fn register_launch_rejects_zero_total_supply() {
 #[test]
 fn register_launch_rejects_evm_supply_over_total() {
     let mut deps = setup();
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id: 1,
@@ -329,7 +335,7 @@ fn register_launch_rejects_evm_supply_over_total() {
 #[test]
 fn register_launch_rejects_when_caller_omits_create_fee_funds() {
     let mut deps = setup();
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     // No `info.funds` attached → caller didn't pay the chain's create fee.
     let info = message_info(&caller, &[]);
     let msg = ExecuteMsg::RegisterLaunch {
@@ -352,7 +358,7 @@ fn register_launch_rejects_when_caller_omits_create_fee_funds() {
 #[test]
 fn register_launch_rejects_overpaid_create_fee() {
     let mut deps = setup();
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     // Caller over-pays by 13 wei — must revert. Refunding excess would
     // tempt callers to pre-fund the issuer and leave dust accumulating in
     // the contract's bank balance.
@@ -377,7 +383,7 @@ fn register_launch_rejects_overpaid_create_fee() {
 #[test]
 fn register_launch_rejects_unexpected_funds_denom() {
     let mut deps = setup();
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     let info = message_info(
         &caller,
         &[
@@ -431,7 +437,7 @@ fn register_launch_with_choice_factory_chains_add_native_token_decimals() {
     assert_eq!(add_msg, coins(1u128, &denom));
 
     // cw_held was reduced by 1 wei to fund the dust.
-    let stored = LAUNCHES.load(deps.as_ref().storage, 50).unwrap();
+    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 50)).unwrap();
     let expected_cw_held =
         Uint128::new(200_000_000u128) * Uint128::new(10u128.pow(18)) - Uint128::one();
     assert_eq!(stored.cw_held, expected_cw_held);
@@ -441,7 +447,7 @@ fn register_launch_with_choice_factory_chains_add_native_token_decimals() {
 #[test]
 fn register_launch_rejects_choice_factory_when_cw_held_is_zero() {
     let mut deps = setup();
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id: 60,
@@ -467,12 +473,16 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
     register_default(&mut deps, 9).unwrap();
     simulate_create_token_pair_reply(&mut deps, 9, "0xdeadbeef00000000000000000000000000000000");
 
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+    deps.querier.register_wasm_contract(&seeder);
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&keeper, &[]),
         ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
             internal_id: 9,
             leftover: Uint128::new(50_000_000u128) * Uint128::new(10u128.pow(18)),
         },
@@ -510,7 +520,7 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
         other => panic!("expected BankMsg::Send, got {:?}", other),
     }
     assert_eq!(
-        LAUNCHES.load(deps.as_ref().storage, 9).unwrap().status,
+        LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 9)).unwrap().status,
         LaunchStatus::Delivered
     );
 }
@@ -519,12 +529,16 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
 fn deliver_to_seeder_with_zero_leftover_omits_burn() {
     let mut deps = setup();
     register_default(&mut deps, 10).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+    deps.querier.register_wasm_contract(&seeder);
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&keeper, &[]),
         ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
             internal_id: 10,
             leftover: Uint128::zero(),
         },
@@ -539,12 +553,14 @@ fn deliver_to_seeder_with_zero_leftover_omits_burn() {
 fn deliver_to_seeder_rejects_non_keeper() {
     let mut deps = setup();
     register_default(&mut deps, 11).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let stranger = deps.api.addr_make("stranger");
     let err = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&stranger, &[]),
         ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
             internal_id: 11,
             leftover: Uint128::zero(),
         },
@@ -557,12 +573,14 @@ fn deliver_to_seeder_rejects_non_keeper() {
 fn deliver_to_seeder_rejects_leftover_over_evm_supply() {
     let mut deps = setup();
     register_default(&mut deps, 12).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let keeper = deps.api.addr_make("keeper");
     let err = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&keeper, &[]),
         ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
             internal_id: 12,
             leftover: Uint128::new(10u128.pow(36)),
         },
@@ -575,12 +593,16 @@ fn deliver_to_seeder_rejects_leftover_over_evm_supply() {
 fn deliver_to_seeder_rejects_repeat() {
     let mut deps = setup();
     register_default(&mut deps, 13).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+    deps.querier.register_wasm_contract(&seeder);
     let keeper = deps.api.addr_make("keeper");
     execute(
         deps.as_mut(),
         mock_env(),
         message_info(&keeper, &[]),
         ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
             internal_id: 13,
             leftover: Uint128::zero(),
         },
@@ -591,6 +613,7 @@ fn deliver_to_seeder_rejects_repeat() {
         mock_env(),
         message_info(&keeper, &[]),
         ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
             internal_id: 13,
             leftover: Uint128::zero(),
         },
@@ -603,12 +626,14 @@ fn deliver_to_seeder_rejects_repeat() {
 fn refund_keeper_path_burns_cw_held() {
     let mut deps = setup();
     register_default(&mut deps, 21).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&keeper, &[]),
         ExecuteMsg::RefundFailedLaunch {
+            evm_authority: evm_authority.clone(),
             internal_id: 21,
             reason: "bootstrap_failed".to_string(),
         },
@@ -625,7 +650,7 @@ fn refund_keeper_path_burns_cw_held() {
         other => panic!("expected Custom Injective msg, got {:?}", other),
     }
     assert_eq!(
-        LAUNCHES.load(deps.as_ref().storage, 21).unwrap().status,
+        LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 21)).unwrap().status,
         LaunchStatus::Refunded
     );
 }
@@ -634,12 +659,14 @@ fn refund_keeper_path_burns_cw_held() {
 fn refund_non_keeper_pre_deadline_is_rejected() {
     let mut deps = setup();
     register_default(&mut deps, 22).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let stranger = deps.api.addr_make("stranger");
     let err = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&stranger, &[]),
         ExecuteMsg::RefundFailedLaunch {
+            evm_authority: evm_authority.clone(),
             internal_id: 22,
             reason: "stuck".to_string(),
         },
@@ -652,6 +679,7 @@ fn refund_non_keeper_pre_deadline_is_rejected() {
 fn refund_non_keeper_post_deadline_succeeds() {
     let mut deps = setup();
     register_default(&mut deps, 23).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let mut env = mock_env();
     env.block.time = env.block.time.plus_seconds(REFUND_DEADLINE + 1);
     let stranger = deps.api.addr_make("stranger");
@@ -660,13 +688,14 @@ fn refund_non_keeper_post_deadline_succeeds() {
         env,
         message_info(&stranger, &[]),
         ExecuteMsg::RefundFailedLaunch {
+            evm_authority: evm_authority.clone(),
             internal_id: 23,
             reason: "stuck_too_long".to_string(),
         },
     )
     .unwrap();
     assert_eq!(
-        LAUNCHES.load(deps.as_ref().storage, 23).unwrap().status,
+        LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 23)).unwrap().status,
         LaunchStatus::Refunded
     );
 }
@@ -732,7 +761,7 @@ fn reply_decodes_token_pair_response_and_patches_erc20() {
     register_default(&mut deps, 99).unwrap();
     let erc20 = "0x1234567890123456789012345678901234567890";
     simulate_create_token_pair_reply(&mut deps, 99, erc20);
-    let stored = LAUNCHES.load(deps.as_ref().storage, 99).unwrap();
+    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 99)).unwrap();
     assert_eq!(stored.erc20_address.as_deref(), Some(erc20));
 }
 
@@ -747,6 +776,7 @@ fn list_launches_query_returns_them_ordered() {
             deps.as_ref(),
             mock_env(),
             QueryMsg::Launches {
+                evm_authority: deps.api.addr_make("evm_authority").to_string(),
                 start_after: None,
                 limit: None,
             },
@@ -756,6 +786,200 @@ fn list_launches_query_returns_them_ordered() {
     .unwrap();
     let ids: Vec<u64> = resp.launches.iter().map(|l| l.internal_id).collect();
     assert_eq!(ids, vec![1, 3, 5]);
+}
+
+// --------------------------------------------------------------------------
+// C-H1: keeper-gate + per-authority id namespace
+// --------------------------------------------------------------------------
+
+#[test]
+fn register_launch_rejects_non_keeper() {
+    // The squat/DoS fix: only the keeper can register a launch now.
+    let mut deps = setup();
+    let stranger = deps.api.addr_make("stranger");
+    let info = message_info(&stranger, &fee_funds());
+    let msg = ExecuteMsg::RegisterLaunch {
+        internal_id: 1,
+        evm_authority: deps.api.addr_make("evm_authority").to_string(),
+        total_supply: Uint128::new(1_000_000),
+        evm_supply: Uint128::new(800_000),
+        pair_denom: PAIR_DENOM.to_string(),
+        seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
+        seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
+        create_sink_payload: Binary::default(),
+        choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
+    };
+    let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    assert!(matches!(err, ContractError::NotKeeper {}));
+}
+
+#[test]
+fn two_authorities_share_internal_id_without_record_collision() {
+    // Launches are keyed by (evm_authority, internal_id): the same id under two
+    // distinct authorities yields two independent records (no overwrite/hijack).
+    let mut deps = setup();
+    let keeper = deps.api.addr_make("keeper");
+    let auth_a = deps.api.addr_make("authority_a").to_string();
+    let auth_b = deps.api.addr_make("authority_b").to_string();
+    let seeder_factory = deps.api.addr_make("seeder_factory").to_string();
+    let seeder_addr = deps.api.addr_make("seeder_addr").to_string();
+
+    for auth in [&auth_a, &auth_b] {
+        let msg = ExecuteMsg::RegisterLaunch {
+            internal_id: 0,
+            evm_authority: auth.clone(),
+            total_supply: Uint128::new(1_000_000),
+            evm_supply: Uint128::new(800_000),
+            pair_denom: PAIR_DENOM.to_string(),
+            seeder_factory: seeder_factory.clone(),
+            seeder_addr: seeder_addr.clone(),
+            create_sink_payload: Binary::from(br#"{"create_sink":{}}"#.to_vec()),
+            choice_factory: None,
+            salt_suffix: None,
+            clmm_pool_auth: None,
+        };
+        execute(deps.as_mut(), mock_env(), message_info(&keeper, &fee_funds()), msg).unwrap();
+    }
+
+    let rec_a = LAUNCHES
+        .load(deps.as_ref().storage, (&deps.api.addr_make("authority_a"), 0))
+        .unwrap();
+    let rec_b = LAUNCHES
+        .load(deps.as_ref().storage, (&deps.api.addr_make("authority_b"), 0))
+        .unwrap();
+    assert_eq!(rec_a.evm_authority.to_string(), auth_a);
+    assert_eq!(rec_b.evm_authority.to_string(), auth_b);
+}
+
+// --------------------------------------------------------------------------
+// C-M2: RenounceDenomAdmin
+// --------------------------------------------------------------------------
+
+#[test]
+fn renounce_denom_admin_after_delivered_emits_change_admin() {
+    let mut deps = setup();
+    register_default(&mut deps, 5).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+    deps.querier.register_wasm_contract(&seeder);
+    let keeper = deps.api.addr_make("keeper");
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
+            internal_id: 5,
+            leftover: Uint128::zero(),
+        },
+    )
+    .unwrap();
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::RenounceDenomAdmin {
+            evm_authority: evm_authority.clone(),
+            internal_id: 5,
+        },
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 1);
+    #[allow(deprecated)]
+    match &res.messages[0].msg {
+        CosmosMsg::Stargate { type_url, value } => {
+            assert_eq!(type_url, MsgChangeAdmin::TYPE_URL);
+            let decoded = MsgChangeAdmin::decode(value.as_slice()).unwrap();
+            assert_eq!(decoded.denom, expected_denom(5));
+            assert_eq!(decoded.new_admin, "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49");
+        }
+        other => panic!("expected Stargate MsgChangeAdmin, got {:?}", other),
+    }
+
+    let rec = LAUNCHES
+        .load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 5))
+        .unwrap();
+    assert!(rec.admin_renounced);
+
+    // Second call is rejected.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::RenounceDenomAdmin {
+            evm_authority,
+            internal_id: 5,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::DenomAdminAlreadyRenounced { .. }));
+}
+
+#[test]
+fn renounce_denom_admin_rejected_before_delivered() {
+    let mut deps = setup();
+    register_default(&mut deps, 6).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let keeper = deps.api.addr_make("keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::RenounceDenomAdmin {
+            evm_authority,
+            internal_id: 6,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::InvalidLaunchStatus { .. }));
+}
+
+#[test]
+fn renounce_denom_admin_rejects_unauthorized() {
+    let mut deps = setup();
+    register_default(&mut deps, 8).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let stranger = deps.api.addr_make("stranger");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::RenounceDenomAdmin {
+            evm_authority,
+            internal_id: 8,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+}
+
+// --------------------------------------------------------------------------
+// C-M3: DeliverToSeeder refuses a ghost seeder address
+// --------------------------------------------------------------------------
+
+#[test]
+fn deliver_to_seeder_rejects_ghost_seeder_addr() {
+    let mut deps = setup();
+    register_default(&mut deps, 30).unwrap();
+    // seeder_addr was NOT registered as a contract → looks like an EOA/ghost.
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let keeper = deps.api.addr_make("keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::DeliverToSeeder {
+            evm_authority,
+            internal_id: 30,
+            leftover: Uint128::zero(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::SeederAddrNotAContract { .. }));
 }
 
 // ---------- helpers ----------
@@ -775,10 +999,20 @@ fn simulate_create_token_pair_reply(deps: &mut Deps, internal_id: u64, erc20_add
         Binary::new(buf)
     };
 
+    // The contract sets the reply payload to a JSON `ReplyPayload`
+    // `{evm_authority, internal_id}` (finding C-H1). Mirror that here.
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let payload = Binary::from(
+        format!(
+            r#"{{"evm_authority":"{}","internal_id":{}}}"#,
+            evm_authority, internal_id
+        )
+        .into_bytes(),
+    );
     #[allow(deprecated)]
     let reply_msg = Reply {
         id: 1,
-        payload: Binary::from(internal_id.to_be_bytes().to_vec()),
+        payload,
         gas_used: 0,
         result: SubMsgResult::Ok(SubMsgResponse {
             events: vec![],
@@ -800,7 +1034,7 @@ fn register_full(
     salt_suffix: Option<String>,
     clmm_pool_auth: Option<crate::msg::ClmmPoolAuth>,
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
-    let caller = deps.api.addr_make("caller");
+    let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
@@ -833,7 +1067,7 @@ fn register_launch_salt_suffix_changes_denom() {
         42,
         "a1b2c3"
     );
-    let stored = LAUNCHES.load(deps.as_ref().storage, 42).unwrap();
+    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 42)).unwrap();
     assert_eq!(stored.denom, expected);
 
     // And the CreateDenom subdenom carries the suffix.

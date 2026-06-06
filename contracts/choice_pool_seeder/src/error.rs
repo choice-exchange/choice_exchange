@@ -51,6 +51,15 @@ pub enum ContractError {
     #[error("Clmm Settle takes no funds; attach nothing (CLMM pool creation is free)")]
     UnexpectedFundsForClmmSettle {},
 
+    #[error(
+        "Seed ratio produces an out-of-range CLMM init sqrt price {sqrt_price}; valid range is [{min}, {max_exclusive}). Re-scale the seed amounts, pick a different fee tier, or Refund."
+    )]
+    SeedRatioOutOfRange {
+        sqrt_price: String,
+        min: String,
+        max_exclusive: String,
+    },
+
     #[error("Locker has no admin; beneficiary is immutable")]
     LockerNoAdmin {},
 
