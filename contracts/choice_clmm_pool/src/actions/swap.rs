@@ -529,6 +529,10 @@ fn apply_swap(
         )
         .add_attribute("fee_ppm", fee_pips.to_string())
         .add_attribute("zero_for_one", zero_for_one.to_string())
+        // The output asset's key (bank denom or CW20 address). Mirrors the legacy
+        // pair's `ask_asset` so downstream consumers (e.g. the dex aggregator) can
+        // recover the swap's output `AssetInfo` from the event without a config query.
+        .add_attribute("ask_asset", out_token.key())
         .add_attribute("final_price", result.sqrt_price_after.to_string())
         .add_attribute("final_tick", result.tick_after.to_string()))
 }

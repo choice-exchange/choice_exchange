@@ -40,6 +40,9 @@ choice-vault = { path = "../../contracts/choice_vault" }
 choice-zap-lp = { path = "../../contracts/choice_zap_lp" }
 # Test-only flash-loan borrower (FlashCallback round-trip integration test).
 flash-borrower-mock = { path = "../../contracts/flash_borrower_mock" }
+# Test-only adversarial CW20 (fee-on-transfer / revert / reentrant) for the
+# malicious-token blast-radius integration test.
+malicious-cw20 = { path = "../../contracts/malicious_cw20" }
 # Types only — the WASM artifact for the on-chain CW20 lives in
 # `contracts/cw20_base_build/` and is produced by `./build_release.sh`.
 cw20-base = { version = "2.0.0", features = ["library"] }
@@ -62,6 +65,16 @@ harness = true
 [[test]]
 name = "manager_solvency_fuzz"
 path = "../../tests/manager_solvency_fuzz.rs"
+harness = true
+
+[[test]]
+name = "manager_nft_attribution"
+path = "../../tests/manager_nft_attribution.rs"
+harness = true
+
+[[test]]
+name = "malicious_cw20_blast_radius"
+path = "../../tests/malicious_cw20_blast_radius.rs"
 harness = true
 
 [[test]]
