@@ -177,7 +177,13 @@ fn get_next_sqrt_price_from_amount1_rounding_down(
     if add {
         // Adding token1: price goes UP by amount/L (rounded down).
         // quotient = (amount << 96) / L   (exact if fits)
-        let shifted = amount.checked_shl(RESOLUTION);
+        //
+        // `amount << 96 == amount * Q96`, but `checked_shl(96)` only errors when
+        // the SHIFT (the constant 96) is >= 256 — it never detects a *value*
+        // overflow, it silently wraps. `checked_mul(Q96)` detects the value
+        // overflow and lets us fall back to mul_div (parity with the token0
+        // path). Without this, a large `amount` would wrap and mis-price.
+        let shifted = amount.checked_mul(Q96);
         let quotient = if let Ok(sh) = shifted {
             sh / liquidity_u256
         } else {
@@ -189,7 +195,9 @@ fn get_next_sqrt_price_from_amount1_rounding_down(
             .map_err(|_| StdError::generic_err("sqrt price add overflow"))
     } else {
         // Removing token1: price goes DOWN by ceil(amount / L).
-        let shifted = amount.checked_shl(RESOLUTION);
+        // See the `add` branch: use checked_mul (not checked_shl) so the
+        // overflow fallback is actually reachable and never wraps.
+        let shifted = amount.checked_mul(Q96);
         let quotient = if let Ok(sh) = shifted {
             div_round_up(sh, liquidity_u256)?
         } else {
@@ -346,5 +354,80 @@ mod tests {
         // that the token0 implied by new_price is <= the input amount.
         let implied_in = get_amount0_delta(new_price, price, l, true).unwrap();
         assert!(implied_in <= amount);
+    }
+
+    // ---- error guards ----
+
+    #[test]
+    fn amount0_delta_rejects_zero_price() {
+        assert!(get_amount0_delta(Uint256::zero(), q96_val(), 1, true).is_err());
+        assert!(get_amount0_delta(q96_val(), Uint256::zero(), 1, true).is_err());
+    }
+
+    #[test]
+    fn next_from_output_zero_price_and_zero_liquidity_error() {
+        assert!(
+            get_next_sqrt_price_from_output(Uint256::zero(), 1, Uint256::from(1u128), true)
+                .is_err()
+        );
+        assert!(get_next_sqrt_price_from_output(q96_val(), 0, Uint256::from(1u128), true).is_err());
+    }
+
+    #[test]
+    fn output_price_up_insufficient_liquidity_errors() {
+        // Removing token0 with tiny L but a huge output drives the price up past
+        // what the range can support -> the "insufficient liquidity" guard.
+        let price = q96_val();
+        let huge = price; // product = price*price >> (L<<96) for L=1
+        assert!(get_next_sqrt_price_from_output(price, 1, huge, false).is_err());
+    }
+
+    // ---- overflow-safe fallback paths (only reached with very large inputs) ----
+
+    #[test]
+    fn amount0_add_uses_overflow_fallback() {
+        // amount * sqrt_price overflows U256 -> the checked_mul branch fails and
+        // the rearranged ceil(L*Q96 / (L*Q96/P + amount)) fallback runs. This is
+        // the REACHABLE overflow fallback (amount0 path uses checked_mul, which
+        // genuinely detects value overflow).
+        let price = Uint256::from(1u128) << 160;
+        let amount = Uint256::from(1u128) << 200;
+        let next = get_next_sqrt_price_from_input(price, 1_000_000u128, amount, true).unwrap();
+        assert!(!next.is_zero());
+        assert!(next <= price, "zero_for_one: price does not rise");
+    }
+
+    // F-1 fix regression tests: the token1 paths now use `checked_mul(Q96)`
+    // (not `checked_shl(96)`), so the `mul_div` overflow fallback is REACHABLE
+    // and correct when `amount * Q96` exceeds 256 bits. (Previously checked_shl
+    // silently wrapped — see docs/native_test_findings.md F-1.) Expected values
+    // are hand-computed at powers of two: quotient = amount * 2^96 / L.
+
+    #[test]
+    fn amount1_add_overflow_fallback_is_correct() {
+        // amount * Q96 = 2^200 * 2^96 = 2^296 overflows U256 -> mul_div fallback.
+        // quotient = 2^296 / 2^120 = 2^176; price goes UP by exactly that.
+        let price = Uint256::from(1u128) << 96;
+        let amount = Uint256::from(1u128) << 200;
+        let l: u128 = 1u128 << 120;
+        let next = get_next_sqrt_price_from_input(price, l, amount, false).unwrap();
+        assert_eq!(
+            next,
+            (Uint256::from(1u128) << 96) + (Uint256::from(1u128) << 176)
+        );
+    }
+
+    #[test]
+    fn amount1_sub_overflow_fallback_is_correct() {
+        // Same overflow on the output (sub) path: quotient = 2^176 (exact, so the
+        // round-up is a no-op); price goes DOWN by exactly that.
+        let price = Uint256::from(1u128) << 180;
+        let amount = Uint256::from(1u128) << 200;
+        let l: u128 = 1u128 << 120;
+        let next = get_next_sqrt_price_from_output(price, l, amount, true).unwrap();
+        assert_eq!(
+            next,
+            (Uint256::from(1u128) << 180) - (Uint256::from(1u128) << 176)
+        );
     }
 }

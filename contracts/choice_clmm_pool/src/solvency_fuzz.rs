@@ -207,6 +207,10 @@ mod solvency_fuzz {
         (deps, factory)
     }
 
+    // `x % n == 0` is kept over `.is_multiple_of(n)` deliberately: this fuzzer
+    // is host-only test code, but we don't want to impose a Rust-version floor
+    // (is_multiple_of is recent-stable) on running the suite.
+    #[allow(clippy::manual_is_multiple_of)]
     fn run(seed: u64, steps: usize) -> Counts {
         let (mut deps, factory) = setup();
 

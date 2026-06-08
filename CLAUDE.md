@@ -85,3 +85,8 @@ artifacts/                # Built WASM binaries
 - **Integration tests**: `injective_test_tube` blockchain simulator in `tests/integration.rs`
 - **Visualization tests**: `tests/visualization.rs` generates SVG liquidity curve plots
 - Test helpers: `TestEnv` struct in integration tests handles app setup, account creation, contract deployment
+- **Native test tooling** (coverage / mutation / fuzz): see [docs/native_test_tooling.md](docs/native_test_tooling.md).
+  These run on the **host target only** (`cargo test`) and must **never** invoke the
+  wasm optimizer (`./build_release.sh` / `cosmwasm/optimizer` / `wasm-opt`).
+  `cargo-llvm-cov`, `cargo-mutants` config in [mutants.toml](mutants.toml), and
+  `cargo-fuzz` targets under `packages/choice_clmm_math/fuzz/`.

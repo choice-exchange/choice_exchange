@@ -101,3 +101,79 @@ pub fn least_significant_bit(number: Uint256) -> StdResult<u8> {
 
     Ok(r)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bit(k: u32) -> Uint256 {
+        Uint256::one() << k
+    }
+
+    #[test]
+    fn zero_is_an_error_for_both() {
+        assert!(most_significant_bit(Uint256::zero()).is_err());
+        assert!(least_significant_bit(Uint256::zero()).is_err());
+    }
+
+    /// Exhaustive single-bit check across all 256 positions. For a value with
+    /// exactly one set bit, MSB == LSB == that position. This exercises every
+    /// decision level (128/64/32/16/8/4/2/1) of both binary searches in both
+    /// directions, pinning the exact return value (kills operator/shift mutants).
+    #[test]
+    fn single_bit_msb_equals_lsb_equals_position() {
+        for k in 0u32..256 {
+            let n = bit(k);
+            assert_eq!(most_significant_bit(n).unwrap(), k as u8, "MSB(1<<{k})");
+            assert_eq!(least_significant_bit(n).unwrap(), k as u8, "LSB(1<<{k})");
+        }
+    }
+
+    /// With a low bit and the top bit set, LSB tracks the low bit and MSB the
+    /// top bit — proving LSB ignores higher bits and MSB ignores lower bits.
+    #[test]
+    fn lsb_ignores_high_bits_msb_ignores_low_bits() {
+        for k in 0u32..255 {
+            let n = bit(k) + bit(255); // disjoint bits, so + == bitwise-or
+            assert_eq!(
+                least_significant_bit(n).unwrap(),
+                k as u8,
+                "LSB low bit {k}"
+            );
+            assert_eq!(
+                most_significant_bit(n).unwrap(),
+                255u8,
+                "MSB top bit, low {k}"
+            );
+        }
+        for k in 1u32..256 {
+            let n = bit(0) + bit(k);
+            assert_eq!(least_significant_bit(n).unwrap(), 0u8, "LSB bit0, high {k}");
+            assert_eq!(
+                most_significant_bit(n).unwrap(),
+                k as u8,
+                "MSB high bit {k}"
+            );
+        }
+    }
+
+    /// Spot-check small literals and the all-ones value against hand values.
+    #[test]
+    fn known_small_values() {
+        assert_eq!(most_significant_bit(Uint256::from(1u8)).unwrap(), 0);
+        assert_eq!(most_significant_bit(Uint256::from(2u8)).unwrap(), 1);
+        assert_eq!(most_significant_bit(Uint256::from(3u8)).unwrap(), 1);
+        assert_eq!(most_significant_bit(Uint256::from(255u8)).unwrap(), 7);
+        assert_eq!(most_significant_bit(Uint256::from(256u32)).unwrap(), 8);
+
+        assert_eq!(least_significant_bit(Uint256::from(1u8)).unwrap(), 0);
+        assert_eq!(least_significant_bit(Uint256::from(2u8)).unwrap(), 1);
+        assert_eq!(least_significant_bit(Uint256::from(3u8)).unwrap(), 0);
+        assert_eq!(least_significant_bit(Uint256::from(6u8)).unwrap(), 1);
+        assert_eq!(least_significant_bit(Uint256::from(256u32)).unwrap(), 8);
+
+        // MAX (all 256 bits set): MSB=255, LSB=0.
+        assert_eq!(most_significant_bit(Uint256::MAX).unwrap(), 255);
+        assert_eq!(least_significant_bit(Uint256::MAX).unwrap(), 0);
+    }
+}

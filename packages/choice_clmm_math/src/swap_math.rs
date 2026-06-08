@@ -397,4 +397,82 @@ mod tests {
         let res = compute_swap_step_exact_out(p, target, 0, Uint256::from(100u128), 3000, true);
         assert!(res.is_err());
     }
+
+    #[test]
+    fn rejects_zero_sqrt_price() {
+        let p = q96();
+        assert!(
+            compute_swap_step(Uint256::zero(), p, 1, Uint256::from(1u128), 3000, true).is_err()
+        );
+        assert!(
+            compute_swap_step(p, Uint256::zero(), 1, Uint256::from(1u128), 3000, true).is_err()
+        );
+    }
+
+    // ---- zero_for_one (price decreasing) direction, exact-in ----
+
+    #[test]
+    fn zfo_full_step_reaches_lower_target() {
+        let current = q96() * Uint256::from(4u128);
+        let target = q96();
+        let l = 10u128.pow(18);
+        let huge = Uint256::from(10u128).pow(30);
+        let r = compute_swap_step(current, target, l, huge, 3000, true).unwrap();
+        assert_eq!(r.sqrt_ratio_next_x96, target, "full step lands on target");
+        assert!(r.amount_in > Uint256::zero() && r.amount_out > Uint256::zero());
+        assert!(r.amount_in + r.fee_amount <= huge, "never over-charge");
+    }
+
+    #[test]
+    fn zfo_partial_step_stops_before_target() {
+        let current = q96() * Uint256::from(4u128);
+        let target = q96();
+        let l = 10u128.pow(18);
+        let small = Uint256::from(1_000u128);
+        let r = compute_swap_step(current, target, l, small, 3000, true).unwrap();
+        assert_ne!(
+            r.sqrt_ratio_next_x96, target,
+            "partial step does not reach target"
+        );
+        assert!(r.sqrt_ratio_next_x96 > target && r.sqrt_ratio_next_x96 <= current);
+        assert_eq!(r.amount_in + r.fee_amount, small, "in + fee == remaining");
+    }
+
+    // ---- exact-out direction guard + zero_for_one ----
+
+    #[test]
+    fn exact_out_rejects_target_on_wrong_side() {
+        // zero_for_one claims the price drops, but target is ABOVE current.
+        let current = q96();
+        let target = q96() * Uint256::from(2u128);
+        assert!(compute_swap_step_exact_out(
+            current,
+            target,
+            1_000_000,
+            Uint256::from(10u128),
+            3000,
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn exact_out_zfo_full_and_partial() {
+        let current = q96() * Uint256::from(4u128);
+        let target = q96();
+        let l = 10u128.pow(18);
+
+        // Full: huge output budget consumes the whole range, lands on target.
+        let huge_out = Uint256::from(10u128).pow(30);
+        let rf = compute_swap_step_exact_out(current, target, l, huge_out, 3000, true).unwrap();
+        assert_eq!(rf.sqrt_ratio_next_x96, target);
+        assert!(rf.amount_in > Uint256::zero());
+
+        // Partial: small output budget stops before target, delivers exactly it.
+        let want = Uint256::from(1_000u128);
+        let rp = compute_swap_step_exact_out(current, target, l, want, 3000, true).unwrap();
+        assert_ne!(rp.sqrt_ratio_next_x96, target);
+        assert!(rp.amount_out <= want);
+        assert!(rp.sqrt_ratio_next_x96 > target && rp.sqrt_ratio_next_x96 <= current);
+    }
 }

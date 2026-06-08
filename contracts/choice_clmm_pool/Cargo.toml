@@ -33,3 +33,11 @@ serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 
 choice-clmm-math = { workspace = true }
 choice-clmm-common = { workspace = true }
+
+[dev-dependencies]
+# Native (host-target) test builds only. ed25519-zebra 4.1.0 (forced by malicious_cw20)
+# gates its `batch` module behind the `alloc` feature, which `default`/`std` no longer
+# imply; cosmwasm-crypto 2.2.2 needs it. Without this, `cargo test`/`llvm-cov`/`mutants`
+# on the host target fail to compile. Dev-dep only -> the wasm cdylib build is untouched.
+# Same workaround family as malicious_cw20 / cw20_base_build. Do NOT remove.
+ed25519-zebra = { version = "4.1.0", features = ["alloc"] }

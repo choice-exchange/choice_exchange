@@ -22,3 +22,5 @@ mainnet_deploy
 .claude/
 
 deploy/
+# cargo-mutants output
+mutants.out*/
