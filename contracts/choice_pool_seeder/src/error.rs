@@ -60,11 +60,14 @@ pub enum ContractError {
         max_exclusive: String,
     },
 
-    #[error("Locker has no admin; beneficiary is immutable")]
+    #[error("Locker has no admin; treasury leg is immutable")]
     LockerNoAdmin {},
 
     #[error("Locker owns no position NFTs to collect fees on")]
     LockerNoPositions {},
+
+    #[error("creator_fee_share_bps {value} exceeds max {max}")]
+    LockerCreatorFeeShareTooHigh { value: u16, max: u16 },
 
     #[error("token_denom and pair_denom must differ; got `{denom}` for both")]
     SameDenom { denom: String },

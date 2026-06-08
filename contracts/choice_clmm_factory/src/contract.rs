@@ -1,10 +1,10 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, Addr, Api, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply, Response,
-    StdError, StdResult, SubMsg, Uint256, WasmMsg,
+    from_json, to_json_binary, Addr, Api, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply,
+    Response, StdError, StdResult, SubMsg, Uint256, WasmMsg,
 };
-use cw_storage_plus::{Bound, Item};
+use cw_storage_plus::Bound;
 use sha2::{Digest, Sha256};
 
 use crate::state::{Config, PoolCreationAuth, CONFIG, FEE_TIERS, POOLS, POOL_CREATION_AUTH};
@@ -19,6 +19,11 @@ use choice_clmm_math::tick_math::{max_sqrt_ratio, MIN_SQRT_RATIO};
 
 const CONTRACT_NAME: &str = "crates.io:choice-clmm-factory";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Upper bound on a fee tier's `tick_spacing` (matches Uniswap v3's maximum).
+/// Keeps the pool's i32 tick-bitmap / swap arithmetic from overflowing and the
+/// `tick_spacing as i32` cast from wrapping negative. See `EnableFeeAmount`.
+const MAX_TICK_SPACING: u32 = 16384;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -82,8 +87,19 @@ pub fn execute(
             if fee == 0 || fee >= 1_000_000 {
                 return Err(StdError::generic_err("Fee must be > 0 and < 1_000_000"));
             }
-            if tick_spacing == 0 {
-                return Err(StdError::generic_err("Tick spacing must be > 0"));
+            // Bound tick_spacing on BOTH ends. The upper bound (16384, matching
+            // Uniswap v3's maximum) keeps every `tick * tick_spacing` and
+            // `word_pos * 256 * tick_spacing` computation in the pool's tick
+            // bitmap / swap loop comfortably inside i32, and crucially prevents
+            // the `config.tick_spacing as i32` cast from wrapping negative for a
+            // u32 above i32::MAX — either of which would corrupt tick traversal
+            // or brick swaps for the whole fee tier. Admin-gated, so this is a
+            // governance footgun guard rather than an attacker-reachable path.
+            if tick_spacing == 0 || tick_spacing > MAX_TICK_SPACING {
+                return Err(StdError::generic_err(format!(
+                    "Tick spacing must be in 1..={}",
+                    MAX_TICK_SPACING
+                )));
             }
             // Reject silent overwrite: existing pools captured `tick_spacing`
             // at instantiate time so they survive unchanged, but indexers and
@@ -319,9 +335,13 @@ fn execute_create_pool(
         salt,
     };
 
-    let sub_msg = SubMsg::reply_on_success(wasm_msg, 1);
-
-    TMP_POOL_INFO.save(deps.storage, &(key0.clone(), key1.clone(), fee))?;
+    // Carry the registry key in the SubMsg payload rather than a global
+    // `Item`. The payload is bound to THIS submessage and delivered verbatim to
+    // `reply`, so it cannot be cross-contaminated by a concurrent/abandoned
+    // create the way a shared `Item` could if the reply mode ever changed away
+    // from `reply_on_success`. Self-documenting and race-proof by construction.
+    let sub_msg = SubMsg::reply_on_success(wasm_msg, 1)
+        .with_payload(to_json_binary(&(key0.clone(), key1.clone(), fee))?);
 
     Ok(Response::new()
         .add_submessage(sub_msg)
@@ -485,11 +505,14 @@ fn execute_cancel_creation_auth(
         .add_attribute("fee", fee.to_string()))
 }
 
-pub const TMP_POOL_INFO: Item<(String, String, u32)> = Item::new("tmp_pool_info");
-
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> StdResult<Response> {
     if msg.id == 1 {
+        // The registry key travels in the submessage payload (see CreatePool),
+        // not in shared storage, so it is impossible to associate this reply
+        // with the wrong pending pool.
+        let (token0, token1, fee): (String, String, u32) = from_json(&msg.payload)?;
+
         let res = msg.result.into_result().map_err(StdError::generic_err)?;
 
         let address_str = res
@@ -502,10 +525,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> StdResult<Response> {
 
         let pool_address = deps.api.addr_validate(address_str)?;
 
-        let (token0, token1, fee) = TMP_POOL_INFO.load(deps.storage)?;
-
         POOLS.save(deps.storage, (&token0, &token1, fee), &pool_address)?;
-        TMP_POOL_INFO.remove(deps.storage);
 
         Ok(Response::new().add_attribute("pool_address", pool_address))
     } else {

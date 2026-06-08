@@ -65,7 +65,9 @@ pub fn update_oracle_and_fee(
         let term2 = current_price
             .checked_mul(weight_new)
             .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle price overflow"))?;
-        oracle.price_ema_x96 = (term1 + term2)
+        oracle.price_ema_x96 = term1
+            .checked_add(term2)
+            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle EMA blend overflow"))?
             .checked_div(total_weight)
             .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle div zero"))?;
     }

@@ -541,6 +541,12 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let seeder = deps.api.addr_make("seeder_addr").to_string();
     deps.querier.register_wasm_contract(&seeder);
+    // DeliverToSeeder now burns the authority's ACTUAL on-chain balance of the
+    // launch denom (capped at evm_supply), not the relayed `leftover`. Seed the
+    // authority with the unsold supply so the burn leg is emitted.
+    let leftover_amt = Uint128::new(50_000_000u128) * Uint128::new(10u128.pow(18));
+    deps.querier
+        .with_balance(&[(&evm_authority, coins(leftover_amt.u128(), &expected_denom(9)))]);
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
         deps.as_mut(),
@@ -549,7 +555,7 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
         ExecuteMsg::DeliverToSeeder {
             evm_authority: evm_authority.clone(),
             internal_id: 9,
-            leftover: Uint128::new(50_000_000u128) * Uint128::new(10u128.pow(18)),
+            leftover: leftover_amt,
         },
     )
     .unwrap();
@@ -741,17 +747,35 @@ fn refund_non_keeper_pre_deadline_is_rejected() {
 }
 
 #[test]
-fn refund_non_keeper_post_deadline_succeeds() {
+fn refund_post_deadline_admin_succeeds_stranger_rejected() {
     let mut deps = setup();
     register_default(&mut deps, 23).unwrap();
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let mut env = mock_env();
     env.block.time = env.block.time.plus_seconds(REFUND_DEADLINE + 1);
+
+    // A random caller is rejected even after the deadline — the post-deadline
+    // path is NOT permissionless (anti-griefing); only keeper or admin.
     let stranger = deps.api.addr_make("stranger");
+    let err = execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::RefundFailedLaunch {
+            evm_authority: evm_authority.clone(),
+            internal_id: 23,
+            reason: "stuck_too_long".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    // The admin (consumer dApp timelock) can clean it up post-deadline.
+    let admin = deps.api.addr_make("admin");
     execute(
         deps.as_mut(),
         env,
-        message_info(&stranger, &[]),
+        message_info(&admin, &[]),
         ExecuteMsg::RefundFailedLaunch {
             evm_authority: evm_authority.clone(),
             internal_id: 23,

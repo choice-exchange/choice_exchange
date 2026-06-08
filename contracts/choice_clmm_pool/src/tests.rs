@@ -886,7 +886,7 @@ mod tests {
         // Use MaxUint128 to request all owed
         let max_collect = Uint128::new(u128::MAX);
         let collect_msg = ExecuteMsg::Collect {
-            recipient: lp_addr.to_string(),
+            recipient: deps.api.addr_make(lp_addr).to_string(),
             lower_tick: -200,
             upper_tick: 200,
             amount0_requested: max_collect,
@@ -1612,7 +1612,7 @@ mod tests {
             mock_env(),
             message_info(&lp, &[]),
             ExecuteMsg::Collect {
-                recipient: "lp".to_string(),
+                recipient: lp.to_string(),
                 lower_tick: -200,
                 upper_tick: 200,
                 amount0_requested: Uint128::MAX,
@@ -2753,9 +2753,11 @@ mod tests {
     }
 
     #[test]
-    fn flash_fee_routes_to_protocol_when_no_liquidity() {
-        // Fresh pool with NO minted liquidity (L = 0). The LP fee share has no
-        // recipient, so the whole flash fee must land in the protocol bucket.
+    fn flash_rejected_when_no_liquidity() {
+        // Fresh pool with NO minted liquidity (L = 0). Flash must be rejected
+        // (matching Uniswap v3's `require(L > 0)`) so the LP fee share is never
+        // silently diverted to the protocol bucket. The pool holds idle balance
+        // but no in-range liquidity.
         let mut deps = mock_dependencies();
         let factory = deps.api.addr_make("factory");
         let msg = InstantiateMsg {
@@ -2775,7 +2777,7 @@ mod tests {
 
         set_pool_balance(&mut deps, 5_000_000, 5_000_000);
         let borrower = deps.api.addr_make("borrower");
-        execute(
+        let err = execute(
             deps.as_mut(),
             mock_env(),
             message_info(&borrower, &[]),
@@ -2786,19 +2788,8 @@ mod tests {
                 data: Binary::default(),
             },
         )
-        .unwrap();
-        set_pool_balance(&mut deps, 5_003_000, 5_000_000);
-        contract_reply(deps.as_mut(), mock_env(), flash_reply_msg()).unwrap();
-
-        // Entire fee0 (3000) routed to protocol; LP growth untouched.
-        let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
-        let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
-        assert_eq!(fees.protocol_fees_0.u128(), 3000);
-        assert!(crate::state::FEE_GROWTH_GLOBAL_0
-            .may_load(&deps.storage)
-            .unwrap()
-            .unwrap_or_default()
-            .is_zero());
+        .unwrap_err();
+        assert!(matches!(err, ContractError::FlashWithoutLiquidity {}));
     }
 
     // ----------------------------------------------------------------------

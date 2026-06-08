@@ -9,7 +9,7 @@ mod tests {
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
     };
     use cosmwasm_std::{
-        attr, from_json, Addr, Binary, CosmosMsg, Event, OwnedDeps, Reply, SubMsgResponse,
+        attr, from_json, Addr, CosmosMsg, Event, OwnedDeps, Reply, SubMsgResponse,
         SubMsgResult, Uint256, WasmMsg,
     };
     use sha2::{Digest, Sha256};
@@ -172,14 +172,10 @@ mod tests {
     fn test_create_pool_reply() {
         let mut deps = setup_factory();
 
-        // 1. Setup State manually (simulate what execute_create_pool does)
-        // Token0: ATOM, Token1: OSMO, Fee: 500
-        crate::contract::TMP_POOL_INFO
-            .save(
-                &mut deps.storage,
-                &("ATOM".to_string(), "OSMO".to_string(), 500),
-            )
-            .unwrap();
+        // 1. The registry key now rides in the SubMsg payload (simulate what
+        // execute_create_pool sets). Token0: ATOM, Token1: OSMO, Fee: 500
+        let payload =
+            cosmwasm_std::to_json_binary(&("ATOM".to_string(), "OSMO".to_string(), 500u32)).unwrap();
 
         // 2. Mock the Reply from Instantiate2
         let pool_addr = deps.api.addr_make("osmo1pooladdress");
@@ -193,8 +189,8 @@ mod tests {
                 data: None,            // Still needed even if deprecated
                 msg_responses: vec![], // FIX: New field in 2.0
             }),
-            payload: Binary::default(), // FIX: New field in 2.0
-            gas_used: 0,                // FIX: New field in 2.0
+            payload, // registry key carried by the submessage
+            gas_used: 0,
         };
 
         let res = reply(deps.as_mut(), mock_env(), reply_msg).unwrap();
@@ -208,9 +204,7 @@ mod tests {
         // 4. Verify Registry Update
         let stored_addr = POOLS.load(&deps.storage, ("ATOM", "OSMO", 500)).unwrap();
         assert_eq!(stored_addr, Addr::unchecked(pool_addr));
-
-        // 5. Verify Temp storage cleanup
-        assert!(crate::contract::TMP_POOL_INFO.load(&deps.storage).is_err());
+        // No temp storage to clean up — the key rode in the SubMsg payload.
     }
 
     #[test]

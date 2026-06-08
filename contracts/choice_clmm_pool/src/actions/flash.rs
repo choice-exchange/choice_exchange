@@ -74,6 +74,17 @@ pub fn execute_flash(
     let config = POOL_CONFIG.load(deps.storage)?;
     let slot0 = POOL_STATE.load(deps.storage)?;
 
+    // Require active in-range liquidity, matching Uniswap v3's `require(L > 0)`.
+    // The flash fee's LP share is distributed via `fee_growth_global`, which is
+    // per-unit-liquidity and undefined when L == 0; without this guard a flash
+    // taken while all positions are out of range would silently divert the
+    // entire fee (LP share included) to the protocol accumulator instead of to
+    // LPs. Rejecting keeps LP-fee semantics clean. (`accrue_flash_fee` still
+    // defends the L == 0 case so no fee is ever lost or divides by zero.)
+    if slot0.liquidity.is_zero() {
+        return Err(ContractError::FlashWithoutLiquidity {});
+    }
+
     // Flash does not move the price, so the read-only current fee is correct.
     let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
     let fee0 = flash_fee(amount0, fee_pips)?;

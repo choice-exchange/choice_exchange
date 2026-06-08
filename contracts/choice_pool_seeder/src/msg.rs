@@ -155,17 +155,28 @@ pub enum PoolKind {
 }
 
 /// Locker role config. The locker owns a CLMM position NFT and can only
-/// collect its fees — never withdraw principal.
+/// collect its fees — never withdraw principal. Collected fees are split
+/// between a `treasury` leg and a `creator` leg per `creator_fee_share_bps`,
+/// mirroring the launch's bonding-curve fee split.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct LockerInit {
     /// The `choice_clmm_manager` the held position NFT lives in. `CollectFees`
     /// calls `Collect` here; the locker must be the NFT owner.
     pub manager: String,
-    /// Where collected fees are routed (`manager.Collect { recipient }`). Fees
-    /// flow pool → manager → beneficiary and never touch the locker's balance.
-    pub beneficiary: String,
-    /// Optional admin allowed to rotate `beneficiary`. `None` makes the
-    /// beneficiary immutable — a fully trust-minimized locker.
+    /// Treasury leg of the fee split — gets `10_000 - creator_fee_share_bps`
+    /// of every collected fee. Rotatable by `admin`.
+    pub treasury: String,
+    /// Creator leg — gets `creator_fee_share_bps` of every collected fee.
+    /// Immutable for the life of the locker (never rotated). The keeper sets
+    /// this to the launch creator's bech32 at graduation.
+    pub creator: String,
+    /// Creator's share of each collected fee, in bps of the fee (`≤ 10_000`).
+    /// The keeper sources this from the launch's `creatorFeeShareBps` snapshot
+    /// on `LaunchpadCore` so the graduated split equals the bonding-curve one.
+    pub creator_fee_share_bps: u16,
+    /// Optional admin allowed to rotate the `treasury` leg. `None` makes the
+    /// treasury immutable too — a fully trust-minimized locker. The creator
+    /// leg is immutable regardless of this field.
     pub admin: Option<String>,
 }
 
@@ -271,19 +282,22 @@ pub enum ExecuteMsg {
     Callback(CallbackMsg),
 
     /// **Locker-only, permissionless.** Collects accrued fees on the held
-    /// position NFT(s) and routes them to the configured `beneficiary` via
-    /// `manager.Collect { recipient }`. With `token_id` `None`, collects every
-    /// NFT the locker owns (first page of the manager's `Tokens` enumeration);
-    /// with `Some`, collects exactly that one. There is intentionally no path
-    /// here to decrease or burn liquidity — principal stays locked.
+    /// position NFT(s) into the locker itself, then chains a
+    /// `Callback(DistributeFees)` that splits every collected denom between the
+    /// `treasury` and `creator` legs per `creator_fee_share_bps`. With
+    /// `token_id` `None`, collects every NFT the locker owns (first page of the
+    /// manager's `Tokens` enumeration); with `Some`, collects exactly that one.
+    /// There is intentionally no path here to decrease or burn liquidity —
+    /// principal stays locked.
     CollectFees {
         token_id: Option<String>,
     },
 
-    /// **Locker admin.** Rotate the fee `beneficiary`. Errors if the locker
-    /// was instantiated with no admin (immutable beneficiary).
-    UpdateBeneficiary {
-        new_beneficiary: String,
+    /// **Locker admin.** Rotate the `treasury` leg of the fee split. Errors if
+    /// the locker was instantiated with no admin (immutable treasury). The
+    /// `creator` leg is immutable and cannot be rotated through any path.
+    UpdateTreasury {
+        new_treasury: String,
     },
 }
 
@@ -310,6 +324,14 @@ pub enum CallbackMsg {
     /// value strands in a terminal sink. A no-op (no messages) when nothing
     /// is left.
     SweepDust {},
+
+    /// **Locker step 2 of `CollectFees`.** After `manager.Collect` has routed
+    /// the position's accrued fees into this locker, split every nonzero bank
+    /// balance between the `treasury` and `creator` legs per
+    /// `creator_fee_share_bps`. Treasury absorbs the rounding remainder so no
+    /// dust strands. Denom-agnostic: handles both pool tokens (and any stray
+    /// balance) without needing to know the position's token0/token1 up front.
+    DistributeFees {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -368,7 +390,9 @@ pub struct SinkConfigResponse {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct LockerConfigResponse {
     pub manager: String,
-    pub beneficiary: String,
+    pub treasury: String,
+    pub creator: String,
+    pub creator_fee_share_bps: u16,
     pub admin: Option<String>,
 }
 

@@ -49,9 +49,10 @@ pub enum LaunchStatus {
     /// `DeliverToSeeder` succeeded: leftover burned from `evm_authority`,
     /// `cw_held` sent to `seeder_addr`. Terminal state on the happy path.
     Delivered,
-    /// `RefundFailedLaunch` succeeded: `cw_held` burned. EVM-side circulating
-    /// supply is the EVM authority's responsibility to clean up via its own
-    /// permission grant. Terminal state on the failure path.
+    /// `RefundFailedLaunch` succeeded: `cw_held` burned (self) AND the unsold
+    /// EVM-side supply held by `evm_authority` admin-burned (capped at
+    /// `evm_supply`), so no dangling launch-denom supply lingers on either
+    /// side. Terminal state on the failure path.
     Refunded,
 }
 

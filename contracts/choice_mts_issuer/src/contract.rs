@@ -298,6 +298,16 @@ fn execute_register_launch(
     }
     let denom = format!("factory/{}/{}", env.contract.address, subdenom);
 
+    // The pair asset must differ from the freshly-minted launch denom. A
+    // self-paired pool is degenerate and would fail (or mis-seed) at the
+    // seeder's Settle; reject early with a clear error instead of letting a
+    // keeper typo surface as a cryptic downstream revert.
+    if pair_denom == denom {
+        return Err(ContractError::PairDenomEqualsLaunchDenom {
+            denom: denom.clone(),
+        });
+    }
+
     // Decode the opaque seeder payload so the issuer can guarantee, on-chain:
     //   (a) the sink seeds EXACTLY the launch denom + pair we create/reserve
     //       here (a misbehaving keeper can't point the sink at a different
@@ -582,16 +592,27 @@ fn execute_deliver_to_seeder(
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
 
-    // Leg A — burn leftover from the EVM authority's bech32. Requires the
-    // denom to have been created with `allow_admin_burn=true` and no
-    // permissions namespace, which RegisterLaunch guarantees.
-    if !leftover.is_zero() {
+    // Leg A — burn the unsold EVM-side supply from the authority's bech32.
+    // Burn what the authority ACTUALLY holds (capped at `evm_supply`) rather
+    // than trusting the keeper-relayed `leftover`. This removes the trust
+    // assumption: a keeper that under-reports `leftover` can no longer strand
+    // unsold supply, and the `evm_supply` cap stops a third party from tricking
+    // us into burning unrelated tokens donated to that address. `leftover` is
+    // retained only as a keeper-input sanity bound (checked above) and an audit
+    // attribute. Requires `allow_admin_burn=true`, which RegisterLaunch
+    // guarantees.
+    let evm_held = deps
+        .querier
+        .query_balance(record.evm_authority.as_str(), &record.denom)?
+        .amount;
+    let to_burn = evm_held.min(record.evm_supply);
+    if !to_burn.is_zero() {
         messages.push(
             MsgBurn {
                 sender: env.contract.address.to_string(),
                 amount: Some(ProtoCoin {
                     denom: record.denom.clone(),
-                    amount: leftover.to_string(),
+                    amount: to_burn.to_string(),
                 }),
                 burn_from_address: record.evm_authority.to_string(),
             }
@@ -616,7 +637,8 @@ fn execute_deliver_to_seeder(
         .add_attribute("action", "deliver_to_seeder")
         .add_attribute("internal_id", internal_id.to_string())
         .add_attribute("denom", record.denom)
-        .add_attribute("leftover_burned", leftover)
+        .add_attribute("leftover_reported", leftover)
+        .add_attribute("leftover_burned", to_burn)
         .add_attribute("cw_held_delivered", record.cw_held)
         .add_attribute("seeder_addr", record.seeder_addr))
 }
@@ -644,9 +666,14 @@ fn execute_refund_failed_launch(
         });
     }
 
-    // Until the deadline, only the keeper can refund. After, anyone — covers
-    // the case where the keeper goes down and a launch needs to be cleaned
-    // up by the consumer dApp directly.
+    // The keeper can refund any time. After the deadline the `admin` (the
+    // consumer dApp's timelock/multisig) may also refund, covering a keeper
+    // outage. It is deliberately NOT fully permissionless: a wide-open refund
+    // would let anyone burn `cw_held` and terminally `Refunded` a slow-but-
+    // valid launch out from under graduation (the launch stays `Registered`
+    // for its whole curve lifetime). Both keeper and admin are trusted
+    // parties, so the only thing the post-deadline path grants is liveness,
+    // never the power to grief a healthy launch.
     if info.sender != config.keeper {
         let deadline = record
             .registered_at
@@ -656,6 +683,9 @@ fn execute_refund_failed_launch(
             return Err(ContractError::RefundDeadlineNotReached {
                 remaining_seconds: deadline - now,
             });
+        }
+        if info.sender != config.admin {
+            return Err(ContractError::Unauthorized {});
         }
     }
 
@@ -675,6 +705,32 @@ fn execute_refund_failed_launch(
         ));
     }
 
+    // Also burn the EVM-side supply. RegisterLaunch bank-sent `evm_supply` to
+    // `evm_authority`; on a failed launch that balance is dangling, worthless
+    // launch-denom supply that ONLY the issuer (still the tokenfactory admin
+    // here — RenounceDenomAdmin requires `Delivered`) can clean up. Burn what
+    // the authority actually holds, capped at `evm_supply` so a third party
+    // can't trick us into burning unrelated tokens sent to that address.
+    // Requires `allow_admin_burn=true`, which RegisterLaunch guarantees.
+    let evm_held = deps
+        .querier
+        .query_balance(record.evm_authority.as_str(), &record.denom)?
+        .amount;
+    let evm_burn = evm_held.min(record.evm_supply);
+    if !evm_burn.is_zero() {
+        messages.push(
+            MsgBurn {
+                sender: env.contract.address.to_string(),
+                amount: Some(ProtoCoin {
+                    denom: record.denom.clone(),
+                    amount: evm_burn.to_string(),
+                }),
+                burn_from_address: record.evm_authority.to_string(),
+            }
+            .into(),
+        );
+    }
+
     record.status = LaunchStatus::Refunded;
     LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
 
@@ -684,6 +740,7 @@ fn execute_refund_failed_launch(
         .add_attribute("internal_id", internal_id.to_string())
         .add_attribute("denom", record.denom)
         .add_attribute("cw_held_burned", record.cw_held)
+        .add_attribute("evm_supply_burned", evm_burn)
         .add_attribute("reason", reason))
 }
 
@@ -832,10 +889,16 @@ fn handle_create_token_pair_reply(
     let parsed = crate::proto::MsgCreateTokenPairResponse::decode(data.as_slice())
         .map_err(|e| ContractError::CreateTokenPairReplyDecode(e.to_string()))?;
 
+    // Require a real ERC20 address. An absent `token_pair` or empty
+    // `erc20_address` would otherwise persist `Some("")`, silently violating
+    // the LaunchRecord invariant (`erc20_address` is always a populated 0x hex
+    // once `Registered`) and misleading EVM-side tooling that reads this field.
+    // Reject so the whole RegisterLaunch tx reverts rather than half-recording.
     let erc20 = parsed
         .token_pair
         .map(|tp| tp.erc20_address)
-        .unwrap_or_default();
+        .filter(|s| !s.is_empty())
+        .ok_or(ContractError::CreateTokenPairReplyMissingData { id: internal_id })?;
 
     LAUNCHES.update(
         deps.storage,

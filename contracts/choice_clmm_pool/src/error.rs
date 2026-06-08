@@ -42,4 +42,7 @@ pub enum ContractError {
         required: String,
         actual: String,
     },
+
+    #[error("Flash loan requires active in-range liquidity")]
+    FlashWithoutLiquidity {},
 }

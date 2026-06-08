@@ -1514,10 +1514,18 @@ fn create_sink_clmm_happy_path() {
 
 use crate::msg::{LockerConfigResponse, LockerInit};
 
+const TEST_CREATOR_SHARE_BPS: u16 = 3000; // creator gets 30% of the fee
+
 fn instantiate_locker(deps: &mut RichDeps, admin: Option<String>) {
+    instantiate_locker_share(deps, admin, TEST_CREATOR_SHARE_BPS);
+}
+
+fn instantiate_locker_share(deps: &mut RichDeps, admin: Option<String>, share: u16) {
     let init = LockerInit {
         manager: deps.api.addr_make("clmm_manager").to_string(),
-        beneficiary: deps.api.addr_make("treasury").to_string(),
+        treasury: deps.api.addr_make("treasury").to_string(),
+        creator: deps.api.addr_make("creator").to_string(),
+        creator_fee_share_bps: share,
         admin,
     };
     let caller = deps.api.addr_make("factory_caller");
@@ -1537,7 +1545,9 @@ fn create_locker_emits_instantiate2_and_pins_manager() {
     let caller = deps.api.addr_make("issuer_keeper");
     let locker_init = LockerInit {
         manager: deps.api.addr_make("clmm_manager").to_string(),
-        beneficiary: deps.api.addr_make("treasury").to_string(),
+        treasury: deps.api.addr_make("treasury").to_string(),
+        creator: deps.api.addr_make("creator").to_string(),
+        creator_fee_share_bps: TEST_CREATOR_SHARE_BPS,
         admin: None,
     };
     let res = execute(
@@ -1571,7 +1581,9 @@ fn create_locker_rejects_manager_mismatch() {
     let caller = deps.api.addr_make("issuer_keeper");
     let locker_init = LockerInit {
         manager: deps.api.addr_make("wrong_manager").to_string(),
-        beneficiary: deps.api.addr_make("treasury").to_string(),
+        treasury: deps.api.addr_make("treasury").to_string(),
+        creator: deps.api.addr_make("creator").to_string(),
+        creator_fee_share_bps: TEST_CREATOR_SHARE_BPS,
         admin: None,
     };
     let err = execute(
@@ -1601,69 +1613,178 @@ fn locker_collect_fees_with_explicit_token_id() {
         },
     )
     .unwrap();
-    assert_eq!(res.messages.len(), 1);
+    // Collect routed to the locker itself, then a DistributeFees self-callback.
+    assert_eq!(res.messages.len(), 2);
+    let self_addr = mock_env().contract.address;
     match &res.messages[0].msg {
         CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
             assert_eq!(contract_addr, &deps.api.addr_make("clmm_manager").to_string());
             match from_json::<ClmmManagerExecuteMsg>(msg.as_slice()).unwrap() {
                 ClmmManagerExecuteMsg::Collect { token_id, recipient } => {
                     assert_eq!(token_id, "42");
-                    assert_eq!(recipient.as_deref(), Some(deps.api.addr_make("treasury").as_str()));
+                    // Collected INTO the locker, not straight to a recipient.
+                    assert_eq!(recipient.as_deref(), Some(self_addr.as_str()));
                 }
                 other => panic!("expected Collect, got {:?}", other),
             }
         }
         other => panic!("expected manager.Collect exec, got {:?}", other),
     }
+    match &res.messages[1].msg {
+        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. }) => {
+            assert_eq!(contract_addr, &self_addr.to_string());
+            assert!(matches!(
+                from_json::<ExecuteMsg>(msg.as_slice()).unwrap(),
+                ExecuteMsg::Callback(CallbackMsg::DistributeFees {})
+            ));
+        }
+        other => panic!("expected self DistributeFees callback, got {:?}", other),
+    }
+}
+
+/// The DistributeFees callback splits every collected denom between treasury
+/// and creator per `creator_fee_share_bps`; treasury absorbs the remainder.
+#[test]
+fn locker_distribute_fees_splits_both_denoms() {
+    // 1000 token0 + 333 token1 sitting on the locker after a Collect.
+    let bal = vec![coin(1000, "token0"), coin(333, "token1")];
+    let mut deps = rich_deps(&bal);
+    instantiate_locker(&mut deps, None); // 30% creator
+    deps.querier
+        .with_balance(&[(&MOCK_CONTRACT_ADDR.to_string(), bal.clone())]);
+
+    let self_addr = mock_env().contract.address;
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&self_addr, &[]),
+        ExecuteMsg::Callback(CallbackMsg::DistributeFees {}),
+    )
+    .unwrap();
+
+    let treasury = deps.api.addr_make("treasury").to_string();
+    let creator = deps.api.addr_make("creator").to_string();
+    // token0: creator floor(1000*3000/10000)=300, treasury 700.
+    // token1: creator floor(333*3000/10000)=99,  treasury 234.
+    let mut seen: Vec<(String, String, u128)> = vec![];
+    for m in &res.messages {
+        if let CosmosMsg::Bank(BankMsg::Send { to_address, amount }) = &m.msg {
+            seen.push((to_address.clone(), amount[0].denom.clone(), amount[0].amount.u128()));
+        }
+    }
+    assert!(seen.contains(&(treasury.clone(), "token0".into(), 700)));
+    assert!(seen.contains(&(creator.clone(), "token0".into(), 300)));
+    assert!(seen.contains(&(treasury.clone(), "token1".into(), 234)));
+    assert!(seen.contains(&(creator.clone(), "token1".into(), 99)));
+    // Conservation: every input wei is sent somewhere, none stranded.
+    let token0_out: u128 = seen.iter().filter(|s| s.1 == "token0").map(|s| s.2).sum();
+    let token1_out: u128 = seen.iter().filter(|s| s.1 == "token1").map(|s| s.2).sum();
+    assert_eq!(token0_out, 1000);
+    assert_eq!(token1_out, 333);
+}
+
+/// 0% share = legacy behaviour: everything to treasury, no creator leg.
+#[test]
+fn locker_distribute_fees_zero_share_all_treasury() {
+    let bal = vec![coin(1000, "token0")];
+    let mut deps = rich_deps(&bal);
+    instantiate_locker_share(&mut deps, None, 0);
+    deps.querier
+        .with_balance(&[(&MOCK_CONTRACT_ADDR.to_string(), bal.clone())]);
+
+    let self_addr = mock_env().contract.address;
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&self_addr, &[]),
+        ExecuteMsg::Callback(CallbackMsg::DistributeFees {}),
+    )
+    .unwrap();
+    // Exactly one Send, to treasury, full amount.
+    assert_eq!(res.messages.len(), 1);
+    match &res.messages[0].msg {
+        CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+            assert_eq!(to_address, &deps.api.addr_make("treasury").to_string());
+            assert_eq!(amount[0].amount.u128(), 1000);
+        }
+        other => panic!("expected single treasury Send, got {:?}", other),
+    }
 }
 
 #[test]
-fn locker_update_beneficiary_requires_admin() {
+fn locker_instantiate_rejects_share_above_100pct() {
+    let mut deps = rich_deps(&[]);
+    let init = LockerInit {
+        manager: deps.api.addr_make("clmm_manager").to_string(),
+        treasury: deps.api.addr_make("treasury").to_string(),
+        creator: deps.api.addr_make("creator").to_string(),
+        creator_fee_share_bps: 10_001,
+        admin: None,
+    };
+    let caller = deps.api.addr_make("factory_caller");
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Locker(init),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ContractError::LockerCreatorFeeShareTooHigh { value: 10_001, max: 10_000 }
+    ));
+}
+
+#[test]
+fn locker_update_treasury_requires_admin_and_leaves_creator_immutable() {
     let mut deps = rich_deps(&[]);
     let admin = deps.api.addr_make("locker_admin");
     instantiate_locker(&mut deps, Some(admin.to_string()));
 
     // Stranger rejected.
     let stranger = deps.api.addr_make("stranger");
-    let new_ben = deps.api.addr_make("new_treasury");
+    let new_treasury = deps.api.addr_make("new_treasury");
     let err = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&stranger, &[]),
-        ExecuteMsg::UpdateBeneficiary {
-            new_beneficiary: new_ben.to_string(),
+        ExecuteMsg::UpdateTreasury {
+            new_treasury: new_treasury.to_string(),
         },
     )
     .unwrap_err();
     assert!(matches!(err, ContractError::Unauthorized {}));
 
-    // Admin succeeds; query reflects the change.
+    // Admin succeeds; query reflects the new treasury — and the creator leg is
+    // unchanged (no path can ever rotate it).
     execute(
         deps.as_mut(),
         mock_env(),
         message_info(&admin, &[]),
-        ExecuteMsg::UpdateBeneficiary {
-            new_beneficiary: new_ben.to_string(),
+        ExecuteMsg::UpdateTreasury {
+            new_treasury: new_treasury.to_string(),
         },
     )
     .unwrap();
     let cfg: LockerConfigResponse =
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::LockerConfig {}).unwrap()).unwrap();
-    assert_eq!(cfg.beneficiary, new_ben.to_string());
+    assert_eq!(cfg.treasury, new_treasury.to_string());
+    assert_eq!(cfg.creator, deps.api.addr_make("creator").to_string());
+    assert_eq!(cfg.creator_fee_share_bps, TEST_CREATOR_SHARE_BPS);
 }
 
 #[test]
-fn locker_update_beneficiary_errors_when_no_admin() {
+fn locker_update_treasury_errors_when_no_admin() {
     let mut deps = rich_deps(&[]);
     instantiate_locker(&mut deps, None);
     let anyone = deps.api.addr_make("anyone");
-    let new_ben = deps.api.addr_make("x");
+    let new_treasury = deps.api.addr_make("x");
     let err = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&anyone, &[]),
-        ExecuteMsg::UpdateBeneficiary {
-            new_beneficiary: new_ben.to_string(),
+        ExecuteMsg::UpdateTreasury {
+            new_treasury: new_treasury.to_string(),
         },
     )
     .unwrap_err();

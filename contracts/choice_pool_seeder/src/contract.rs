@@ -57,6 +57,10 @@ const LOCKER_LABEL_PREFIX: &str = "choice-pool-seeder-locker";
 /// but the bound keeps the message count sane if a locker is ever reused.
 const COLLECT_FEES_PAGE: u32 = 30;
 
+/// Basis-points denominator for the locker fee split. `creator_fee_share_bps`
+/// is a fraction of the fee out of this, so it can range over `[0, BPS_DENOM]`.
+const BPS_DENOM: u16 = 10_000;
+
 // ------------------------------------------------------------------------
 // Entry points
 // ------------------------------------------------------------------------
@@ -240,7 +244,14 @@ fn instantiate_locker(
     init: LockerInit,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let manager = deps.api.addr_validate(&init.manager)?;
-    let beneficiary = deps.api.addr_validate(&init.beneficiary)?;
+    let treasury = deps.api.addr_validate(&init.treasury)?;
+    let creator = deps.api.addr_validate(&init.creator)?;
+    if init.creator_fee_share_bps > BPS_DENOM {
+        return Err(ContractError::LockerCreatorFeeShareTooHigh {
+            value: init.creator_fee_share_bps,
+            max: BPS_DENOM,
+        });
+    }
     let admin = init
         .admin
         .as_deref()
@@ -252,7 +263,9 @@ fn instantiate_locker(
         deps.storage,
         &LockerConfig {
             manager: manager.clone(),
-            beneficiary: beneficiary.clone(),
+            treasury: treasury.clone(),
+            creator: creator.clone(),
+            creator_fee_share_bps: init.creator_fee_share_bps,
             admin: admin.clone(),
         },
     )?;
@@ -261,7 +274,9 @@ fn instantiate_locker(
         .add_attribute("action", "instantiate")
         .add_attribute("role", "locker")
         .add_attribute("manager", manager)
-        .add_attribute("beneficiary", beneficiary)
+        .add_attribute("treasury", treasury)
+        .add_attribute("creator", creator)
+        .add_attribute("creator_fee_share_bps", init.creator_fee_share_bps.to_string())
         .add_attribute(
             "admin",
             admin.map(|a| a.to_string()).unwrap_or_default(),
@@ -290,8 +305,8 @@ pub fn execute(
         }
         ExecuteMsg::Callback(cb) => exec_callback(deps, env, info, cb),
         ExecuteMsg::CollectFees { token_id } => exec_collect_fees(deps, env, info, token_id),
-        ExecuteMsg::UpdateBeneficiary { new_beneficiary } => {
-            exec_update_beneficiary(deps, info, new_beneficiary)
+        ExecuteMsg::UpdateTreasury { new_treasury } => {
+            exec_update_treasury(deps, info, new_treasury)
         }
     }
 }
@@ -366,11 +381,11 @@ fn exec_create_locker(
         });
     }
 
-    let label = format!("{}-{}", LOCKER_LABEL_PREFIX, locker_init.beneficiary);
+    let label = format!("{}-{}", LOCKER_LABEL_PREFIX, locker_init.creator);
     let init_msg = to_json_binary(&InstantiateMsg::Locker(locker_init.clone()))?;
     let msg = CosmosMsg::Wasm(WasmMsg::Instantiate2 {
         // No admin → locker code is immutable; the only mutable knob is the
-        // optional `beneficiary` rotation inside the locker itself.
+        // optional `treasury` rotation inside the locker itself.
         admin: None,
         code_id: cfg.sink_code_id,
         label,
@@ -384,7 +399,8 @@ fn exec_create_locker(
         .add_attribute("action", "create_locker")
         .add_attribute("code_id", cfg.sink_code_id.to_string())
         .add_attribute("manager", locker_init.manager)
-        .add_attribute("beneficiary", locker_init.beneficiary))
+        .add_attribute("treasury", locker_init.treasury)
+        .add_attribute("creator", locker_init.creator))
 }
 
 fn exec_update_admin(
@@ -820,23 +836,37 @@ fn exec_callback(
     if info.sender != env.contract.address {
         return Err(ContractError::CallbackUnauthorized {});
     }
-    // `Callback` is only ever emitted by sink-side `Settle`, but the role
-    // check provides defense in depth in case a future change wires
-    // callbacks on the factory side too.
-    let _ = require_sink(deps.as_ref(), "callback")?;
+    // Role check per callback: the sink-side settlement chain requires a sink
+    // instance; the locker-side `DistributeFees` requires a locker. Defense in
+    // depth on top of the `sender == self` gate above.
     match cb {
         CallbackMsg::ProvideLiquidity {
             token_amount,
             pair_amount,
-        } => callback_provide_liquidity(deps, env, token_amount, pair_amount),
-        CallbackMsg::DistributeLp {} => callback_distribute_lp(deps, env),
-        CallbackMsg::SweepDust {} => callback_sweep_dust(deps, env),
+        } => {
+            let _ = require_sink(deps.as_ref(), "callback")?;
+            callback_provide_liquidity(deps, env, token_amount, pair_amount)
+        }
+        CallbackMsg::DistributeLp {} => {
+            let _ = require_sink(deps.as_ref(), "callback")?;
+            callback_distribute_lp(deps, env)
+        }
+        CallbackMsg::SweepDust {} => {
+            let _ = require_sink(deps.as_ref(), "callback")?;
+            callback_sweep_dust(deps, env)
+        }
+        CallbackMsg::DistributeFees {} => {
+            let cfg = require_locker(deps.as_ref(), "callback")?;
+            callback_distribute_fees(deps, env, cfg)
+        }
     }
 }
 
 /// Post-CLMM-mint cleanup: the manager refunds one-sided surplus to this sink,
-/// so any `token_denom` / `pair_denom` left here is dust. Forward it to
-/// `refund_receiver`. No-op (and no error) when both balances are zero.
+/// so any `token_denom` / `pair_denom` left here is dust. Route it the same way
+/// as `exec_refund` — launch-token dust back to the `issuer` (which can burn it
+/// cleanly, leaving no zombie launch-denom supply on the CW side) and pair dust
+/// to `refund_receiver`. No-op (and no error) when both balances are zero.
 fn callback_sweep_dust(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
@@ -855,7 +885,7 @@ fn callback_sweep_dust(
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
     if !token_dust.is_zero() {
         messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: cfg.refund_receiver.to_string(),
+            to_address: cfg.issuer.to_string(),
             amount: coins(token_dust.u128(), &cfg.token_denom),
         }));
     }
@@ -870,6 +900,7 @@ fn callback_sweep_dust(
         .add_messages(messages)
         .add_attribute("action", "callback_sweep_dust")
         .add_attribute("token_dust", token_dust)
+        .add_attribute("token_dust_to", cfg.issuer)
         .add_attribute("pair_dust", pair_dust))
 }
 
@@ -1050,45 +1081,99 @@ fn exec_collect_fees(
         return Err(ContractError::LockerNoPositions {});
     }
 
-    // One `Collect` per position; fees route straight to the beneficiary
-    // (pool → manager → beneficiary), never touching this locker's balance.
-    let messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = token_ids
+    // One `Collect` per position, routed INTO this locker (recipient = self).
+    // We can't split a single `Collect` across two recipients, so the fees
+    // land here first; the chained `DistributeFees` callback (appended after
+    // all collects) then partitions every collected denom between the treasury
+    // and creator legs. CosmWasm executes messages sequentially, so the
+    // callback observes the bank credits the collects produced.
+    let self_addr = env.contract.address.to_string();
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = token_ids
         .iter()
         .map(|id| {
             Ok(CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: cfg.manager.to_string(),
                 msg: to_json_binary(&ClmmManagerExecuteMsg::Collect {
                     token_id: id.clone(),
-                    recipient: Some(cfg.beneficiary.to_string()),
+                    recipient: Some(self_addr.clone()),
                 })?,
                 funds: vec![],
             }))
         })
-        .collect::<StdResult<_>>()?;
+        .collect::<StdResult<Vec<_>>>()?;
+    messages.push(self_callback(&env, CallbackMsg::DistributeFees {})?);
 
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "collect_fees")
-        .add_attribute("beneficiary", cfg.beneficiary)
+        .add_attribute("treasury", cfg.treasury)
+        .add_attribute("creator", cfg.creator)
+        .add_attribute("creator_fee_share_bps", cfg.creator_fee_share_bps.to_string())
         .add_attribute("positions", token_ids.len().to_string()))
 }
 
-fn exec_update_beneficiary(
+/// Locker step 2: split every nonzero bank balance the `Collect`s just routed
+/// into this locker between the treasury and creator legs. Treasury takes the
+/// remainder (`amount - floor(amount * share / 10_000)`) so rounding dust is
+/// never stranded. Denom-agnostic — iterates the locker's full balance, which
+/// is only ever transient collected fees (the locker holds no principal).
+fn callback_distribute_fees(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    cfg: LockerConfig,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let balances = deps.querier.query_all_balances(&env.contract.address)?;
+
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
+    let mut denoms = 0u32;
+    for coin in balances {
+        if coin.amount.is_zero() {
+            continue;
+        }
+        let creator_amt = coin
+            .amount
+            .multiply_ratio(cfg.creator_fee_share_bps as u128, BPS_DENOM as u128);
+        let treasury_amt = coin.amount.checked_sub(creator_amt)?;
+        if !treasury_amt.is_zero() {
+            messages.push(CosmosMsg::Bank(BankMsg::Send {
+                to_address: cfg.treasury.to_string(),
+                amount: coins(treasury_amt.u128(), &coin.denom),
+            }));
+        }
+        if !creator_amt.is_zero() {
+            messages.push(CosmosMsg::Bank(BankMsg::Send {
+                to_address: cfg.creator.to_string(),
+                amount: coins(creator_amt.u128(), &coin.denom),
+            }));
+        }
+        denoms += 1;
+    }
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "distribute_fees")
+        .add_attribute("treasury", cfg.treasury)
+        .add_attribute("creator", cfg.creator)
+        .add_attribute("creator_fee_share_bps", cfg.creator_fee_share_bps.to_string())
+        .add_attribute("denoms", denoms.to_string()))
+}
+
+fn exec_update_treasury(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
-    new_beneficiary: String,
+    new_treasury: String,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    let mut cfg = require_locker(deps.as_ref(), "update_beneficiary")?;
+    let mut cfg = require_locker(deps.as_ref(), "update_treasury")?;
     let admin = cfg.admin.clone().ok_or(ContractError::LockerNoAdmin {})?;
     if info.sender != admin {
         return Err(ContractError::Unauthorized {});
     }
-    let new_beneficiary = deps.api.addr_validate(&new_beneficiary)?;
-    cfg.beneficiary = new_beneficiary.clone();
+    let new_treasury = deps.api.addr_validate(&new_treasury)?;
+    cfg.treasury = new_treasury.clone();
     LOCKER_CONFIG.save(deps.storage, &cfg)?;
     Ok(Response::new()
-        .add_attribute("action", "update_beneficiary")
-        .add_attribute("new_beneficiary", new_beneficiary))
+        .add_attribute("action", "update_treasury")
+        .add_attribute("new_treasury", new_treasury))
 }
 
 // ------------------------------------------------------------------------
@@ -1159,7 +1244,9 @@ fn query_locker_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<LockerCon
     let c = LOCKER_CONFIG.load(deps.storage)?;
     Ok(LockerConfigResponse {
         manager: c.manager.into_string(),
-        beneficiary: c.beneficiary.into_string(),
+        treasury: c.treasury.into_string(),
+        creator: c.creator.into_string(),
+        creator_fee_share_bps: c.creator_fee_share_bps,
         admin: c.admin.map(|a| a.into_string()),
     })
 }

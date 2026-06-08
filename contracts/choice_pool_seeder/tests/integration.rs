@@ -536,11 +536,17 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
     let settler = app.init_account_decimals(big, decimals).unwrap();
     let issuer = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
     let refund_receiver = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
-    // Beneficiary starts with no pair-denom so the fee-collection assertion is
-    // a clean 0 -> positive transition.
-    let beneficiary = app
+    // Treasury + creator each start with no pair-denom so the fee-split
+    // assertions are clean 0 -> positive transitions. The locker splits every
+    // collected fee `creator_fee_share_bps` to the creator, the rest to the
+    // treasury.
+    let treasury = app
         .init_account(&[Coin::new(1_000_000_000_000_000_000u128, INJ)])
         .unwrap();
+    let creator = app
+        .init_account(&[Coin::new(1_000_000_000_000_000_000u128, INJ)])
+        .unwrap();
+    const CLMM_CREATOR_SHARE_BPS: u128 = 3000; // creator gets 30% of fees
 
     // token0 is the lexicographically-smaller denom; "atom" < "launch", so the
     // pair denom is token0 and a zero_for_one swap pays fees in PAIR_DENOM.
@@ -617,7 +623,9 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
                 salt: b"clmm-locker-1".into(),
                 locker_init: LockerInit {
                     manager: clmm_manager.clone(),
-                    beneficiary: beneficiary.address(),
+                    treasury: treasury.address(),
+                    creator: creator.address(),
+                    creator_fee_share_bps: CLMM_CREATOR_SHARE_BPS as u16,
                     admin: None,
                 },
             },
@@ -749,9 +757,10 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
     )
     .unwrap();
 
-    // Collect fees (permissionless on the locker) — routed to the beneficiary,
-    // never touching the locker's balance.
-    let bene_before = bank_balance(&app, &beneficiary.address(), token0);
+    // Collect fees (permissionless on the locker) — collected into the locker,
+    // then split between treasury and creator per creator_fee_share_bps.
+    let treasury_before = bank_balance(&app, &treasury.address(), token0);
+    let creator_before = bank_balance(&app, &creator.address(), token0);
     wasm.execute(
         &locker,
         &ExecuteMsg::CollectFees { token_id: None },
@@ -759,13 +768,18 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
         &settler,
     )
     .unwrap();
-    let bene_after = bank_balance(&app, &beneficiary.address(), token0);
-    assert!(
-        bene_after > bene_before,
-        "beneficiary should receive collected swap fees in token0 (before={}, after={})",
-        bene_before,
-        bene_after
-    );
+    let treasury_got = bank_balance(&app, &treasury.address(), token0) - treasury_before;
+    let creator_got = bank_balance(&app, &creator.address(), token0) - creator_before;
+
+    assert!(treasury_got > 0, "treasury should receive its fee leg");
+    assert!(creator_got > 0, "creator should receive its fee leg");
+
+    // The split matches creator_fee_share_bps: creator == floor(total * share),
+    // treasury == remainder. Reconstruct the total and check both legs.
+    let total = treasury_got + creator_got;
+    let expected_creator = total * CLMM_CREATOR_SHARE_BPS / 10_000;
+    assert_eq!(creator_got, expected_creator, "creator leg = share of fee");
+    assert_eq!(treasury_got, total - expected_creator, "treasury = remainder");
 
     // Fees never strand in the locker.
     assert_eq!(

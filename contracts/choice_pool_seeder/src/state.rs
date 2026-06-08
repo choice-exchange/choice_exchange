@@ -94,13 +94,26 @@ impl From<&PoolKindStored> for crate::msg::PoolKind {
     }
 }
 
-/// Locker role config — owns a CLMM position NFT, collects fees to
-/// `beneficiary`, never withdraws principal.
+/// Locker role config — owns a CLMM position NFT, collects fees and splits
+/// them between a `treasury` leg and a `creator` leg, never withdraws
+/// principal. The split mirrors the launch's `creatorFeeShareBps` snapshot on
+/// `LaunchpadCore` so graduated-pool fees follow the same incentive as the
+/// bonding-curve trading fee.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct LockerConfig {
     pub manager: Addr,
-    pub beneficiary: Addr,
-    /// `None` ⇒ beneficiary immutable.
+    /// Treasury leg — receives `10_000 - creator_fee_share_bps` of every
+    /// collected fee. Rotatable by `admin`.
+    pub treasury: Addr,
+    /// Creator leg — receives `creator_fee_share_bps` of every collected fee.
+    /// IMMUTABLE for the life of the locker (never rotated, even by admin) so
+    /// the creator holds a permanent on-chain guarantee of their cut.
+    pub creator: Addr,
+    /// Creator's share of each collected fee, in basis points of the fee.
+    /// Mirrors the launch's `creatorFeeShareBps`. `≤ 10_000`.
+    pub creator_fee_share_bps: u16,
+    /// `None` ⇒ treasury leg immutable too (fully trust-minimized locker). The
+    /// creator leg is immutable regardless.
     pub admin: Option<Addr>,
 }
 

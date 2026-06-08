@@ -1,0 +1,21 @@
+# Standalone, workspace-EXCLUDED harness. The empty `[workspace]` table makes
+# this crate its own workspace root so cargo never folds it into the
+# choice_exchange workspace — critical, because this crate depends on
+# `injective-test-tube 1.19` (cosmwasm-std 3 / injective-cosmwasm 0.3.6) which
+# would otherwise unify onto and break the legacy cw-std 2.2.2 contracts.
+[workspace]
+
+[package]
+name = "chain-capability-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+injective-test-tube = "=1.19.0"
+injective-std = "=1.19.0"
+cosmwasm-std = "3"
+prost = "0.13"
+serde_json = "1"
+bech32 = "0.9"
+sha2 = "0.10"

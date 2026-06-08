@@ -148,4 +148,7 @@ pub enum ContractError {
 
     #[error("clmm_pool_auth was supplied for a non-CLMM (XYK) launch")]
     ClmmAuthUnexpected {},
+
+    #[error("pair_denom must differ from the launch denom `{denom}` (no self-paired pool)")]
+    PairDenomEqualsLaunchDenom { denom: String },
 }

@@ -16,14 +16,34 @@
 //!    `RefundDeadlineNotReached` (exercised via a launch record forged with
 //!    a no-op pre-registered state — see helper).
 //!
-//! Deferred (marked `#[ignore]` until test-tube exposes the missing piece):
-//!  * Full `RegisterLaunch` lifecycle. The chain image bundled with
-//!    `injective-test-tube 1.16.3-1` predates the `injective.erc20.v1beta1`
-//!    module, so the Stargate `MsgCreateTokenPair` submsg the contract
-//!    emits is rejected with an `unknown type_url` error. The unit tests in
-//!    `src/tests.rs` cover the message-wiring and reply-handler decode path
-//!    end-to-end with mocked storage. Re-enable the ignored test once a
-//!    test-tube version that bundles a v1.20+ injective image is published.
+//! Deferred (marked `#[ignore]`):
+//!  * Full `RegisterLaunch` lifecycle. NOTE: the original deferral reason
+//!    ("needs a test-tube bundling Injective v1.20+ for the erc20 module")
+//!    was WRONG. `injective-test-tube 1.19.0` bundles `injective-core
+//!    v1.19.0`, which already ships the `injective.erc20.v1beta1` module and
+//!    executes `MsgCreateTokenPair` — including the empty-`erc20_address`
+//!    auto-deploy of a `MintBurnBankERC20`. This was proven end-to-end
+//!    against the real bundled chain (see the standalone harness referenced
+//!    below); the message auto-deployed an ERC20 and the pair was queryable.
+//!
+//!    The actual blockers to re-enabling this test *in-workspace* are:
+//!      1. Dependency conflict. test-tube 1.19 pulls `cosmwasm-std 3` +
+//!         `injective-cosmwasm 0.3.6`. Cargo unifies the latter onto this
+//!         contract's `0.3.4-1`, forcing `cosmwasm-std 3` onto a contract
+//!         pinned at `2.2.2` → the contract no longer compiles. Re-enabling
+//!         therefore requires migrating the whole workspace to cw-std 3, or
+//!         driving the contract from a workspace-excluded harness crate.
+//!      2. test-tube-inj 2.0.10 panics decoding FinalizeBlock events whose
+//!         attribute values are non-UTF-8 — which the EVM module emits on the
+//!         ERC20 auto-deploy. Any erc20-touching tx must catch that decode
+//!         panic (state still commits) and assert via a follow-up query.
+//!      3. Operational: mint non-zero supply before pairing, and send the
+//!         pair tx with a high custom gas limit (~60M) to cover the inner
+//!         MsgEthereumTx contract creation.
+//!
+//!    The unit tests in `src/tests.rs` cover the message-wiring and reply-
+//!    handler decode path end-to-end with mocked storage; the standalone
+//!    harness proves the chain capability the contract relies on.
 
 use cosmwasm_std::{Coin, Uint128};
 use injective_test_tube::{
@@ -183,7 +203,7 @@ fn deliver_to_seeder_requires_keeper_for_unknown_launch() {
 }
 
 #[test]
-#[ignore = "needs injective-test-tube bundling Injective v1.20+ for the injective.erc20.v1beta1 module (MsgCreateTokenPair). Latest crate as of 2026-05-26 is 1.19.0 (Apr 2026), still pre-v1.20. Recheck after 2026-07-15; unit tests in src/tests.rs cover the wiring against mocks until then."]
+#[ignore = "Blocked by a dep conflict, NOT chain support. test-tube 1.19.0 (bundling injective-core v1.19.0) DOES execute MsgCreateTokenPair + auto-deploy the ERC20 (proven via standalone harness). But bumping test-tube here forces cosmwasm-std 3 / injective-cosmwasm 0.3.6 onto a contract pinned at cw-std 2.2.2, breaking its compile. Re-enable after a workspace-wide cw-std 3 migration, or drive the contract from a workspace-excluded harness. See module doc comment for full details + the EVM-event UTF-8 decode workaround."]
 fn register_launch_full_lifecycle() {
     let env = setup();
     let _ = env;

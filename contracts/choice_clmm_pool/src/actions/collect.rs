@@ -13,6 +13,11 @@ pub fn execute_collect(
     amount0_requested: Uint128, // Set to MAX_UINT128 to collect all
     amount1_requested: Uint128,
 ) -> Result<Response, ContractError> {
+    // Validate the recipient up front (parity with flash/swap). An invalid
+    // bech32 would otherwise only fail later inside the BankMsg with a more
+    // opaque error; fail fast with a clear one.
+    let recipient = deps.api.addr_validate(&recipient)?.into_string();
+
     let config = POOL_CONFIG.load(deps.storage)?;
     let key = (info.sender.as_str(), lower_tick, upper_tick);
     let mut position = POSITIONS
