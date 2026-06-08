@@ -510,7 +510,7 @@ mod tests {
         let min_sqrt_ratio = Uint256::from(4295128739u128 + 1);
 
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: true, // Sell Token 0
             amount_specified: swap_amount,
             sqrt_price_limit_x96: min_sqrt_ratio,
@@ -562,7 +562,7 @@ mod tests {
         let msg = &res.messages[0];
         match &msg.msg {
             cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
-                assert_eq!(to_address, "trader");
+                assert_eq!(to_address, &deps.api.addr_make("trader").to_string());
                 assert_eq!(amount[0].denom, "usdt");
                 assert_eq!(amount[0].amount.u128(), amount_out);
             }
@@ -616,7 +616,7 @@ mod tests {
             Uint256::from_str("1461446703485210103287273052203988822378723970341").unwrap();
 
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: false, // Buy Token 0
             amount_specified: swap_amount,
             sqrt_price_limit_x96: max_sqrt_ratio,
@@ -691,7 +691,7 @@ mod tests {
         let min_sqrt_ratio = Uint256::from(4295128740u128);
 
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: true,
             amount_specified: swap_amount,
             sqrt_price_limit_x96: min_sqrt_ratio,
@@ -756,7 +756,7 @@ mod tests {
         let swap_amount = Uint128::from(1_000_000u128); // Massive swap
 
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: true,
             amount_specified: swap_amount,
             sqrt_price_limit_x96: close_limit,
@@ -839,7 +839,7 @@ mod tests {
         // 3. Swap to generate fees and change price
         // Trader swaps 1000 INJ for USDT
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: true, // Sell INJ
             amount_specified: Uint128::from(1000u128),
             sqrt_price_limit_x96: Uint256::from(4295128740u128), // Min price
@@ -972,7 +972,7 @@ mod tests {
             // 4. "The Setup Swap" (High Volume)
             // This moves the Spot Price away from the EMA
             let setup_swap_msg = ExecuteMsg::Swap {
-                recipient: "whale".to_string(),
+                recipient: deps.api.addr_make("whale").to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(500_000u128), // <-- INCREASED from 50,000
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -987,7 +987,7 @@ mod tests {
             // This happens immediately after (same block time), so Spot != EMA.
             // Volatility is high.
             let probe_swap_msg = ExecuteMsg::Swap {
-                recipient: "trader".to_string(),
+                recipient: deps.api.addr_make("trader").to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(1000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -1116,7 +1116,7 @@ mod tests {
         // Then it should consume input to move from 100 -> 200+.
 
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: false,                       // Buy Token 0 (Price Up)
             amount_specified: Uint128::from(1000u128), // Small amount
             sqrt_price_limit_x96: Uint256::from_str(
@@ -1274,7 +1274,7 @@ mod tests {
         // Action: Swap 85,000. This should clear the first 75k (Cross 100) and use 10k into the second range.
 
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: false, // Buy Token 0 (Price Up)
             amount_specified: Uint128::from(85_000u128),
             sqrt_price_limit_x96: Uint256::from_str(
@@ -1878,6 +1878,37 @@ mod tests {
         env
     }
 
+    /// A swap whose `recipient` is not a valid bech32 address is rejected up
+    /// front (parity with flash/collect), rather than failing opaquely inside
+    /// the output `BankMsg`/`Cw20` transfer.
+    #[test]
+    fn swap_rejects_invalid_recipient() {
+        let mut deps = mock_dependencies();
+        let env = setup_oracle_pool(&mut deps, 0);
+
+        let trader = deps.api.addr_make("trader");
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(1_000), "inj")]);
+
+        let err = execute(
+            deps.as_mut(),
+            env,
+            trader_info,
+            ExecuteMsg::Swap {
+                recipient: "not-a-valid-bech32".to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(1_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128739u128 + 1),
+            },
+        )
+        .unwrap_err();
+
+        // Comes from `deps.api.addr_validate` in `apply_swap`.
+        assert!(
+            matches!(err, ContractError::Std(_)),
+            "expected an address-validation Std error, got {:?}", err
+        );
+    }
+
     /// Runs a large whale swap then a probe swap `probe_delay_sec` later and
     /// returns the probe's output and the effective fee from the response.
     fn whale_then_probe(
@@ -1902,7 +1933,7 @@ mod tests {
             env_whale.clone(),
             whale_info,
             ExecuteMsg::Swap {
-                recipient: "whale".to_string(),
+                recipient: whale.to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(500_000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -1913,8 +1944,9 @@ mod tests {
         let mut env_probe = env_whale.clone();
         env_probe.block.time = env_probe.block.time.plus_seconds(probe_delay_sec);
 
+        let trader = deps.api.addr_make("trader");
         let trader_info = message_info(
-            &deps.api.addr_make("trader"),
+            &trader,
             &[Coin::new(Uint128::new(1_000), "inj")],
         );
         let res = execute(
@@ -1922,7 +1954,7 @@ mod tests {
             env_probe,
             trader_info,
             ExecuteMsg::Swap {
-                recipient: "trader".to_string(),
+                recipient: trader.to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(1_000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -1966,8 +1998,9 @@ mod tests {
         env.block.time = env.block.time.plus_seconds(200);
 
         // Attacker swap A (same block).
+        let whale = deps.api.addr_make("whale");
         let whale_info = message_info(
-            &deps.api.addr_make("whale"),
+            &whale,
             &[Coin::new(Uint128::new(300_000), "inj")],
         );
         let res_a = execute(
@@ -1975,7 +2008,7 @@ mod tests {
             env.clone(),
             whale_info,
             ExecuteMsg::Swap {
-                recipient: "whale".to_string(),
+                recipient: whale.to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(300_000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -1984,8 +2017,9 @@ mod tests {
         .unwrap();
 
         // Victim swap B (SAME block).
+        let trader = deps.api.addr_make("trader");
         let victim = message_info(
-            &deps.api.addr_make("trader"),
+            &trader,
             &[Coin::new(Uint128::new(1_000), "inj")],
         );
         let res_b = execute(
@@ -1993,7 +2027,7 @@ mod tests {
             env.clone(),
             victim,
             ExecuteMsg::Swap {
-                recipient: "trader".to_string(),
+                recipient: trader.to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(1_000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -2094,7 +2128,7 @@ mod tests {
             env_whale.clone(),
             message_info(&whale1, &[Coin::new(Uint128::new(500_000), "inj")]),
             ExecuteMsg::Swap {
-                recipient: "whale".to_string(),
+                recipient: whale1.to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(500_000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -2115,7 +2149,7 @@ mod tests {
             env_whale2.clone(),
             message_info(&whale2, &[Coin::new(Uint128::new(500_000), "inj")]),
             ExecuteMsg::Swap {
-                recipient: "whale".to_string(),
+                recipient: whale2.to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(500_000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -2147,8 +2181,9 @@ mod tests {
     ) -> (u128, u128) {
         let mut env_probe = env_whale.clone();
         env_probe.block.time = env_probe.block.time.plus_seconds(probe_delay_sec);
+        let trader = deps.api.addr_make("trader");
         let trader_info = message_info(
-            &deps.api.addr_make("trader"),
+            &trader,
             &[Coin::new(Uint128::new(1_000), "inj")],
         );
         let res = execute(
@@ -2156,7 +2191,7 @@ mod tests {
             env_probe,
             trader_info,
             ExecuteMsg::Swap {
-                recipient: "trader".to_string(),
+                recipient: trader.to_string(),
                 zero_for_one: true,
                 amount_specified: Uint128::from(1_000u128),
                 sqrt_price_limit_x96: Uint256::from(4295128740u128),
@@ -2267,7 +2302,7 @@ mod tests {
         amount: u128,
     ) -> cosmwasm_std::Response {
         let swap_msg = ExecuteMsg::Swap {
-            recipient: "trader".to_string(),
+            recipient: deps.api.addr_make("trader").to_string(),
             zero_for_one: true,
             amount_specified: Uint128::from(amount),
             sqrt_price_limit_x96: Uint256::from(4295128739u128 + 1),

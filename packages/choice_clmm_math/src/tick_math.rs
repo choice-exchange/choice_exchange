@@ -417,4 +417,135 @@ mod tests {
         let tick_half = get_tick_at_sqrt_ratio(price_half).unwrap();
         assert_eq!(tick_half, -13864);
     }
+
+    // ---------------------------------------------------------------------
+    // Fuzzing: validate `get_tick_at_sqrt_ratio` against its defining contract
+    // directly, not just against tick-derived prices.
+    //
+    // The contract (Uniswap V3): `get_tick_at_sqrt_ratio(p)` returns the
+    // GREATEST tick `T` such that `get_sqrt_ratio_at_tick(T) <= p`. Equivalently,
+    // for the returned `T`:
+    //     sqrtRatio(T)     <= p
+    //     sqrtRatio(T + 1) >  p          (when T < MAX_TICK)
+    //
+    // We check this on a large set of pseudo-random prices spanning the entire
+    // valid Q64.96 range `[MIN_SQRT_RATIO, MAX_SQRT_RATIO)`. This is stronger
+    // than a tick→price→tick roundtrip: it exercises prices that fall strictly
+    // BETWEEN adjacent ticks, where the v3 log-base algorithm's `tick_low` /
+    // `tick_hi` disambiguation (and the sign-magnitude arithmetic emulating
+    // int256) is most likely to be off by one.
+    // ---------------------------------------------------------------------
+
+    /// Deterministic splitmix64 PRNG — reproducible, no external dependency.
+    fn next_u64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    fn random_u256(state: &mut u64) -> Uint256 {
+        let mut bytes = [0u8; 32];
+        for chunk in bytes.chunks_mut(8) {
+            chunk.copy_from_slice(&next_u64(state).to_be_bytes());
+        }
+        Uint256::from_be_bytes(bytes)
+    }
+
+    /// Uniform-ish random price in `[MIN_SQRT_RATIO, MAX_SQRT_RATIO)`.
+    fn random_price_in_range(state: &mut u64) -> Uint256 {
+        let lo = Uint256::from(MIN_SQRT_RATIO);
+        let hi = max_sqrt_ratio();
+        let span = hi - lo; // > 0
+        lo + (random_u256(state) % span)
+    }
+
+    /// Assert the defining contract holds for a single price.
+    fn assert_tick_contract(p: Uint256) {
+        let t = get_tick_at_sqrt_ratio(p)
+            .unwrap_or_else(|e| panic!("get_tick_at_sqrt_ratio({}) errored: {}", p, e));
+
+        assert!(
+            (MIN_TICK..=MAX_TICK).contains(&t),
+            "tick {} out of bounds for price {}", t, p
+        );
+
+        let at_t = get_sqrt_ratio_at_tick(t).unwrap();
+        assert!(
+            at_t <= p,
+            "sqrtRatio(T)={} must be <= price={} (T={})", at_t, p, t
+        );
+
+        if t < MAX_TICK {
+            let at_t_plus_1 = get_sqrt_ratio_at_tick(t + 1).unwrap();
+            assert!(
+                at_t_plus_1 > p,
+                "sqrtRatio(T+1)={} must be > price={} (T={})", at_t_plus_1, p, t
+            );
+        }
+    }
+
+    #[test]
+    fn fuzz_tick_at_sqrt_ratio_contract_random_prices() {
+        let mut state: u64 = 0x00C0_FFEE_1234_5678;
+        // 200k random prices across the full range. Deterministic seed so any
+        // failure is reproducible.
+        for _ in 0..200_000 {
+            let p = random_price_in_range(&mut state);
+            assert_tick_contract(p);
+        }
+    }
+
+    #[test]
+    fn fuzz_tick_at_sqrt_ratio_contract_near_boundaries() {
+        // Stress the inclusive/exclusive endpoints and a dense band of prices
+        // hugging the exact tick boundaries, where off-by-one is most likely.
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_F00D;
+
+        // Exact endpoints.
+        assert_tick_contract(Uint256::from(MIN_SQRT_RATIO));
+        assert_tick_contract(max_sqrt_ratio() - Uint256::one());
+
+        // For a spread of ticks, probe `sqrtRatio(T)`, `±1`, and a random jitter
+        // up toward the next tick. Covers the just-above / just-below cases.
+        let mut tick = MIN_TICK;
+        while tick < MAX_TICK {
+            let base = get_sqrt_ratio_at_tick(tick).unwrap();
+
+            // Exactly on the tick: result must be >= tick (it's a valid floor).
+            assert_tick_contract(base);
+            // One unit above the tick boundary (still < next tick boundary).
+            assert_tick_contract(base + Uint256::one());
+            // Just below the boundary maps to the previous tick — only valid
+            // while we stay at/above MIN_SQRT_RATIO.
+            if base > Uint256::from(MIN_SQRT_RATIO) {
+                assert_tick_contract(base - Uint256::one());
+            }
+            // Random point inside [sqrtRatio(tick), sqrtRatio(tick+1)).
+            let next = get_sqrt_ratio_at_tick(tick + 1).unwrap();
+            let gap = next - base;
+            if gap > Uint256::one() {
+                assert_tick_contract(base + (random_u256(&mut state) % gap));
+            }
+
+            // Non-uniform stride so we don't only sample multiples of a power of
+            // two; still covers the whole range in a reasonable test runtime.
+            tick += 9973; // prime stride
+        }
+    }
+
+    /// Exhaustive tick→price→tick roundtrip. Heavy (~1.77M ticks); run with
+    /// `--release` for speed. `MAX_TICK` is excluded because
+    /// `sqrtRatio(MAX_TICK) == MAX_SQRT_RATIO`, which `get_tick_at_sqrt_ratio`
+    /// rejects by design (exclusive upper bound).
+    #[test]
+    #[ignore = "exhaustive 1.77M-tick sweep; run explicitly with --release"]
+    fn fuzz_tick_roundtrip_exhaustive() {
+        for t in MIN_TICK..MAX_TICK {
+            let p = get_sqrt_ratio_at_tick(t).unwrap();
+            let recovered = get_tick_at_sqrt_ratio(p).unwrap();
+            assert_eq!(recovered, t, "roundtrip failed at tick {}", t);
+        }
+    }
 }

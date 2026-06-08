@@ -24,7 +24,21 @@ use choice_clmm_math::tick_math::{
     MIN_TICK,
 };
 
+/// Hard cap on the number of price-range steps a single swap may traverse.
+///
+/// Each loop iteration in `compute_swap` advances the price to either the next
+/// initialized tick or a bitmap word boundary (one storage read + O(1) bit
+/// math per step). With `tick_spacing == 1` the full tick range spans only
+/// ~6,932 words, and any realistic swap crosses a handful to a few hundred
+/// ticks, so this ceiling never bites legitimate use. It exists to bound the
+/// work of a swap/quote against a pathological pool — e.g. one with liquidity
+/// only at extreme ticks (or none) that would otherwise force a full-range
+/// word-by-word walk on every read-only `Quote`. Exceeding it is a clean,
+/// explicit error rather than an opaque out-of-gas.
+pub const MAX_SWAP_ITERATIONS: u32 = 10_000;
+
 /// Result of the pure swap computation (no state writes).
+#[derive(Debug)]
 pub struct SwapComputation {
     pub amount_in: Uint128,
     pub amount_out: Uint128,
@@ -88,6 +102,7 @@ pub fn compute_swap(
     let mut state_fg0 = fee_growth_global_0;
     let mut state_fg1 = fee_growth_global_1;
     let mut tick_updates: Vec<(i32, TickInfo)> = Vec::new();
+    let mut iterations: u32 = 0;
 
     // Fee is always charged in the input token, so a swap accrues protocol fee
     // to exactly one side: token0 when `zero_for_one`, else token1.
@@ -98,6 +113,14 @@ pub fn compute_swap(
     };
 
     while !state_amount_remaining.is_zero() && state_sqrt_price != sqrt_price_limit_x96 {
+        // Bound total work: a pathological pool (sparse/zero liquidity across a
+        // wide range) must not let a single swap/quote walk the bitmap without
+        // limit. See `MAX_SWAP_ITERATIONS`.
+        iterations += 1;
+        if iterations > MAX_SWAP_ITERATIONS {
+            return Err(ContractError::SwapIterationLimit { iterations });
+        }
+
         let (mut step_tick_next, step_initialized) =
             next_initialized_tick_in_chunk(storage, state_tick, tick_spacing, zero_for_one)?;
 
@@ -342,6 +365,14 @@ fn apply_swap(
     result: &SwapComputation,
     fee_pips: u32,
 ) -> Result<Response, ContractError> {
+    // Validate the output recipient up front (parity with flash/collect). The
+    // low-level `Swap` entrypoint forwards a caller-supplied `recipient` string
+    // straight into the output transfer; an invalid bech32 would otherwise only
+    // surface deep inside the BankMsg/Cw20 transfer as an opaque error. Fail fast
+    // with a clear one. (Sender-defaulted recipients are already valid, so this
+    // is a no-op for them.)
+    deps.api.addr_validate(recipient)?;
+
     // Save tick updates
     for (tick, tick_info) in &result.tick_updates {
         TICKS.save(deps.storage, *tick, tick_info)?;
@@ -1008,4 +1039,113 @@ fn resolve_direction_native(
     let coin = &relevant[0];
     let zero_for_one = token0_denom.is_some_and(|d| coin.denom == d);
     Ok((zero_for_one, coin.amount))
+}
+
+#[cfg(test)]
+mod iteration_cap_tests {
+    use super::*;
+    use crate::core::bitmap::flip_tick;
+    use crate::state::TICKS;
+    use choice_clmm_common::pool::TickInfo;
+    use cosmwasm_std::testing::MockStorage;
+    use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
+
+    /// A pool with an initialized tick at (almost) every spacing-1 tick forces
+    /// the swap loop to cross one tick per iteration. A wide swap therefore tries
+    /// to traverse far more than `MAX_SWAP_ITERATIONS` ticks and must bail out
+    /// with a clean `SwapIterationLimit` error rather than running unbounded
+    /// (the "dust at every tick" griefing vector that would otherwise make every
+    /// quote/swap against such a pool arbitrarily expensive).
+    #[test]
+    fn swap_bails_out_past_iteration_cap() {
+        let mut storage = MockStorage::new();
+        let spacing = 1i32;
+
+        // Dust liquidity at ticks 1..=cap+5, each adding +1 L as price rises.
+        let n = (MAX_SWAP_ITERATIONS as i32) + 5;
+        for tick in 1..=n {
+            let info = TickInfo {
+                active_positions_count: 1,
+                liquidity_delta: 1,
+                fee_growth_outside_0: Uint256::zero(),
+                fee_growth_outside_1: Uint256::zero(),
+                initialized: true,
+            };
+            TICKS.save(&mut storage, tick, &info).unwrap();
+            flip_tick(&mut storage, tick, spacing).unwrap();
+        }
+
+        // Start at tick 0, price rising (one_for_zero), huge input, full-range
+        // limit so nothing stops the walk except the iteration guard.
+        let start_price = get_sqrt_ratio_at_tick(0).unwrap();
+        let huge = Uint128::MAX;
+        let limit = max_sqrt_ratio() - Uint256::one();
+
+        let err = compute_swap(
+            &storage,
+            start_price,
+            0,
+            1_000,         // initial active liquidity
+            Uint256::zero(),
+            Uint256::zero(),
+            spacing,
+            false,         // one_for_zero: price increases through ticks 1,2,3,...
+            huge,
+            limit,
+            3_000,
+            0,
+            0,
+            true,
+        )
+        .unwrap_err();
+
+        match err {
+            ContractError::SwapIterationLimit { iterations } => {
+                assert_eq!(iterations, MAX_SWAP_ITERATIONS + 1);
+            }
+            other => panic!("expected SwapIterationLimit, got {:?}", other),
+        }
+    }
+
+    /// Control: a normal swap that crosses only a handful of ticks completes
+    /// well under the cap (guards against the limit being set absurdly low).
+    #[test]
+    fn normal_swap_well_under_cap() {
+        let mut storage = MockStorage::new();
+        let spacing = 60i32;
+
+        for tick in [60, 120, 180, 240, 300] {
+            let info = TickInfo {
+                active_positions_count: 1,
+                liquidity_delta: 1_000_000,
+                fee_growth_outside_0: Uint256::zero(),
+                fee_growth_outside_1: Uint256::zero(),
+                initialized: true,
+            };
+            TICKS.save(&mut storage, tick, &info).unwrap();
+            flip_tick(&mut storage, tick, spacing).unwrap();
+        }
+
+        let start_price = get_sqrt_ratio_at_tick(0).unwrap();
+        let limit = max_sqrt_ratio() - Uint256::one();
+
+        // Modest input — should stop on input exhaustion, not the iteration cap.
+        let res = compute_swap(
+            &storage,
+            start_price,
+            0,
+            10_000_000,
+            Uint256::zero(),
+            Uint256::zero(),
+            spacing,
+            false,
+            Uint128::new(1_000),
+            limit,
+            3_000,
+            0,
+            0,
+            true,
+        );
+        assert!(res.is_ok(), "normal small swap must not hit the iteration cap");
+    }
 }

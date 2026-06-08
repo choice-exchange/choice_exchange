@@ -60,6 +60,11 @@ path = "../../tests/vault_integration.rs"
 harness = true
 
 [[test]]
+name = "manager_solvency_fuzz"
+path = "../../tests/manager_solvency_fuzz.rs"
+harness = true
+
+[[test]]
 name = "zap_lp_integration"
 path = "../../tests/zap_lp_integration.rs"
 harness = true
