@@ -17,12 +17,12 @@ use choice::asset::{Asset, AssetInfo, PairInfo};
 use choice::factory::{ExecuteMsg as FactoryExecuteMsg, InstantiateMsg as FactoryInstantiateMsg};
 use choice::pair::ExecuteMsg as PairExecuteMsg;
 use choice::staking::{
-    ExecuteMsg as FarmExecuteMsg, InstantiateMsg as FarmInstantiateMsg,
-    QueryMsg as FarmQueryMsg, StakerInfoResponse,
+    ExecuteMsg as FarmExecuteMsg, InstantiateMsg as FarmInstantiateMsg, QueryMsg as FarmQueryMsg,
+    StakerInfoResponse,
 };
 use choice_vault::msg::{
-    ExecuteMsg as VaultExecuteMsg, InstantiateMsg as VaultInstantiateMsg, QueryMsg as VaultQueryMsg,
-    UserInfoResponse,
+    ExecuteMsg as VaultExecuteMsg, InstantiateMsg as VaultInstantiateMsg,
+    QueryMsg as VaultQueryMsg, UserInfoResponse,
 };
 
 use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg};
@@ -631,7 +631,10 @@ fn pause_blocks_entry_but_allows_exit() {
         &env.user,
     )
     .unwrap();
-    assert!(total_shares(&env).is_zero(), "user exit should clear shares");
+    assert!(
+        total_shares(&env).is_zero(),
+        "user exit should clear shares"
+    );
 
     // Unpause restores entry paths.
     wasm.execute(&env.vault_addr, &VaultExecuteMsg::Unpause, &[], &env.admin)
@@ -1203,7 +1206,10 @@ fn native_cw20_deposit_activate_compound_withdraw() {
         user_lp_after,
         user_lp
     );
-    assert!(total_shares(&env).is_zero(), "vault should be fully unwound");
+    assert!(
+        total_shares(&env).is_zero(),
+        "vault should be fully unwound"
+    );
 }
 
 /// CW20/CW20 pair with a CW20 reward token. Exercises the swap path where
@@ -1220,10 +1226,7 @@ fn cw20_cw20_deposit_activate_compound_withdraw() {
     let app = InjectiveTestApp::new();
     let wasm = Wasm::new(&app);
 
-    let initial = &[Coin::new(
-        1_000_000_000_000_000_000_000_000u128,
-        DENOM_INJ,
-    )];
+    let initial = &[Coin::new(1_000_000_000_000_000_000_000_000u128, DENOM_INJ)];
     let decimals = &[18u32];
     let custom_fee = FeeSetting::Custom {
         amount: Coin::new(1_000_000_000_000_000_000u128, DENOM_INJ),
@@ -1630,7 +1633,10 @@ fn cw20_cw20_deposit_activate_compound_withdraw() {
         "CW20 reward slice should not go backwards on exit"
     );
 
-    assert!(total_shares(&env).is_zero(), "vault should be fully unwound");
+    assert!(
+        total_shares(&env).is_zero(),
+        "vault should be fully unwound"
+    );
 }
 
 /// Farm owner triggers the timelocked `MigrateStaking` flow while the vault
@@ -1719,7 +1725,10 @@ fn migrate_staking_does_not_strand_vault_users() {
         bank_balance(&env, &env.user.address(), DENOM_ATOM) > user_atom_before,
         "pre-migration rewards not paid out on exit"
     );
-    assert!(total_shares(&env).is_zero(), "vault should be fully unwound");
+    assert!(
+        total_shares(&env).is_zero(),
+        "vault should be fully unwound"
+    );
 }
 
 /// L-15: a deposit too small to mint any shares (because share price has

@@ -24,7 +24,9 @@ pub enum ContractError {
     #[error("salt_suffix `{got}` must be non-empty and ASCII-alphanumeric")]
     SaltSuffixInvalid { got: String },
 
-    #[error("Constructed subdenom `{subdenom}` is {len} chars, over the {max}-char tokenfactory cap")]
+    #[error(
+        "Constructed subdenom `{subdenom}` is {len} chars, over the {max}-char tokenfactory cap"
+    )]
     SubdenomTooLong {
         subdenom: String,
         len: usize,
@@ -40,9 +42,7 @@ pub enum ContractError {
     #[error("Launch {id} not found")]
     LaunchNotFound { id: u64 },
 
-    #[error(
-        "Launch {id} status is {actual} but {expected} is required for this transition"
-    )]
+    #[error("Launch {id} status is {actual} but {expected} is required for this transition")]
     InvalidLaunchStatus {
         id: u64,
         actual: String,
@@ -101,9 +101,7 @@ pub enum ContractError {
     #[error("Migration state missing: no v1 config bytes at storage key `config`")]
     MigrationStateMissing {},
 
-    #[error(
-        "Invalid migration: cannot apply variant `{requested}` from current version `{from}`"
-    )]
+    #[error("Invalid migration: cannot apply variant `{requested}` from current version `{from}`")]
     InvalidMigration { from: String, requested: String },
 
     #[error("Seeder address `{addr}` holds no contract code — refusing to deliver cw_held to a ghost/EOA address")]

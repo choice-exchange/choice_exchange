@@ -33,7 +33,9 @@ use cw_storage_plus::{Item, Map};
 pub enum Mode {
     Honest,
     /// Burn `bps/10_000` of every transferred amount; deliver the rest.
-    FeeOnTransfer { bps: u16 },
+    FeeOnTransfer {
+        bps: u16,
+    },
     /// Outbound `Transfer` always reverts (deposits via `TransferFrom` still work).
     RevertOnTransfer,
 }
@@ -132,8 +134,7 @@ pub fn execute(
             }
             let recipient = deps.api.addr_validate(&recipient)?;
             move_funds(deps.storage, &info.sender, &recipient, amount, &mode)?;
-            Ok(reentry(deps, "transfer", |p| p.on_transfer)?
-                .add_attribute("action", "transfer"))
+            Ok(reentry(deps, "transfer", |p| p.on_transfer)?.add_attribute("action", "transfer"))
         }
         ExecuteMsg::TransferFrom {
             owner,

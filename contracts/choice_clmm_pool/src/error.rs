@@ -46,6 +46,8 @@ pub enum ContractError {
     #[error("Flash loan requires active in-range liquidity")]
     FlashWithoutLiquidity {},
 
-    #[error("Swap traversed too many ticks ({iterations}); split the swap or use a tighter price limit")]
+    #[error(
+        "Swap traversed too many ticks ({iterations}); split the swap or use a tighter price limit"
+    )]
     SwapIterationLimit { iterations: u32 },
 }

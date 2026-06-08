@@ -104,12 +104,20 @@ fn all_positions(wasm: &Wasm<InjectiveTestApp>, pool: &str) -> Vec<AllPositionsE
 
 /// (Σ tokens_owed_0, Σ tokens_owed_1) across every pool position.
 fn sum_owed(wasm: &Wasm<InjectiveTestApp>, pool: &str) -> (u128, u128) {
-    all_positions(wasm, pool).iter().fold((0u128, 0u128), |a, p| {
-        (a.0 + p.tokens_owed_0.u128(), a.1 + p.tokens_owed_1.u128())
-    })
+    all_positions(wasm, pool)
+        .iter()
+        .fold((0u128, 0u128), |a, p| {
+            (a.0 + p.tokens_owed_0.u128(), a.1 + p.tokens_owed_1.u128())
+        })
 }
 
-fn create_pool(wasm: &Wasm<InjectiveTestApp>, factory: &str, admin: &SigningAccount, a: AssetInfo, b: AssetInfo) -> String {
+fn create_pool(
+    wasm: &Wasm<InjectiveTestApp>,
+    factory: &str,
+    admin: &SigningAccount,
+    a: AssetInfo,
+    b: AssetInfo,
+) -> String {
     wasm.execute(
         factory,
         &FactoryExecuteMsg::CreatePool {
@@ -170,7 +178,11 @@ fn setup() -> Env {
     let trader = mk();
 
     let factory_code_id = wasm
-        .store_code(&get_wasm_byte_code("choice_clmm_factory.wasm"), None, &admin)
+        .store_code(
+            &get_wasm_byte_code("choice_clmm_factory.wasm"),
+            None,
+            &admin,
+        )
         .unwrap()
         .data
         .code_id;
@@ -404,7 +416,8 @@ fn fee_on_transfer_overcredit_is_contained() {
     assert!(
         pool_usdt >= owed_usdt,
         "honest USDT under-collateralized: holds {}, owes {}",
-        pool_usdt, owed_usdt
+        pool_usdt,
+        owed_usdt
     );
 
     // (3) Shortfall is confined to EVIL, and the pool never CREATED EVIL: it
@@ -413,12 +426,14 @@ fn fee_on_transfer_overcredit_is_contained() {
     assert!(
         pool_evil <= evil_received,
         "pool conjured EVIL: holds {} > received {}",
-        pool_evil, evil_received
+        pool_evil,
+        evil_received
     );
     assert!(
         pool_evil < owed_evil,
         "expected EVIL shortfall from fee-on-transfer (holds {}, owes {})",
-        pool_evil, owed_evil
+        pool_evil,
+        owed_evil
     );
 
     // (2, rescue) The honest LP can always pull the honest token out, on its own,
@@ -430,7 +445,7 @@ fn fee_on_transfer_overcredit_is_contained() {
             recipient: env.honest_lp.address(),
             lower_tick: -100,
             upper_tick: 100,
-            amount0_requested: MAX_UINT128, // USDT (token0)
+            amount0_requested: MAX_UINT128,     // USDT (token0)
             amount1_requested: Uint128::zero(), // skip the EVIL leg entirely
         },
         &[],
@@ -507,7 +522,10 @@ fn revert_on_transfer_dos_is_contained_and_recoverable() {
         &[],
         &env.honest_lp,
     );
-    assert!(joint.is_err(), "joint collect should revert while EVIL is hostile");
+    assert!(
+        joint.is_err(),
+        "joint collect should revert while EVIL is hostile"
+    );
 
     // (4, rescue) The honest USDT leg is still fully recoverable on its own.
     let usdt_before = bank_balance(&bank, &env.honest_lp.address(), USDT);
@@ -517,7 +535,7 @@ fn revert_on_transfer_dos_is_contained_and_recoverable() {
             recipient: env.honest_lp.address(),
             lower_tick: -100,
             upper_tick: 100,
-            amount0_requested: MAX_UINT128,    // USDT
+            amount0_requested: MAX_UINT128,     // USDT
             amount1_requested: Uint128::zero(), // skip hostile EVIL leg
         },
         &[],
@@ -556,7 +574,11 @@ fn revert_on_transfer_dos_is_contained_and_recoverable() {
         evil_balance(&wasm, &evil, &env.honest_lp.address()) > evil_before,
         "EVIL not recoverable after token behaves again"
     );
-    assert_eq!(sum_owed(&wasm, &evil_pool), (0, 0), "owed not fully drained after recovery");
+    assert_eq!(
+        sum_owed(&wasm, &evil_pool),
+        (0, 0),
+        "owed not fully drained after recovery"
+    );
 
     // (1) Honest pool unaffected.
     assert_honest_pool_healthy(&env, &wasm, &honest_pool);

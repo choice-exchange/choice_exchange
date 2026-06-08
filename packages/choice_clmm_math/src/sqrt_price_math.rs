@@ -41,9 +41,7 @@ pub fn get_amount0_delta(
     round_up: bool,
 ) -> StdResult<Uint256> {
     if sqrt_ratio_a.is_zero() || sqrt_ratio_b.is_zero() {
-        return Err(StdError::generic_err(
-            "get_amount0_delta: zero sqrt price",
-        ));
+        return Err(StdError::generic_err("get_amount0_delta: zero sqrt price"));
     }
 
     let (sqrt_ratio_lower, sqrt_ratio_upper) = if sqrt_ratio_a < sqrt_ratio_b {
@@ -286,9 +284,8 @@ mod tests {
     fn next_sqrt_price_amount0_add_rounds_up() {
         let price = q96_val();
         let l: u128 = 10u128.pow(18);
-        let p1 =
-            get_next_sqrt_price_from_amount0_rounding_up(price, l, Uint256::from(1u128), true)
-                .unwrap();
+        let p1 = get_next_sqrt_price_from_amount0_rounding_up(price, l, Uint256::from(1u128), true)
+            .unwrap();
         // Adding token0 pushes price down; but since we round up, new price >= exact.
         assert!(p1 < price);
     }
@@ -318,16 +315,13 @@ mod tests {
 
     #[test]
     fn next_sqrt_price_zero_liquidity_errors() {
-        assert!(
-            get_next_sqrt_price_from_input(q96_val(), 0, Uint256::from(1u128), true).is_err()
-        );
+        assert!(get_next_sqrt_price_from_input(q96_val(), 0, Uint256::from(1u128), true).is_err());
     }
 
     #[test]
     fn next_sqrt_price_zero_price_errors() {
         assert!(
-            get_next_sqrt_price_from_input(Uint256::zero(), 1, Uint256::from(1u128), true)
-                .is_err()
+            get_next_sqrt_price_from_input(Uint256::zero(), 1, Uint256::from(1u128), true).is_err()
         );
     }
 

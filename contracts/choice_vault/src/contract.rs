@@ -24,9 +24,9 @@ use crate::msg::{
     PendingDepositsResponse, QueryMsg, UserInfoResponse, WithdrawSharesReplyPayload,
 };
 use crate::state::{
-    CompoundingInfo, Config, SwapHop as StateSwapHop, UserInfo, COMPOUNDING_INFO,
-    COMPOUNDER_ROTATION_DELAY_SECONDS, CONFIG, MAX_SLIPPAGE_RAISE_DELAY_SECONDS,
-    TOTAL_PENDING_DEPOSITS, TOTAL_SHARES, USERS,
+    CompoundingInfo, Config, SwapHop as StateSwapHop, UserInfo, COMPOUNDER_ROTATION_DELAY_SECONDS,
+    COMPOUNDING_INFO, CONFIG, MAX_SLIPPAGE_RAISE_DELAY_SECONDS, TOTAL_PENDING_DEPOSITS,
+    TOTAL_SHARES, USERS,
 };
 
 const CONTRACT_NAME: &str = "crates.io:choice-vault";
@@ -198,12 +198,8 @@ pub fn execute(
         ExecuteMsg::ProposeCompounder { new_compounder } => {
             execute_propose_compounder(deps, env, info, new_compounder)
         }
-        ExecuteMsg::ApplyCompounderRotation => {
-            execute_apply_compounder_rotation(deps, env, info)
-        }
-        ExecuteMsg::CancelCompounderProposal => {
-            execute_cancel_compounder_proposal(deps, info)
-        }
+        ExecuteMsg::ApplyCompounderRotation => execute_apply_compounder_rotation(deps, env, info),
+        ExecuteMsg::CancelCompounderProposal => execute_cancel_compounder_proposal(deps, info),
         ExecuteMsg::ProposeNewOwner { new_owner } => {
             execute_propose_new_owner(deps, info, new_owner)
         }
@@ -1449,9 +1445,7 @@ pub(crate) fn optimal_zap_amount_xyk(
     let k = term1.checked_add(term2).map_err(StdError::from)?;
 
     let sqrt_k = k.isqrt();
-    let offset = rx
-        .checked_mul(Uint256::from(C3))
-        .map_err(StdError::from)?;
+    let offset = rx.checked_mul(Uint256::from(C3)).map_err(StdError::from)?;
     // sqrt_k >= offset whenever A > 0 (the formula's discriminant includes +4γ·Rx·A);
     // the checked_sub guards against precision pathologies in the isqrt floor.
     let numerator = sqrt_k.checked_sub(offset).map_err(StdError::from)?;
@@ -1475,11 +1469,7 @@ fn query_pair_offer_reserve(
         .iter()
         .find(|a| a.info == *offer_info)
         .map(|a| a.amount)
-        .ok_or_else(|| {
-            StdError::generic_err(
-                "optimal_zap: offer asset not found in pair reserves",
-            )
-        })
+        .ok_or_else(|| StdError::generic_err("optimal_zap: offer asset not found in pair reserves"))
 }
 
 /// Applies the configured compound fee to the pending-reward amount and returns the

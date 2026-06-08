@@ -107,7 +107,12 @@ fn v3_reciprocal_relationship_holds_approximately() {
         let tolerance = pos * Uint256::from(2u128);
         assert!(
             diff <= tolerance,
-            "reciprocal drift too large at tick {}: product={} q192={} diff={} tol={}", t, product, q192, diff, tolerance,
+            "reciprocal drift too large at tick {}: product={} q192={} diff={} tol={}",
+            t,
+            product,
+            q192,
+            diff,
+            tolerance,
         );
     }
 }

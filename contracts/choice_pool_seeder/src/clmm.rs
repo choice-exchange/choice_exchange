@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn equal_amounts_give_price_one() {
-        let p = init_sqrt_price_from_amounts(Uint128::new(1_000_000), Uint128::new(1_000_000))
-            .unwrap();
+        let p =
+            init_sqrt_price_from_amounts(Uint128::new(1_000_000), Uint128::new(1_000_000)).unwrap();
         // sqrt(1) * 2^96 == 2^96 exactly.
         assert_eq!(p, one_x96());
     }

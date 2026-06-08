@@ -31,7 +31,9 @@ mod solvency_fuzz {
     const T1: &str = "ubbb";
 
     fn native(d: &str) -> AssetInfo {
-        AssetInfo::NativeToken { denom: d.to_string() }
+        AssetInfo::NativeToken {
+            denom: d.to_string(),
+        }
     }
     fn price_one() -> Uint256 {
         Uint256::from_u128(1) << 96
@@ -74,7 +76,10 @@ mod solvency_fuzz {
                     assert!(
                         *bal >= amt,
                         "INSOLVENCY [{}]: pool instructs Send of {} {} but only holds {}",
-                        ctx, amt, coin.denom, *bal
+                        ctx,
+                        amt,
+                        coin.denom,
+                        *bal
                     );
                     *bal -= amt;
                 }
@@ -118,7 +123,9 @@ mod solvency_fuzz {
         )
         .unwrap();
 
-        let owners: Vec<Addr> = (0..4).map(|i| deps.api.addr_make(&format!("lp{i}"))).collect();
+        let owners: Vec<Addr> = (0..4)
+            .map(|i| deps.api.addr_make(&format!("lp{i}")))
+            .collect();
         let env = mock_env();
 
         let mut bal0: u128 = 0;
@@ -137,8 +144,8 @@ mod solvency_fuzz {
                     let width = 10 * (1 + next(&mut st) % 400) as i32; // 10..=4000
                     let upper = lower + width;
                     let liq = 1 + next(&mut st) % 1_000_000_000; // 1..=1e9
-                    // Over-attach both tokens; the pool consumes what it needs
-                    // (rounded up) and refunds the surplus.
+                                                                 // Over-attach both tokens; the pool consumes what it needs
+                                                                 // (rounded up) and refunds the surplus.
                     let funds = vec![
                         Coin::new(Uint128::new(u64::MAX as u128), T0),
                         Coin::new(Uint128::new(u64::MAX as u128), T1),
@@ -148,9 +155,12 @@ mod solvency_fuzz {
                         upper_tick: upper,
                         amount: Uint128::new(liq as u128),
                     };
-                    if let Ok(res) =
-                        execute(deps.as_mut(), env.clone(), message_info(&owners[oi], &funds), msg)
-                    {
+                    if let Ok(res) = execute(
+                        deps.as_mut(),
+                        env.clone(),
+                        message_info(&owners[oi], &funds),
+                        msg,
+                    ) {
                         settle(&mut bal0, &mut bal1, &funds, &res, "mint");
                         *positions.entry((oi, lower, upper)).or_insert(0) += liq as u128;
                     }
@@ -167,9 +177,12 @@ mod solvency_fuzz {
                         recipient: None,
                         deadline: None,
                     };
-                    if let Ok(res) =
-                        execute(deps.as_mut(), env.clone(), message_info(&owners[oi], &funds), msg)
-                    {
+                    if let Ok(res) = execute(
+                        deps.as_mut(),
+                        env.clone(),
+                        message_info(&owners[oi], &funds),
+                        msg,
+                    ) {
                         settle(&mut bal0, &mut bal1, &funds, &res, "swap");
                     }
                 }

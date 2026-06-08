@@ -195,7 +195,11 @@ fn setup() -> Env {
         .unwrap();
 
     let factory_code_id = wasm
-        .store_code(&get_wasm_byte_code("choice_clmm_factory.wasm"), None, &admin)
+        .store_code(
+            &get_wasm_byte_code("choice_clmm_factory.wasm"),
+            None,
+            &admin,
+        )
         .unwrap()
         .data
         .code_id;
@@ -205,7 +209,11 @@ fn setup() -> Env {
         .data
         .code_id;
     let manager_code_id = wasm
-        .store_code(&get_wasm_byte_code("choice_clmm_manager.wasm"), None, &admin)
+        .store_code(
+            &get_wasm_byte_code("choice_clmm_manager.wasm"),
+            None,
+            &admin,
+        )
         .unwrap()
         .data
         .code_id;
@@ -281,7 +289,11 @@ fn setup() -> Env {
 /// Manager-live owed for an NFT: recorded `tokens_owed` + the unrealized pending
 /// fee delta (the manager's `PositionWithFees` computes both). This is exactly
 /// what the NFT could collect right now.
-fn nft_live(wasm: &Wasm<InjectiveTestApp>, manager: &str, token_id: &str) -> PositionWithFeesResponse {
+fn nft_live(
+    wasm: &Wasm<InjectiveTestApp>,
+    manager: &str,
+    token_id: &str,
+) -> PositionWithFeesResponse {
     wasm.query(
         manager,
         &ManagerQueryMsg::PositionWithFees {
@@ -325,8 +337,12 @@ fn assert_solvent(env: &Env, nfts: &[Nft], ctx: &str) {
     let mut owed1: u128 = 0;
     for n in nfts.iter().filter(|n| !n.burned) {
         let p = nft_live(&wasm, &env.manager_addr, &n.token_id);
-        owed0 = owed0.checked_add(p.tokens_owed_0.u128()).expect("owed0 sum overflow");
-        owed1 = owed1.checked_add(p.tokens_owed_1.u128()).expect("owed1 sum overflow");
+        owed0 = owed0
+            .checked_add(p.tokens_owed_0.u128())
+            .expect("owed0 sum overflow");
+        owed1 = owed1
+            .checked_add(p.tokens_owed_1.u128())
+            .expect("owed1 sum overflow");
     }
 
     let (pf0, pf1) = protocol_fees(&wasm, &env.pool_addr);
@@ -339,12 +355,20 @@ fn assert_solvent(env: &Env, nfts: &[Nft], ctx: &str) {
     assert!(
         pool0 >= need0,
         "INSOLVENT token0 [{}]: pool holds {} ATOM but owes {} to NFTs + {} protocol = {}",
-        ctx, pool0, owed0, pf0, need0,
+        ctx,
+        pool0,
+        owed0,
+        pf0,
+        need0,
     );
     assert!(
         pool1 >= need1,
         "INSOLVENT token1 [{}]: pool holds {} USDT but owes {} to NFTs + {} protocol = {}",
-        ctx, pool1, owed1, pf1, need1,
+        ctx,
+        pool1,
+        owed1,
+        pf1,
+        need1,
     );
 
     // The manager is a pure conduit: it must never sit on pool-token value.
@@ -431,7 +455,9 @@ fn try_increase(env: &Env, s: &mut u64, n: &Nft) -> ExecResult {
 /// Decrease a random fraction of an NFT's current liquidity.
 fn try_decrease(env: &Env, s: &mut u64, n: &Nft) -> ExecResult {
     let wasm = Wasm::new(&env.app);
-    let l = nft_live(&wasm, &env.manager_addr, &n.token_id).liquidity.u128();
+    let l = nft_live(&wasm, &env.manager_addr, &n.token_id)
+        .liquidity
+        .u128();
     if l == 0 {
         return Err(RunnerError::ExecuteError {
             msg: "nft has zero liquidity".to_string(),
@@ -550,7 +576,12 @@ fn try_burn_checked(env: &Env, n: &mut Nft, ctx: &str) {
     );
 
     if cleared {
-        res.unwrap_or_else(|e| panic!("burn of cleared NFT must succeed [{ctx}] {}: {e}", n.token_id));
+        res.unwrap_or_else(|e| {
+            panic!(
+                "burn of cleared NFT must succeed [{ctx}] {}: {e}",
+                n.token_id
+            )
+        });
         n.burned = true;
     } else {
         assert!(
@@ -570,7 +601,9 @@ fn try_burn_checked(env: &Env, n: &mut Nft, ctx: &str) {
 fn drain_nft(env: &Env, n: &mut Nft, ctx: &str) {
     let wasm = Wasm::new(&env.app);
 
-    let l = nft_live(&wasm, &env.manager_addr, &n.token_id).liquidity.u128();
+    let l = nft_live(&wasm, &env.manager_addr, &n.token_id)
+        .liquidity
+        .u128();
     if l > 0 {
         let r: ExecResult = wasm.execute(
             &env.manager_addr,
@@ -636,7 +669,11 @@ fn run_seed(seed: u64, ops: usize) {
         // spread of mutators afterward. Always have a mint fallback when no NFT
         // exists yet.
         let live: Vec<usize> = (0..nfts.len()).filter(|&j| !nfts[j].burned).collect();
-        let choice = if live.is_empty() { 0 } else { next(&mut s) % 100 };
+        let choice = if live.is_empty() {
+            0
+        } else {
+            next(&mut s) % 100
+        };
 
         match choice {
             // Mint a fresh NFT (heavily into RANGES[0..3] == (-100,100)).

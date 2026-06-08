@@ -30,10 +30,9 @@ use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
 use crate::error::ContractError;
 use crate::state::{
     next_token_id, q128, Config, PendingCollect, PendingDecrease, PendingIncrease, PendingMint,
-    PositionState,
-    CONFIG, PENDING_COLLECT, PENDING_DECREASE, PENDING_INCREASE, PENDING_MINT, POSITIONS,
-    REPLY_COLLECT, REPLY_DECREASE_LIQUIDITY, REPLY_INCREASE_LIQUIDITY, REPLY_MINT_POSITION,
-    TOKEN_ID_COUNTER,
+    PositionState, CONFIG, PENDING_COLLECT, PENDING_DECREASE, PENDING_INCREASE, PENDING_MINT,
+    POSITIONS, REPLY_COLLECT, REPLY_DECREASE_LIQUIDITY, REPLY_INCREASE_LIQUIDITY,
+    REPLY_MINT_POSITION, TOKEN_ID_COUNTER,
 };
 
 const CONTRACT_NAME: &str = "crates.io:choice-clmm-manager";
@@ -89,24 +88,23 @@ fn ensure_nonpayable(info: &MessageInfo) -> Result<(), ContractError> {
 /// Parse a `token_id` string (decimal u64, as produced by `next_token_id`)
 /// into the numeric key used for the `PENDING_*` maps and the SubMsg payload.
 fn token_id_key(token_id: &str) -> Result<u64, ContractError> {
-    token_id
-        .parse::<u64>()
-        .map_err(|e| ContractError::Std(StdError::generic_err(format!(
+    token_id.parse::<u64>().map_err(|e| {
+        ContractError::Std(StdError::generic_err(format!(
             "invalid token_id {token_id}: {e}"
-        ))))
+        )))
+    })
 }
 
 /// Recover the `token_id` numeric key a reply was tagged with via
 /// `SubMsg::with_payload(token_id.to_be_bytes())`.
 fn token_id_from_payload(payload: &Binary) -> Result<u64, ContractError> {
-    let bytes = <[u8; 8]>::try_from(payload.as_slice()).map_err(|_| {
-        ContractError::InvalidReply {
+    let bytes =
+        <[u8; 8]>::try_from(payload.as_slice()).map_err(|_| ContractError::InvalidReply {
             reason: format!(
                 "expected 8-byte token_id payload, got {} bytes",
                 payload.len()
             ),
-        }
-    })?;
+        })?;
     Ok(u64::from_be_bytes(bytes))
 }
 
@@ -149,13 +147,8 @@ fn assert_owner_or_approved(
     }
 
     // Check ApproveAll operator approval (ignores expired).
-    let operator_res = base.query_operator(
-        deps,
-        env,
-        owner_res.owner,
-        info.sender.to_string(),
-        false,
-    );
+    let operator_res =
+        base.query_operator(deps, env, owner_res.owner, info.sender.to_string(), false);
     if let Ok(op) = operator_res {
         // query_operator errors if no operator is set; success means the
         // operator exists and (since include_expired=false) is not expired.
@@ -601,19 +594,18 @@ fn reply_mint_position(deps: DepsMut, env: Env, reply: Reply) -> Result<Response
         Some(metadata),
     )?;
 
-    Ok(Response::new()
-        .add_event(
-            Event::new("mint_position_complete")
-                .add_attribute("token_id", pending.token_id)
-                .add_attribute("owner", pending.owner)
-                .add_attribute("pool_address", pending.pool_address.as_str())
-                .add_attribute("fee", pending.fee.to_string())
-                .add_attribute("tick_lower", pending.tick_lower.to_string())
-                .add_attribute("tick_upper", pending.tick_upper.to_string())
-                .add_attribute("liquidity", pending.liquidity)
-                .add_attribute("amount0", pending.amount0_sent_to_pool)
-                .add_attribute("amount1", pending.amount1_sent_to_pool),
-        ))
+    Ok(Response::new().add_event(
+        Event::new("mint_position_complete")
+            .add_attribute("token_id", pending.token_id)
+            .add_attribute("owner", pending.owner)
+            .add_attribute("pool_address", pending.pool_address.as_str())
+            .add_attribute("fee", pending.fee.to_string())
+            .add_attribute("tick_lower", pending.tick_lower.to_string())
+            .add_attribute("tick_upper", pending.tick_upper.to_string())
+            .add_attribute("liquidity", pending.liquidity)
+            .add_attribute("amount0", pending.amount0_sent_to_pool)
+            .add_attribute("amount1", pending.amount1_sent_to_pool),
+    ))
 }
 
 // =========================================================================
@@ -751,7 +743,11 @@ fn execute_increase_liquidity(
         .add_attribute("liquidity_added", liquidity_added))
 }
 
-fn reply_increase_liquidity(deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
+fn reply_increase_liquidity(
+    deps: DepsMut,
+    _env: Env,
+    reply: Reply,
+) -> Result<Response, ContractError> {
     let token_id_key = token_id_from_payload(&reply.payload)?;
     let pending = PENDING_INCREASE.load(deps.storage, token_id_key)?;
     PENDING_INCREASE.remove(deps.storage, token_id_key);
@@ -793,9 +789,10 @@ fn reply_increase_liquidity(deps: DepsMut, _env: Env, reply: Reply) -> Result<Re
     accrue_fees_to_nft(&mut state, &fg)?;
 
     // Apply liquidity delta.
-    state.liquidity = state.liquidity.checked_add(pending.liquidity_added).map_err(|_| {
-        StdError::generic_err("NFT liquidity overflow")
-    })?;
+    state.liquidity = state
+        .liquidity
+        .checked_add(pending.liquidity_added)
+        .map_err(|_| StdError::generic_err("NFT liquidity overflow"))?;
 
     POSITIONS.save(deps.storage, &pending.token_id, &state)?;
 
@@ -1075,11 +1072,7 @@ fn execute_collect(
         .add_attribute("amount1_requested", pay1))
 }
 
-fn reply_collect(
-    deps: DepsMut,
-    _env: Env,
-    reply: Reply,
-) -> Result<Response, ContractError> {
+fn reply_collect(deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
     let token_id_key = token_id_from_payload(&reply.payload)?;
     let pending = PENDING_COLLECT.load(deps.storage, token_id_key)?;
     PENDING_COLLECT.remove(deps.storage, token_id_key);
@@ -1089,21 +1082,14 @@ fn reply_collect(
     // Pool's Collect emits the actual paid amounts as `amount0` / `amount1`
     // (which equal the request when the pool has enough owed, or clamp to
     // `pool.position.tokens_owed_*` otherwise).
-    let (amount0_paid, amount1_paid) = parse_amounts_from_reply(
-        &reply,
-        "amount0",
-        "amount1",
-        state.pool_address.as_str(),
-    )?;
+    let (amount0_paid, amount1_paid) =
+        parse_amounts_from_reply(&reply, "amount0", "amount1", state.pool_address.as_str())?;
 
     // Defensive: pool is supposed to cap at our request, never exceed it.
     if amount0_paid > pending.amount0_requested || amount1_paid > pending.amount1_requested {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "pool paid ({}, {}) above requested ({}, {}) — invariant violated",
-            amount0_paid,
-            amount1_paid,
-            pending.amount0_requested,
-            pending.amount1_requested,
+            amount0_paid, amount1_paid, pending.amount0_requested, pending.amount1_requested,
         ))));
     }
 
@@ -1122,8 +1108,14 @@ fn reply_collect(
 
     POSITIONS.save(deps.storage, &pending.token_id, &state)?;
 
-    let shortfall_0 = pending.amount0_requested.checked_sub(amount0_paid).unwrap_or(Uint128::zero());
-    let shortfall_1 = pending.amount1_requested.checked_sub(amount1_paid).unwrap_or(Uint128::zero());
+    let shortfall_0 = pending
+        .amount0_requested
+        .checked_sub(amount0_paid)
+        .unwrap_or(Uint128::zero());
+    let shortfall_1 = pending
+        .amount1_requested
+        .checked_sub(amount1_paid)
+        .unwrap_or(Uint128::zero());
 
     Ok(Response::new().add_event(
         Event::new("collect_complete")
@@ -1172,7 +1164,10 @@ fn execute_burn(
 
     let base = Cw721MetadataContract::default();
     let response = base.burn_nft(deps, &env, &info, token_id.clone())?;
-    Ok(response.add_event(Event::new("burn_position_complete").add_attribute("token_id", token_id)))
+    Ok(
+        response
+            .add_event(Event::new("burn_position_complete").add_attribute("token_id", token_id)),
+    )
 }
 
 // =========================================================================
@@ -1262,17 +1257,21 @@ fn compute_native_refunds(
     for (token, amount) in tokens {
         if let AssetInfo::NativeToken { denom } = token {
             let entry = required.entry(denom.clone()).or_insert_with(Uint128::zero);
-            *entry = entry.checked_add(*amount).map_err(|_| {
-                StdError::generic_err(format!("required overflow for {}", denom))
-            })?;
+            *entry = entry
+                .checked_add(*amount)
+                .map_err(|_| StdError::generic_err(format!("required overflow for {}", denom)))?;
         }
     }
     for coin in &info.funds {
-        let need = required.get(&coin.denom).copied().unwrap_or_else(Uint128::zero);
+        let need = required
+            .get(&coin.denom)
+            .copied()
+            .unwrap_or_else(Uint128::zero);
         if coin.amount > need {
-            let refund = coin.amount.checked_sub(need).map_err(|_| {
-                StdError::generic_err("refund subtraction underflow (unreachable)")
-            })?;
+            let refund = coin
+                .amount
+                .checked_sub(need)
+                .map_err(|_| StdError::generic_err("refund subtraction underflow (unreachable)"))?;
             if !refund.is_zero() {
                 refunds.push(Coin {
                     denom: coin.denom.clone(),

@@ -291,7 +291,14 @@ mod tests {
     #[test]
     fn rejects_fee_at_or_above_denominator() {
         let p = q96();
-        let res = compute_swap_step(p, p / Uint256::from(2u128), 1_000_000, Uint256::from(100u128), FEE_DENOMINATOR, true);
+        let res = compute_swap_step(
+            p,
+            p / Uint256::from(2u128),
+            1_000_000,
+            Uint256::from(100u128),
+            FEE_DENOMINATOR,
+            true,
+        );
         assert!(res.is_err());
     }
 

@@ -172,15 +172,17 @@ fn split_to_messages(
 
     // Burn share, floored. Only routed if a burn auction is configured.
     let burn_amt = match (&pfc.burn_auction, pfc.burn_share_bps) {
-        (Some(_), bps) if bps > 0 => amount
-            .checked_mul(Uint128::from(bps))
-            .map_err(|e| StdError::generic_err(e.to_string()))?
-            / Uint128::from(10_000u16),
+        (Some(_), bps) if bps > 0 => {
+            amount
+                .checked_mul(Uint128::from(bps))
+                .map_err(|e| StdError::generic_err(e.to_string()))?
+                / Uint128::from(10_000u16)
+        }
         _ => Uint128::zero(),
     };
-    let treasury_amt = amount.checked_sub(burn_amt).map_err(|e| {
-        StdError::generic_err(format!("collect_protocol split underflow: {e}"))
-    })?;
+    let treasury_amt = amount
+        .checked_sub(burn_amt)
+        .map_err(|e| StdError::generic_err(format!("collect_protocol split underflow: {e}")))?;
 
     if !burn_amt.is_zero() {
         // Safe: burn_amt > 0 implies burn_auction is Some.

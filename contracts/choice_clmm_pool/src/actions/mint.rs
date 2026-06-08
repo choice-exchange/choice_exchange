@@ -323,9 +323,10 @@ fn compute_native_refunds(
             .copied()
             .unwrap_or_else(Uint128::zero);
         if coin.amount > need {
-            let refund = coin.amount.checked_sub(need).map_err(|_| {
-                StdError::generic_err("refund subtraction underflow (unreachable)")
-            })?;
+            let refund = coin
+                .amount
+                .checked_sub(need)
+                .map_err(|_| StdError::generic_err("refund subtraction underflow (unreachable)"))?;
             if !refund.is_zero() {
                 refunds.push(Coin {
                     denom: coin.denom.clone(),

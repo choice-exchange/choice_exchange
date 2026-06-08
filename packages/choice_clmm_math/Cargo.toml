@@ -16,13 +16,7 @@ documentation = ""
 # for more explicit tests, cargo test --features=backtraces
 
 [dependencies]
-cw2                  = { version = "2.0.0" }
-cw20                 = { version = "2.0.0" } 
-cosmwasm-schema      = { version = "2.2.2" }
 cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
-
-injective-cosmwasm  = { version = "0.3.4-1" }
-injective-math      = { version = "0.3.4-1" }
 
 uint = "0.10.0"
 

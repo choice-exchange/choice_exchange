@@ -67,10 +67,7 @@ pub fn instantiate(
         });
     }
     let min_zap_amount = msg.min_zap_amount.unwrap_or_default();
-    let pair = msg
-        .pair
-        .map(|p| deps.api.addr_validate(&p))
-        .transpose()?;
+    let pair = msg.pair.map(|p| deps.api.addr_validate(&p)).transpose()?;
     let input = msg
         .input
         .map(|i| validate_asset_info(deps.api, &i))
@@ -944,8 +941,7 @@ fn execute_sweep(
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
     let mut bank_coins: Vec<Coin> = vec![];
     for asset in &assets {
-        let bal =
-            query_asset_balance(&deps.querier, deps.api, &env.contract.address, asset)?;
+        let bal = query_asset_balance(&deps.querier, deps.api, &env.contract.address, asset)?;
         if bal.is_zero() {
             continue;
         }
@@ -954,14 +950,16 @@ fn execute_sweep(
                 denom: denom.clone(),
                 amount: bal,
             }),
-            AssetInfo::Token { contract_addr } => messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: contract_addr.clone(),
-                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                    recipient: recipient_addr.to_string(),
-                    amount: bal,
-                })?,
-                funds: vec![],
-            })),
+            AssetInfo::Token { contract_addr } => {
+                messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: contract_addr.clone(),
+                    msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                        recipient: recipient_addr.to_string(),
+                        amount: bal,
+                    })?,
+                    funds: vec![],
+                }))
+            }
         }
     }
     if !bank_coins.is_empty() {

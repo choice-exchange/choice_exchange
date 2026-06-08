@@ -327,11 +327,13 @@ mod tests {
         assert_eq!(find("stranded"), Uint128::new(500));
 
         // Sanity: the swap output (usdt) is a *separate* message to `recipient`.
-        let out_to_recipient = res.messages.iter().any(|m| matches!(
-            &m.msg,
-            cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, .. })
-                if to_address == recipient.as_str()
-        ));
+        let out_to_recipient = res.messages.iter().any(|m| {
+            matches!(
+                &m.msg,
+                cosmwasm_std::CosmosMsg::Bank(BankMsg::Send { to_address, .. })
+                    if to_address == recipient.as_str()
+            )
+        });
         assert!(out_to_recipient, "swap output should go to recipient");
     }
 
@@ -942,7 +944,7 @@ mod tests {
                     max_fee_ppm: 100000,
                     volatility_multiplier: multiplier, // Variable
                     ema_halflife_seconds: 100,
-                max_fee_change_per_second_ppm: 0,
+                    max_fee_change_per_second_ppm: 0,
                 },
                 initial_sqrt_price: get_price_one(),
             };
@@ -1241,7 +1243,7 @@ mod tests {
                 lower_tick: -100,
                 upper_tick: 100,
                 amount: Uint128::from(10_000_000u128),
-        },
+            },
         )
         .unwrap();
 
@@ -1254,7 +1256,7 @@ mod tests {
                 lower_tick: 0,
                 upper_tick: 200,
                 amount: Uint128::from(5_000_000u128),
-        },
+            },
         )
         .unwrap();
 
@@ -1365,13 +1367,7 @@ mod tests {
             mint.clone(),
         )
         .unwrap();
-        execute(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&bob, &funds),
-            mint,
-        )
-        .unwrap();
+        execute(deps.as_mut(), mock_env(), message_info(&bob, &funds), mint).unwrap();
 
         // Each position must exist ONLY under its own caller's key.
         let resp_alice = query(
@@ -1398,8 +1394,7 @@ mod tests {
             },
         )
         .unwrap();
-        let pos_bob: choice_clmm_common::pool::PositionInfoResponse =
-            from_json(&resp_bob).unwrap();
+        let pos_bob: choice_clmm_common::pool::PositionInfoResponse = from_json(&resp_bob).unwrap();
         assert_eq!(pos_bob.liquidity, Uint128::from(1_000u128));
 
         // Bob cannot burn Alice's liquidity even though they share the range.
@@ -1408,13 +1403,7 @@ mod tests {
             upper_tick: 200,
             amount: Uint128::from(2_000u128),
         };
-        let err = execute(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&bob, &[]),
-            burn,
-        )
-        .unwrap_err();
+        let err = execute(deps.as_mut(), mock_env(), message_info(&bob, &[]), burn).unwrap_err();
         // Bob only has 1000; trying to burn 2000 must fail per-position.
         match err {
             ContractError::Std(StdError::GenericErr { msg, .. }) => {
@@ -1472,8 +1461,7 @@ mod tests {
         // tick_spacing = 10, so num_ticks ~= (2 * 887270 / 10) + 1 = 177455.
         // MAX_LIQUIDITY_PER_TICK = u128::MAX / 177455 ≈ 1.917e33.
         // We ask for one more than that to provoke the cap check.
-        let num_ticks: u128 =
-            (((choice_clmm_math::tick_math::MAX_TICK / 10) * 2) as u128) + 1;
+        let num_ticks: u128 = (((choice_clmm_math::tick_math::MAX_TICK / 10) * 2) as u128) + 1;
         let cap = u128::MAX / num_ticks;
         let over = cap.saturating_add(1);
 
@@ -1503,10 +1491,7 @@ mod tests {
         .unwrap_err();
         match err {
             ContractError::Std(StdError::GenericErr { msg, .. }) => {
-                assert!(
-                    msg.contains("MAX_LIQUIDITY_PER_TICK"),
-                    "got: {}", msg
-                );
+                assert!(msg.contains("MAX_LIQUIDITY_PER_TICK"), "got: {}", msg);
             }
             _ => panic!("expected MAX_LIQUIDITY_PER_TICK error, got {:?}", err),
         }
@@ -1849,13 +1834,7 @@ mod tests {
             },
             initial_sqrt_price: get_price_one(),
         };
-        instantiate(
-            deps.as_mut(),
-            env.clone(),
-            message_info(&factory, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), env.clone(), message_info(&factory, &[]), msg).unwrap();
 
         let lp_info = message_info(
             &lp,
@@ -1905,7 +1884,8 @@ mod tests {
         // Comes from `deps.api.addr_validate` in `apply_swap`.
         assert!(
             matches!(err, ContractError::Std(_)),
-            "expected an address-validation Std error, got {:?}", err
+            "expected an address-validation Std error, got {:?}",
+            err
         );
     }
 
@@ -1924,10 +1904,7 @@ mod tests {
         let mut env_whale = env_start.clone();
         env_whale.block.time = env_whale.block.time.plus_seconds(200);
         let whale = deps.api.addr_make("whale");
-        let whale_info = message_info(
-            &whale,
-            &[Coin::new(Uint128::new(500_000), "inj")],
-        );
+        let whale_info = message_info(&whale, &[Coin::new(Uint128::new(500_000), "inj")]);
         execute(
             deps.as_mut(),
             env_whale.clone(),
@@ -1945,10 +1922,7 @@ mod tests {
         env_probe.block.time = env_probe.block.time.plus_seconds(probe_delay_sec);
 
         let trader = deps.api.addr_make("trader");
-        let trader_info = message_info(
-            &trader,
-            &[Coin::new(Uint128::new(1_000), "inj")],
-        );
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(1_000), "inj")]);
         let res = execute(
             deps.as_mut(),
             env_probe,
@@ -1999,10 +1973,7 @@ mod tests {
 
         // Attacker swap A (same block).
         let whale = deps.api.addr_make("whale");
-        let whale_info = message_info(
-            &whale,
-            &[Coin::new(Uint128::new(300_000), "inj")],
-        );
+        let whale_info = message_info(&whale, &[Coin::new(Uint128::new(300_000), "inj")]);
         let res_a = execute(
             deps.as_mut(),
             env.clone(),
@@ -2018,10 +1989,7 @@ mod tests {
 
         // Victim swap B (SAME block).
         let trader = deps.api.addr_make("trader");
-        let victim = message_info(
-            &trader,
-            &[Coin::new(Uint128::new(1_000), "inj")],
-        );
+        let victim = message_info(&trader, &[Coin::new(Uint128::new(1_000), "inj")]);
         let res_b = execute(
             deps.as_mut(),
             env.clone(),
@@ -2164,7 +2132,9 @@ mod tests {
         // than the 1-second probe did.
         assert!(
             out_slow <= out_fast,
-            "waiting longer should let the fee catch up (lower output): fast={} slow={}", out_fast, out_slow
+            "waiting longer should let the fee catch up (lower output): fast={} slow={}",
+            out_fast,
+            out_slow
         );
     }
 
@@ -2182,10 +2152,7 @@ mod tests {
         let mut env_probe = env_whale.clone();
         env_probe.block.time = env_probe.block.time.plus_seconds(probe_delay_sec);
         let trader = deps.api.addr_make("trader");
-        let trader_info = message_info(
-            &trader,
-            &[Coin::new(Uint128::new(1_000), "inj")],
-        );
+        let trader_info = message_info(&trader, &[Coin::new(Uint128::new(1_000), "inj")]);
         let res = execute(
             deps.as_mut(),
             env_probe,
@@ -2233,9 +2200,7 @@ mod tests {
     // ----------------------------------------------------------------------
 
     use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage};
-    use cosmwasm_std::{
-        to_json_binary, ContractResult, OwnedDeps, SystemResult, WasmQuery,
-    };
+    use cosmwasm_std::{to_json_binary, ContractResult, OwnedDeps, SystemResult, WasmQuery};
 
     /// Instantiate an INJ/USDT pool with liquidity and a querier that answers the
     /// factory's `GetConfig` with `owner`. Returns (deps, owner_addr_string).
@@ -2272,13 +2237,7 @@ mod tests {
             },
             initial_sqrt_price: get_price_one(),
         };
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&factory, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&factory, &[]), msg).unwrap();
 
         let mint_msg = ExecuteMsg::Mint {
             lower_tick: -200,
@@ -2740,7 +2699,10 @@ mod tests {
         // One unit short of snapshot + fee.
         set_pool_balance(&mut deps, 5_002_999, 5_000_000);
         let err = contract_reply(deps.as_mut(), mock_env(), flash_reply_msg()).unwrap_err();
-        assert!(matches!(err, ContractError::FlashNotRepaid { token: 0, .. }));
+        assert!(matches!(
+            err,
+            ContractError::FlashNotRepaid { token: 0, .. }
+        ));
     }
 
     #[test]
@@ -3043,10 +3005,8 @@ mod tests {
         // are not the consumed input (the CW20 is), so all of them must refund.
         let trader = deps.api.addr_make("trader");
         let recipient = deps.api.addr_make("recipient");
-        let max_sqrt_ratio = Uint256::from_str(
-            "1461446703485210103287273052203988822378723970341",
-        )
-        .unwrap()
+        let max_sqrt_ratio = Uint256::from_str("1461446703485210103287273052203988822378723970341")
+            .unwrap()
             - Uint256::one();
 
         let trader_info = message_info(
@@ -3124,9 +3084,8 @@ mod tests {
         {
             let mut deps = mock_dependencies();
             let info = message_info(&deps.api.addr_make("factory"), &[]);
-            let err =
-                instantiate(deps.as_mut(), mock_env(), info, base_msg(Uint256::zero()))
-                    .unwrap_err();
+            let err = instantiate(deps.as_mut(), mock_env(), info, base_msg(Uint256::zero()))
+                .unwrap_err();
             assert!(matches!(err, ContractError::InvalidConfig { .. }));
         }
 
@@ -3135,8 +3094,7 @@ mod tests {
             let mut deps = mock_dependencies();
             let info = message_info(&deps.api.addr_make("factory"), &[]);
             let below = Uint256::from(MIN_SQRT_RATIO) - Uint256::one();
-            let err = instantiate(deps.as_mut(), mock_env(), info, base_msg(below))
-                .unwrap_err();
+            let err = instantiate(deps.as_mut(), mock_env(), info, base_msg(below)).unwrap_err();
             assert!(matches!(err, ContractError::InvalidConfig { .. }));
         }
 
@@ -3144,13 +3102,8 @@ mod tests {
         {
             let mut deps = mock_dependencies();
             let info = message_info(&deps.api.addr_make("factory"), &[]);
-            let err = instantiate(
-                deps.as_mut(),
-                mock_env(),
-                info,
-                base_msg(max_sqrt_ratio()),
-            )
-            .unwrap_err();
+            let err = instantiate(deps.as_mut(), mock_env(), info, base_msg(max_sqrt_ratio()))
+                .unwrap_err();
             assert!(matches!(err, ContractError::InvalidConfig { .. }));
         }
 

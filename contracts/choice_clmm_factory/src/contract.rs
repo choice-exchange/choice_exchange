@@ -73,7 +73,9 @@ pub fn execute(
             fee,
             creator,
             ttl_seconds,
-        } => execute_authorize_creation(deps, env, info, token_a, token_b, fee, creator, ttl_seconds),
+        } => {
+            execute_authorize_creation(deps, env, info, token_a, token_b, fee, creator, ttl_seconds)
+        }
         ExecuteMsg::CancelCreationAuth {
             token_a,
             token_b,
@@ -340,8 +342,11 @@ fn execute_create_pool(
     // `reply`, so it cannot be cross-contaminated by a concurrent/abandoned
     // create the way a shared `Item` could if the reply mode ever changed away
     // from `reply_on_success`. Self-documenting and race-proof by construction.
-    let sub_msg = SubMsg::reply_on_success(wasm_msg, 1)
-        .with_payload(to_json_binary(&(key0.clone(), key1.clone(), fee))?);
+    let sub_msg = SubMsg::reply_on_success(wasm_msg, 1).with_payload(to_json_binary(&(
+        key0.clone(),
+        key1.clone(),
+        fee,
+    ))?);
 
     Ok(Response::new()
         .add_submessage(sub_msg)
@@ -388,7 +393,10 @@ fn sender_owns_namespace(api: &dyn Api, sender: &Addr, asset: &AssetInfo) -> boo
     if !matches!(parts.next(), Some(s) if !s.is_empty()) {
         return false;
     }
-    match (api.addr_canonicalize(sender.as_str()), api.addr_canonicalize(owner)) {
+    match (
+        api.addr_canonicalize(sender.as_str()),
+        api.addr_canonicalize(owner),
+    ) {
         (Ok(s), Ok(o)) => s == o,
         _ => false,
     }

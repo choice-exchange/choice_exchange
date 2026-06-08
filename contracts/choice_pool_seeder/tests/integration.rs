@@ -124,11 +124,7 @@ fn instantiated_addr(
     res.events
         .iter()
         .find(|e| e.ty == "instantiate")
-        .and_then(|e| {
-            e.attributes
-                .iter()
-                .find(|a| a.key == "_contract_address")
-        })
+        .and_then(|e| e.attributes.iter().find(|a| a.key == "_contract_address"))
         .map(|a| a.value.clone())
         .expect("instantiate event with _contract_address attribute")
 }
@@ -707,7 +703,11 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
             },
         )
         .unwrap();
-    assert_eq!(tokens.tokens.len(), 1, "locker should hold one position NFT");
+    assert_eq!(
+        tokens.tokens.len(),
+        1,
+        "locker should hold one position NFT"
+    );
     let token_id = tokens.tokens[0].clone();
 
     let owner: OwnerOfResp = wasm
@@ -779,7 +779,11 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
     let total = treasury_got + creator_got;
     let expected_creator = total * CLMM_CREATOR_SHARE_BPS / 10_000;
     assert_eq!(creator_got, expected_creator, "creator leg = share of fee");
-    assert_eq!(treasury_got, total - expected_creator, "treasury = remainder");
+    assert_eq!(
+        treasury_got,
+        total - expected_creator,
+        "treasury = remainder"
+    );
 
     // Fees never strand in the locker.
     assert_eq!(

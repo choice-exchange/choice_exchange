@@ -175,7 +175,9 @@ pub enum QueryMsg {
     Keepers {},
     /// Cheap auth check for a candidate caller. Returns `true` if `address`
     /// is the owner or a registered keeper.
-    IsKeeper { address: String },
+    IsKeeper {
+        address: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

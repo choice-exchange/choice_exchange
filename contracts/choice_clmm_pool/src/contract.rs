@@ -4,9 +4,9 @@ use cosmwasm_std::{
     from_json, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Order, Reply, Response,
     StdError, StdResult, Uint128, Uint256,
 };
-use cw_storage_plus::Bound;
 use cw2::set_contract_version;
 use cw20::Cw20ReceiveMsg;
+use cw_storage_plus::Bound;
 
 use crate::actions::burn::execute_burn;
 use crate::actions::collect::execute_collect;
@@ -20,13 +20,15 @@ use crate::actions::swap::{
     execute_swap_exact_output, query_quote, query_quote_exact_output,
 };
 use crate::core::oracle::initialize_oracle;
-use crate::error::ContractError;
 use crate::core::ticks::get_fee_growth_inside as compute_fee_growth_inside;
+use crate::error::ContractError;
 use crate::state::{
     PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, POSITIONS,
-    PROTOCOL_FEES_0, PROTOCOL_FEES_1, PROTOCOL_FEE_CONFIG, TICK_BITMAP, TICKS,
+    PROTOCOL_FEES_0, PROTOCOL_FEES_1, PROTOCOL_FEE_CONFIG, TICKS, TICK_BITMAP,
 };
-use choice_clmm_common::factory::{ConfigResponse as FactoryConfigResponse, QueryMsg as FactoryQueryMsg};
+use choice_clmm_common::factory::{
+    ConfigResponse as FactoryConfigResponse, QueryMsg as FactoryQueryMsg,
+};
 use choice_clmm_common::pool::{
     Cw20HookMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, PoolState, ProtocolFeeConfig,
     ProtocolFeesResponse, QueryMsg,
@@ -511,12 +513,8 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             })
         }
         QueryMsg::GetProtocolFees {} => {
-            let protocol_fees_0 = PROTOCOL_FEES_0
-                .may_load(deps.storage)?
-                .unwrap_or_default();
-            let protocol_fees_1 = PROTOCOL_FEES_1
-                .may_load(deps.storage)?
-                .unwrap_or_default();
+            let protocol_fees_0 = PROTOCOL_FEES_0.may_load(deps.storage)?.unwrap_or_default();
+            let protocol_fees_1 = PROTOCOL_FEES_1.may_load(deps.storage)?.unwrap_or_default();
             to_json_binary(&ProtocolFeesResponse {
                 protocol_fees_0,
                 protocol_fees_1,

@@ -11,8 +11,8 @@
 
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
-    entry_point, from_json, BankMsg, Binary, Coin, Deps, DepsMut, Env, MessageInfo, Reply, Response,
-    StdResult, SubMsg, Uint128,
+    entry_point, from_json, BankMsg, Binary, Coin, Deps, DepsMut, Env, MessageInfo, Reply,
+    Response, StdResult, SubMsg, Uint128,
 };
 
 /// Reply id for the optional submessage-wrapped repayment.

@@ -89,10 +89,9 @@ pub fn update_position(
     if liquidity_delta != 0 {
         if liquidity_delta > 0 {
             let add = liquidity_delta.unsigned_abs();
-            position.liquidity = position
-                .liquidity
-                .checked_add(add)
-                .ok_or_else(|| cosmwasm_std::StdError::generic_err("Position liquidity overflow"))?;
+            position.liquidity = position.liquidity.checked_add(add).ok_or_else(|| {
+                cosmwasm_std::StdError::generic_err("Position liquidity overflow")
+            })?;
         } else {
             let remove = liquidity_delta.unsigned_abs();
             position.liquidity = position

@@ -1,9 +1,9 @@
 use crate::clmm::{full_range_ticks, init_sqrt_price_from_amounts};
 use crate::error::ContractError;
 use crate::msg::{
-    CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg, LockerConfigResponse,
-    LockerInit, LpDestination, MigrateMsg, PoolKind, QueryMsg, RoleResponse, SinkConfigResponse,
-    SinkInit, SinkStateResponse,
+    CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg,
+    LockerConfigResponse, LockerInit, LpDestination, MigrateMsg, PoolKind, QueryMsg, RoleResponse,
+    SinkConfigResponse, SinkInit, SinkStateResponse,
 };
 use crate::state::{
     FactoryConfig, LockerConfig, LpDestinationStored, PoolKindStored, Role, SinkConfig, SinkState,
@@ -276,11 +276,11 @@ fn instantiate_locker(
         .add_attribute("manager", manager)
         .add_attribute("treasury", treasury)
         .add_attribute("creator", creator)
-        .add_attribute("creator_fee_share_bps", init.creator_fee_share_bps.to_string())
         .add_attribute(
-            "admin",
-            admin.map(|a| a.to_string()).unwrap_or_default(),
-        ))
+            "creator_fee_share_bps",
+            init.creator_fee_share_bps.to_string(),
+        )
+        .add_attribute("admin", admin.map(|a| a.to_string()).unwrap_or_default()))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -372,7 +372,10 @@ fn exec_create_locker(
     // A locker only makes sense alongside CLMM graduation; pin its `manager`
     // to the factory's CLMM manager so a locker can't be aimed at an
     // unrelated NFT contract.
-    let clmm_manager = cfg.clmm_manager.as_ref().ok_or(ContractError::ClmmNotConfigured {})?;
+    let clmm_manager = cfg
+        .clmm_manager
+        .as_ref()
+        .ok_or(ContractError::ClmmNotConfigured {})?;
     if locker_init.manager != clmm_manager.as_str() {
         return Err(ContractError::SinkClmmAddressMismatch {
             which: "manager".to_string(),
@@ -477,10 +480,9 @@ fn exec_settle(
     SINK_STATE.save(deps.storage, &state)?;
 
     match cfg.pool_kind.clone() {
-        PoolKindStored::Xyk {
-            choice_factory,
-            ..
-        } => settle_xyk(deps, env, info, &cfg, &choice_factory, token_bal, pair_bal),
+        PoolKindStored::Xyk { choice_factory, .. } => {
+            settle_xyk(deps, env, info, &cfg, &choice_factory, token_bal, pair_bal)
+        }
         PoolKindStored::Clmm {
             clmm_factory,
             clmm_manager,
@@ -990,10 +992,9 @@ fn callback_distribute_lp(
         .ok_or(ContractError::PairNotFoundPostCreate {})?
         .clone();
 
-    let pair_info: PairInfo = deps.querier.query_wasm_smart(
-        &pair_addr,
-        &choice::pair::QueryMsg::Pair {},
-    )?;
+    let pair_info: PairInfo = deps
+        .querier
+        .query_wasm_smart(&pair_addr, &choice::pair::QueryMsg::Pair {})?;
     let lp_denom = pair_info.liquidity_token;
 
     let lp_balance = deps
@@ -1010,11 +1011,13 @@ fn callback_distribute_lp(
     // never enqueues it.
     let lp_destination = match &cfg.pool_kind {
         PoolKindStored::Xyk { lp_destination, .. } => lp_destination,
-        PoolKindStored::Clmm { .. } => return Err(ContractError::WrongRole {
-            action: "distribute_lp".to_string(),
-            required: "xyk sink".to_string(),
-            actual: "clmm sink".to_string(),
-        }),
+        PoolKindStored::Clmm { .. } => {
+            return Err(ContractError::WrongRole {
+                action: "distribute_lp".to_string(),
+                required: "xyk sink".to_string(),
+                actual: "clmm sink".to_string(),
+            })
+        }
     };
 
     let msg: CosmosMsg<InjectiveMsgWrapper> = match lp_destination {
@@ -1108,7 +1111,10 @@ fn exec_collect_fees(
         .add_attribute("action", "collect_fees")
         .add_attribute("treasury", cfg.treasury)
         .add_attribute("creator", cfg.creator)
-        .add_attribute("creator_fee_share_bps", cfg.creator_fee_share_bps.to_string())
+        .add_attribute(
+            "creator_fee_share_bps",
+            cfg.creator_fee_share_bps.to_string(),
+        )
         .add_attribute("positions", token_ids.len().to_string()))
 }
 
@@ -1122,6 +1128,11 @@ fn callback_distribute_fees(
     env: Env,
     cfg: LockerConfig,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    // `query_all_balances` is deprecated because it doesn't scale with many
+    // denoms, but the locker genuinely needs denom-agnostic enumeration: it
+    // holds transient collected fees in arbitrary pool denoms not known ahead
+    // of time. There is no non-deprecated replacement that lists all balances.
+    #[allow(deprecated)]
     let balances = deps.querier.query_all_balances(&env.contract.address)?;
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
@@ -1154,7 +1165,10 @@ fn callback_distribute_fees(
         .add_attribute("action", "distribute_fees")
         .add_attribute("treasury", cfg.treasury)
         .add_attribute("creator", cfg.creator)
-        .add_attribute("creator_fee_share_bps", cfg.creator_fee_share_bps.to_string())
+        .add_attribute(
+            "creator_fee_share_bps",
+            cfg.creator_fee_share_bps.to_string(),
+        )
         .add_attribute("denoms", denoms.to_string()))
 }
 
@@ -1506,10 +1520,7 @@ pub(crate) fn require_exact_create_fee_funds(
     Ok(())
 }
 
-fn self_callback(
-    env: &Env,
-    cb: CallbackMsg,
-) -> StdResult<CosmosMsg<InjectiveMsgWrapper>> {
+fn self_callback(env: &Env, cb: CallbackMsg) -> StdResult<CosmosMsg<InjectiveMsgWrapper>> {
     Ok(CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: env.contract.address.to_string(),
         msg: to_json_binary(&ExecuteMsg::Callback(cb))?,
@@ -1545,4 +1556,3 @@ fn query_pair_info(
         .query_wasm_smart(choice_factory, &ChoiceFactoryQueryMsg::Pair { asset_infos })
         .map_err(|_| ContractError::PairNotFoundPostCreate {})
 }
-

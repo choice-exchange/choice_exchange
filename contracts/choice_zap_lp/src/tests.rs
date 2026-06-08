@@ -14,8 +14,8 @@ use crate::msg::{CallbackMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, ZapHookMsg
 
 /// Minimal mock deps for paths that only exercise auth + funds parsing — they
 /// never reach a wasm/bank query, so the simple `MockQuerier` is enough.
-fn mock_deps_simple(
-) -> OwnedDeps<MockStorage, MockApi, MockQuerier<Empty>, InjectiveQueryWrapper> {
+fn mock_deps_simple() -> OwnedDeps<MockStorage, MockApi, MockQuerier<Empty>, InjectiveQueryWrapper>
+{
     OwnedDeps {
         storage: MockStorage::default(),
         api: MockApi::default(),
@@ -107,7 +107,10 @@ fn isqrt_basic() {
     assert_eq!(isqrt(Uint256::from(3u128)).unwrap(), Uint256::from(1u128));
     assert_eq!(isqrt(Uint256::from(4u128)).unwrap(), Uint256::from(2u128));
     assert_eq!(isqrt(Uint256::from(99u128)).unwrap(), Uint256::from(9u128));
-    assert_eq!(isqrt(Uint256::from(100u128)).unwrap(), Uint256::from(10u128));
+    assert_eq!(
+        isqrt(Uint256::from(100u128)).unwrap(),
+        Uint256::from(10u128)
+    );
     let big = Uint256::from(10u128).pow(40);
     let expected = Uint256::from(10u128).pow(20);
     assert_eq!(isqrt(big).unwrap(), expected);
@@ -157,7 +160,12 @@ fn optimal_split_deep_pool_is_just_over_half() {
     let half = x.u128() / 2;
     assert!(s.u128() >= half, "s {} should be >= half {}", s, half);
     let upper = half + half / 200;
-    assert!(s.u128() <= upper, "s {} should be <= {} (half+0.5%)", s, upper);
+    assert!(
+        s.u128() <= upper,
+        "s {} should be <= {} (half+0.5%)",
+        s,
+        upper
+    );
 }
 
 #[test]
@@ -712,8 +720,10 @@ fn sweep_forwards_only_delta_native_native() {
         panic!("expected BankMsg::Send");
     };
     assert_eq!(to_address, recipient.to_string());
-    let by_denom: std::collections::HashMap<_, _> =
-        amount.iter().map(|c| (c.denom.as_str(), c.amount.u128())).collect();
+    let by_denom: std::collections::HashMap<_, _> = amount
+        .iter()
+        .map(|c| (c.denom.as_str(), c.amount.u128()))
+        .collect();
     assert_eq!(by_denom.get("inj"), Some(&3));
     assert_eq!(by_denom.get("usdt"), Some(&11));
     assert_eq!(by_denom.get(lp_denom.as_str()), Some(&123));
@@ -834,8 +844,10 @@ fn sweep_retains_erc20_dust_for_contract_recipient() {
         panic!("expected BankMsg::Send");
     };
     assert_eq!(to_address, recipient.to_string());
-    let by_denom: std::collections::HashMap<_, _> =
-        amount.iter().map(|c| (c.denom.as_str(), c.amount.u128())).collect();
+    let by_denom: std::collections::HashMap<_, _> = amount
+        .iter()
+        .map(|c| (c.denom.as_str(), c.amount.u128()))
+        .collect();
     assert_eq!(by_denom.get("inj"), Some(&3));
     assert_eq!(by_denom.get(lp_denom.as_str()), Some(&123));
     assert_eq!(by_denom.get(erc20), None, "erc20 dust must be retained");
@@ -896,7 +908,10 @@ fn sweep_forwards_erc20_dust_for_eoa_recipient() {
         panic!("expected BankMsg::Send");
     };
     assert_eq!(to_address, recipient.to_string());
-    let erc20_sent = amount.iter().find(|c| c.denom == erc20).map(|c| c.amount.u128());
+    let erc20_sent = amount
+        .iter()
+        .find(|c| c.denom == erc20)
+        .map(|c| c.amount.u128());
     assert_eq!(erc20_sent, Some(11), "EOA recipient keeps erc20 dust");
 
     let retained_b = res
@@ -1242,22 +1257,19 @@ fn admin_sweep_emits_cw20_transfer_for_cw20_assets() {
     let recipient = deps.api.addr_make("recipient");
 
     let token_str = token.to_string();
-    deps.querier
-        .update_wasm(move |q| match q {
-            cosmwasm_std::WasmQuery::Smart { contract_addr, .. }
-                if contract_addr == &token_str =>
-            {
-                cosmwasm_std::SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
-                    to_json_binary(&cw20::BalanceResponse {
-                        balance: Uint128::new(500),
-                    })
-                    .unwrap(),
-                ))
-            }
-            _ => cosmwasm_std::SystemResult::Err(cosmwasm_std::SystemError::NoSuchContract {
-                addr: "unknown".to_string(),
-            }),
-        });
+    deps.querier.update_wasm(move |q| match q {
+        cosmwasm_std::WasmQuery::Smart { contract_addr, .. } if contract_addr == &token_str => {
+            cosmwasm_std::SystemResult::Ok(cosmwasm_std::ContractResult::Ok(
+                to_json_binary(&cw20::BalanceResponse {
+                    balance: Uint128::new(500),
+                })
+                .unwrap(),
+            ))
+        }
+        _ => cosmwasm_std::SystemResult::Err(cosmwasm_std::SystemError::NoSuchContract {
+            addr: "unknown".to_string(),
+        }),
+    });
 
     let resp = execute(
         deps.as_mut(),
@@ -1284,7 +1296,10 @@ fn admin_sweep_emits_cw20_transfer_for_cw20_assets() {
     assert!(funds.is_empty());
     let transfer: cw20::Cw20ExecuteMsg = cw_from_json(&msg).unwrap();
     match transfer {
-        cw20::Cw20ExecuteMsg::Transfer { recipient: r, amount } => {
+        cw20::Cw20ExecuteMsg::Transfer {
+            recipient: r,
+            amount,
+        } => {
             assert_eq!(r, recipient.to_string());
             assert_eq!(amount, Uint128::new(500));
         }

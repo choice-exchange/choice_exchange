@@ -59,9 +59,9 @@ pub fn mul_div_round_up(a: Uint256, b: Uint256, denominator: Uint256) -> StdResu
 
     // ceil(p / d) = (p + d - 1) / d; safe since product <= 2^512 - 1 - denom.
     let numerator = product + denom_512 - Uint512::from(1u64);
-    let result = numerator.checked_div(denom_512).map_err(|_| {
-        StdError::generic_err("mul_div_round_up: division by zero (unreachable)")
-    })?;
+    let result = numerator
+        .checked_div(denom_512)
+        .map_err(|_| StdError::generic_err("mul_div_round_up: division by zero (unreachable)"))?;
 
     Uint256::try_from(result)
         .map_err(|_| StdError::generic_err("mul_div_round_up: result exceeds U256"))

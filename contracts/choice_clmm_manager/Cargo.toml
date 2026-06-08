@@ -30,9 +30,6 @@ cw721 = "0.20.0"
 cw721-base = "0.20.0"
 cw721-metadata-onchain = "0.20.0"
 
-injective-cosmwasm  = { version = "0.3.4-1" }
-injective-math      = { version = "0.3.4-1" }
-
 thiserror            = { version = "2.0.12" }
 
 schemars = "0.8.22"

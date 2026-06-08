@@ -657,10 +657,7 @@ fn withdraw_liquidity() {
         log_refund_assets,
         &attr(
             "refund_assets",
-            format!(
-                "100uusd, 100{}",
-                deps.api.addr_make("asset0000")
-            )
+            format!("100uusd, 100{}", deps.api.addr_make("asset0000"))
         )
     );
 

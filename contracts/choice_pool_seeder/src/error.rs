@@ -36,7 +36,9 @@ pub enum ContractError {
         expected: String,
     },
 
-    #[error("Clmm graduation is not configured on this factory (clmm_factory / clmm_manager unset)")]
+    #[error(
+        "Clmm graduation is not configured on this factory (clmm_factory / clmm_manager unset)"
+    )]
     ClmmNotConfigured {},
 
     #[error("FactoryInit must set clmm_factory and clmm_manager together, or neither")]
@@ -124,9 +126,7 @@ pub enum ContractError {
     #[error("Self-callback invoked by an external sender")]
     CallbackUnauthorized {},
 
-    #[error(
-        "Invalid migration: cannot apply variant `{requested}` from current version `{from}`"
-    )]
+    #[error("Invalid migration: cannot apply variant `{requested}` from current version `{from}`")]
     InvalidMigration { from: String, requested: String },
 
     #[error("Cannot migrate: stored contract is `{found}`, expected `{expected}`")]

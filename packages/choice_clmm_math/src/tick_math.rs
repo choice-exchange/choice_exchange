@@ -205,10 +205,8 @@ pub fn get_tick_at_sqrt_ratio(sqrt_price: Uint256) -> StdResult<i32> {
     // Step 7: compute tickLow / tickHi.
     //   tick_low = (log_sqrt - 3402992956809132418596140100660247210) >>> 128
     //   tick_hi  = (log_sqrt + 291339464771989622907027621153398088495) >>> 128
-    let sub_const =
-        Uint256::from_str("3402992956809132418596140100660247210").unwrap();
-    let add_const =
-        Uint256::from_str("291339464771989622907027621153398088495").unwrap();
+    let sub_const = Uint256::from_str("3402992956809132418596140100660247210").unwrap();
+    let add_const = Uint256::from_str("291339464771989622907027621153398088495").unwrap();
 
     let low_val = signed_sub_abs(log_sqrt_neg, log_sqrt_mag, false, sub_const);
     let hi_val = signed_add_abs(log_sqrt_neg, log_sqrt_mag, false, add_const);
@@ -295,12 +293,7 @@ fn u256_or_bit(a: Uint256, bit: Uint256) -> Uint256 {
 }
 
 /// Signed subtraction: `(a_neg ? -a_mag : a_mag) - (b_neg ? -b_mag : b_mag)`.
-fn signed_sub_abs(
-    a_neg: bool,
-    a_mag: Uint256,
-    b_neg: bool,
-    b_mag: Uint256,
-) -> (bool, Uint256) {
+fn signed_sub_abs(a_neg: bool, a_mag: Uint256, b_neg: bool, b_mag: Uint256) -> (bool, Uint256) {
     match (a_neg, b_neg) {
         (false, false) => {
             if a_mag >= b_mag {
@@ -321,12 +314,7 @@ fn signed_sub_abs(
     }
 }
 
-fn signed_add_abs(
-    a_neg: bool,
-    a_mag: Uint256,
-    b_neg: bool,
-    b_mag: Uint256,
-) -> (bool, Uint256) {
+fn signed_add_abs(a_neg: bool, a_mag: Uint256, b_neg: bool, b_mag: Uint256) -> (bool, Uint256) {
     signed_sub_abs(a_neg, a_mag, !b_neg, b_mag)
 }
 
@@ -468,20 +456,28 @@ mod tests {
 
         assert!(
             (MIN_TICK..=MAX_TICK).contains(&t),
-            "tick {} out of bounds for price {}", t, p
+            "tick {} out of bounds for price {}",
+            t,
+            p
         );
 
         let at_t = get_sqrt_ratio_at_tick(t).unwrap();
         assert!(
             at_t <= p,
-            "sqrtRatio(T)={} must be <= price={} (T={})", at_t, p, t
+            "sqrtRatio(T)={} must be <= price={} (T={})",
+            at_t,
+            p,
+            t
         );
 
         if t < MAX_TICK {
             let at_t_plus_1 = get_sqrt_ratio_at_tick(t + 1).unwrap();
             assert!(
                 at_t_plus_1 > p,
-                "sqrtRatio(T+1)={} must be > price={} (T={})", at_t_plus_1, p, t
+                "sqrtRatio(T+1)={} must be > price={} (T={})",
+                at_t_plus_1,
+                p,
+                t
             );
         }
     }

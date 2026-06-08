@@ -94,7 +94,7 @@ fn synthetic_instantiate_reply(farm_addr: &str) -> Reply {
         gas_used: 0,
         result: SubMsgResult::Ok(SubMsgResponse {
             events: vec![
-                Event::new("instantiate").add_attribute("_contract_address", farm_addr.to_string()),
+                Event::new("instantiate").add_attribute("_contract_address", farm_addr.to_string())
             ],
             data: None,
             msg_responses: vec![],
@@ -193,10 +193,7 @@ fn create_farm_cw20_reward_happy_path() {
 
     // 1: Bank send fee → treasury
     match &res.messages[0].msg {
-        CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
-            to_address,
-            amount,
-        }) => {
+        CosmosMsg::Bank(cosmwasm_std::BankMsg::Send { to_address, amount }) => {
             assert_eq!(to_address, &treasury.to_string());
             assert_eq!(amount, &coins(FEE, "inj"));
         }
@@ -262,9 +259,7 @@ fn create_farm_cw20_reward_happy_path() {
     assert_eq!(reply_resp.messages.len(), 1);
     match &reply_resp.messages[0].msg {
         CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr,
-            msg,
-            ..
+            contract_addr, msg, ..
         }) => {
             assert_eq!(contract_addr, &reward_cw20.to_string());
             let parsed: Cw20ExecuteMsg = from_json(msg).unwrap();
@@ -292,7 +287,10 @@ fn create_farm_cw20_reward_happy_path() {
     assert_eq!(record.id, 0);
     assert_eq!(record.farm_addr, farm_addr.to_string());
     assert_eq!(record.operator, user.to_string());
-    assert_eq!(record.farm_owner, deps.api.addr_make("multisig").to_string());
+    assert_eq!(
+        record.farm_owner,
+        deps.api.addr_make("multisig").to_string()
+    );
     assert_eq!(record.total_reward, total_reward);
 
     let by_addr: FarmRecordResp = from_json(
@@ -349,7 +347,11 @@ fn create_farm_native_reward_happy_path() {
 
     match &res.messages[1].msg {
         CosmosMsg::Wasm(WasmMsg::Instantiate { funds, .. }) => {
-            assert!(funds.is_empty(), "expected empty instantiate funds, got {:?}", funds);
+            assert!(
+                funds.is_empty(),
+                "expected empty instantiate funds, got {:?}",
+                funds
+            );
         }
         other => panic!("expected Wasm::Instantiate, got {:?}", other),
     }
@@ -409,7 +411,11 @@ fn create_farm_inj_reward_combines_funds() {
     assert_eq!(res.messages.len(), 2);
     match &res.messages[1].msg {
         CosmosMsg::Wasm(WasmMsg::Instantiate { funds, .. }) => {
-            assert!(funds.is_empty(), "expected empty instantiate funds, got {:?}", funds);
+            assert!(
+                funds.is_empty(),
+                "expected empty instantiate funds, got {:?}",
+                funds
+            );
         }
         other => panic!("expected Wasm::Instantiate, got {:?}", other),
     }
@@ -476,10 +482,7 @@ fn create_farm_rejects_native_reward_shortfall() {
         distribution_schedule: vec![(future_t(100), future_t(200), total_reward)],
     };
 
-    let info = message_info(
-        &user,
-        &[Coin::new(FEE, "inj"), Coin::new(250u128, "uatom")],
-    );
+    let info = message_info(&user, &[Coin::new(FEE, "inj"), Coin::new(250u128, "uatom")]);
     let err = execute(deps.as_mut(), mock_env(), info, create_msg).unwrap_err();
     assert!(err.to_string().contains("expected 500 uatom"));
 }
@@ -586,9 +589,10 @@ fn farm_code_id_timelock() {
         .contains("farm_code_id update timelock has not elapsed"));
 
     // Wait, apply.
-    env.block.time = env.block.time.plus_seconds(
-        crate::state::TIMELOCK_DELAY_SECONDS + 1,
-    );
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
     execute(
         deps.as_mut(),
         env.clone(),
@@ -602,10 +606,9 @@ fn farm_code_id_timelock() {
     assert_eq!(resp.farm_code_id, 99);
 
     // Pending cleared.
-    let pending: choice::farm_factory::PendingFarmCodeIdUpdateResponse = from_json(
-        query(deps.as_ref(), env, QueryMsg::PendingFarmCodeIdUpdate {}).unwrap(),
-    )
-    .unwrap();
+    let pending: choice::farm_factory::PendingFarmCodeIdUpdateResponse =
+        from_json(query(deps.as_ref(), env, QueryMsg::PendingFarmCodeIdUpdate {}).unwrap())
+            .unwrap();
     assert_eq!(pending.farm_code_id, None);
 }
 
@@ -727,9 +730,7 @@ fn farm_code_id_cancel() {
         ExecuteMsg::CancelUpdateFarmCodeIdProposal {},
     )
     .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("no pending farm_code_id update"));
+    assert!(err.to_string().contains("no pending farm_code_id update"));
 }
 
 #[test]
@@ -748,10 +749,9 @@ fn owner_rotation_timelock() {
     )
     .unwrap();
 
-    let pending: PendingOwnerRotationResponse = from_json(
-        query(deps.as_ref(), mock_env(), QueryMsg::PendingOwnerRotation {}).unwrap(),
-    )
-    .unwrap();
+    let pending: PendingOwnerRotationResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::PendingOwnerRotation {}).unwrap())
+            .unwrap();
     assert_eq!(pending.pending_owner, Some(new_owner.to_string()));
 
     let mut early_env = mock_env();

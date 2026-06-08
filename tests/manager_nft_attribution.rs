@@ -39,13 +39,20 @@ const MAX_SQRT_LIMIT: u128 = 158_456_325_028_528_675_187_087_900_672;
 type ExecResp = ExecuteResponse<MsgExecuteContractResponse>;
 
 fn native(d: &str) -> AssetInfo {
-    AssetInfo::NativeToken { denom: d.to_string() }
+    AssetInfo::NativeToken {
+        denom: d.to_string(),
+    }
 }
 fn wasm_bytes(f: &str) -> Vec<u8> {
-    std::fs::read(format!("../../artifacts/{f}")).unwrap_or_else(|_| panic!("missing artifact {f}"))
+    std::fs::read(format!("../../artifacts/{f}"))
+        .unwrap_or_else(|_| panic!("missing artifact {f}", f = f))
 }
 fn attr(res: &ExecResp, key: &str) -> Option<String> {
-    res.events.iter().flat_map(|e| e.attributes.iter()).find(|a| a.key == key).map(|a| a.value.clone())
+    res.events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .find(|a| a.key == key)
+        .map(|a| a.value.clone())
 }
 
 struct Env {
@@ -80,48 +87,128 @@ fn setup() -> Env {
     };
     let (a, b, trader) = (mk(), mk(), mk());
 
-    let factory_code = wasm.store_code(&wasm_bytes("choice_clmm_factory.wasm"), None, &admin).unwrap().data.code_id;
-    let pool_code = wasm.store_code(&wasm_bytes("choice_clmm_pool.wasm"), None, &admin).unwrap().data.code_id;
-    let manager_code = wasm.store_code(&wasm_bytes("choice_clmm_manager.wasm"), None, &admin).unwrap().data.code_id;
+    let factory_code = wasm
+        .store_code(&wasm_bytes("choice_clmm_factory.wasm"), None, &admin)
+        .unwrap()
+        .data
+        .code_id;
+    let pool_code = wasm
+        .store_code(&wasm_bytes("choice_clmm_pool.wasm"), None, &admin)
+        .unwrap()
+        .data
+        .code_id;
+    let manager_code = wasm
+        .store_code(&wasm_bytes("choice_clmm_manager.wasm"), None, &admin)
+        .unwrap()
+        .data
+        .code_id;
 
     let factory = wasm
-        .instantiate(factory_code, &FactoryInstantiateMsg { pool_code_id: pool_code }, Some(&admin.address()), Some("F"), &[], &admin)
-        .unwrap().data.address;
+        .instantiate(
+            factory_code,
+            &FactoryInstantiateMsg {
+                pool_code_id: pool_code,
+            },
+            Some(&admin.address()),
+            Some("F"),
+            &[],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .address;
     let manager = wasm
-        .instantiate(manager_code, &ManagerInstantiateMsg { name: "P".into(), symbol: "P".into(), factory_addr: factory.clone() }, Some(&admin.address()), Some("M"), &[], &admin)
-        .unwrap().data.address;
-    wasm.execute(&factory, &FactoryExecuteMsg::CreatePool {
-        token_a: native(ATOM), token_b: native(USDT), fee: FEE, init_sqrt_price: Uint256::from(PRICE_ONE),
-    }, &[], &admin).unwrap();
-    let pool: String = wasm.query(&factory, &FactoryQueryMsg::GetPool { token_a: native(ATOM), token_b: native(USDT), fee: FEE }).unwrap();
+        .instantiate(
+            manager_code,
+            &ManagerInstantiateMsg {
+                name: "P".into(),
+                symbol: "P".into(),
+                factory_addr: factory.clone(),
+            },
+            Some(&admin.address()),
+            Some("M"),
+            &[],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .address;
+    wasm.execute(
+        &factory,
+        &FactoryExecuteMsg::CreatePool {
+            token_a: native(ATOM),
+            token_b: native(USDT),
+            fee: FEE,
+            init_sqrt_price: Uint256::from(PRICE_ONE),
+        },
+        &[],
+        &admin,
+    )
+    .unwrap();
+    let pool: String = wasm
+        .query(
+            &factory,
+            &FactoryQueryMsg::GetPool {
+                token_a: native(ATOM),
+                token_b: native(USDT),
+                fee: FEE,
+            },
+        )
+        .unwrap();
 
-    Env { app, a, b, trader, manager, pool }
+    Env {
+        app,
+        a,
+        b,
+        trader,
+        manager,
+        pool,
+    }
 }
 
 fn mint(env: &Env, who: &SigningAccount, lower: i32, upper: i32, amt: u128) -> String {
     let wasm = Wasm::new(&env.app);
-    let r = wasm.execute(
-        &env.manager,
-        &ManagerExecuteMsg::MintPosition {
-            token0: native(ATOM), token1: native(USDT), fee: FEE,
-            tick_lower: lower, tick_upper: upper,
-            amount0_desired: Uint128::new(amt), amount1_desired: Uint128::new(amt),
-            amount0_min: Uint128::zero(), amount1_min: Uint128::zero(),
-            recipient: None, deadline: DEADLINE,
-        },
-        &[Coin::new(amt, ATOM), Coin::new(amt, USDT)],
-        who,
-    ).unwrap();
+    let r = wasm
+        .execute(
+            &env.manager,
+            &ManagerExecuteMsg::MintPosition {
+                token0: native(ATOM),
+                token1: native(USDT),
+                fee: FEE,
+                tick_lower: lower,
+                tick_upper: upper,
+                amount0_desired: Uint128::new(amt),
+                amount1_desired: Uint128::new(amt),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                recipient: None,
+                deadline: DEADLINE,
+            },
+            &[Coin::new(amt, ATOM), Coin::new(amt, USDT)],
+            who,
+        )
+        .unwrap();
     attr(&r, "token_id").expect("mint emits token_id")
 }
 
 fn nft(env: &Env, id: &str) -> PositionWithFeesResponse {
-    Wasm::new(&env.app).query(&env.manager, &ManagerQueryMsg::PositionWithFees { token_id: id.to_string() }).unwrap()
+    Wasm::new(&env.app)
+        .query(
+            &env.manager,
+            &ManagerQueryMsg::PositionWithFees {
+                token_id: id.to_string(),
+            },
+        )
+        .unwrap()
 }
 
 fn swap(env: &Env, zero_for_one: bool, amt: u128) {
     let wasm = Wasm::new(&env.app);
-    let (denom, limit) = if zero_for_one { (ATOM, MIN_SQRT_LIMIT) } else { (USDT, MAX_SQRT_LIMIT) };
+    let (denom, limit) = if zero_for_one {
+        (ATOM, MIN_SQRT_LIMIT)
+    } else {
+        (USDT, MAX_SQRT_LIMIT)
+    };
     // Low-level Swap with a wide price limit so it fully consumes the input.
     wasm.execute(
         &env.pool,
@@ -133,7 +220,8 @@ fn swap(env: &Env, zero_for_one: bool, amt: u128) {
         },
         &[Coin::new(amt, denom)],
         &env.trader,
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 /// Two NFTs in the same range, liquidity ratio `~ratio` (B has `ratio`x A's
@@ -147,7 +235,12 @@ fn attribution_for_ratio(deposit_a: u128, deposit_b: u128) {
 
     let la = nft(&env, &id_a).liquidity.u128();
     let lb = nft(&env, &id_b).liquidity.u128();
-    assert!(la > 0 && lb > 0, "zero liquidity minted (la={}, lb={})", la, lb);
+    assert!(
+        la > 0 && lb > 0,
+        "zero liquidity minted (la={}, lb={})",
+        la,
+        lb
+    );
 
     // Swaps in BOTH directions, kept inside [-1000,1000] so both NFTs stay in
     // range the whole time (price moves only a few ticks per swap at this depth).
@@ -162,10 +255,20 @@ fn attribution_for_ratio(deposit_a: u128, deposit_b: u128) {
         (pa.tokens_owed_0.u128(), pb.tokens_owed_0.u128(), "token0"),
         (pa.tokens_owed_1.u128(), pb.tokens_owed_1.u128(), "token1"),
     ] {
-        assert!(oa > 0 && ob > 0, "no {} fees credited (la={}, lb={})", tok, la, lb);
+        assert!(
+            oa > 0 && ob > 0,
+            "no {} fees credited (la={}, lb={})",
+            tok,
+            la,
+            lb
+        );
         if la == lb {
             // Equal liquidity, same range, same checkpoints ⇒ identical fees.
-            assert_eq!(oa, ob, "{}: equal-L NFTs credited unequal fees {} vs {}", tok, oa, ob);
+            assert_eq!(
+                oa, ob,
+                "{}: equal-L NFTs credited unequal fees {} vs {}",
+                tok, oa, ob
+            );
         } else {
             // owed_a/la == owed_b/lb  ⇒  owed_a*lb == owed_b*la (± independent flooring).
             let lhs = oa.checked_mul(lb).unwrap();
@@ -174,7 +277,17 @@ fn attribution_for_ratio(deposit_a: u128, deposit_b: u128) {
             // Each side floors once per swap step; bound slack generously by the
             // larger liquidity times a small constant.
             let slack = la.max(lb).checked_mul(4).unwrap();
-            assert!(diff <= slack, "{}: attribution not proportional: {}/{} vs {}/{} (diff {} > slack {})", tok, oa, la, ob, lb, diff, slack);
+            assert!(
+                diff <= slack,
+                "{}: attribution not proportional: {}/{} vs {}/{} (diff {} > slack {})",
+                tok,
+                oa,
+                la,
+                ob,
+                lb,
+                diff,
+                slack
+            );
         }
     }
 
@@ -182,7 +295,16 @@ fn attribution_for_ratio(deposit_a: u128, deposit_b: u128) {
     // manager strands nothing.
     let wasm = Wasm::new(&env.app);
     for (who, id) in [(&env.a, &id_a), (&env.b, &id_b)] {
-        wasm.execute(&env.manager, &ManagerExecuteMsg::Collect { token_id: id.clone(), recipient: None }, &[], who).unwrap();
+        wasm.execute(
+            &env.manager,
+            &ManagerExecuteMsg::Collect {
+                token_id: id.clone(),
+                recipient: None,
+            },
+            &[],
+            who,
+        )
+        .unwrap();
     }
     let bank = injective_test_tube::Bank::new(&env.app);
     for denom in [ATOM, USDT] {

@@ -119,7 +119,10 @@ pub enum FundAfter {
     /// Cw20::Send { contract: <farm>, amount, msg: Cw20HookMsg::Fund {} }.
     /// Factory must hold the cw20 tokens at reply time (pulled via
     /// `TransferFrom` in the execute step).
-    Cw20 { cw20_contract: String, amount: Uint128 },
+    Cw20 {
+        cw20_contract: String,
+        amount: Uint128,
+    },
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
@@ -127,5 +130,4 @@ pub const NEXT_FARM_ID: Item<u64> = Item::new("next_farm_id");
 pub const FARMS: Map<u64, FarmRecord> = Map::new("farms");
 pub const FARM_BY_ADDR: Map<&[u8], u64> = Map::new("farm_by_addr");
 pub const PENDING_FARM: Item<PendingFarm> = Item::new("pending_farm");
-pub const PENDING_FARM_CODE_ID: Item<PendingFarmCodeIdUpdate> =
-    Item::new("pending_farm_code_id");
+pub const PENDING_FARM_CODE_ID: Item<PendingFarmCodeIdUpdate> = Item::new("pending_farm_code_id");

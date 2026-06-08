@@ -46,13 +46,9 @@
 //!    harness proves the chain capability the contract relies on.
 
 use cosmwasm_std::{Coin, Uint128};
-use injective_test_tube::{
-    Account, InjectiveTestApp, Module, SigningAccount, Wasm,
-};
+use injective_test_tube::{Account, InjectiveTestApp, Module, SigningAccount, Wasm};
 
-use choice_mts_issuer::msg::{
-    ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg,
-};
+use choice_mts_issuer::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
 
 fn artifact() -> Vec<u8> {
     // Per the choice_exchange convention, integration tests run from the
@@ -77,16 +73,18 @@ struct Env {
 
 fn setup() -> Env {
     let app = InjectiveTestApp::new();
-    let funded = &[
-        Coin::new(1_000_000_000_000_000_000_000u128, "inj"),
-    ];
+    let funded = &[Coin::new(1_000_000_000_000_000_000_000u128, "inj")];
     let admin = app.init_account(funded).unwrap();
     let keeper = app.init_account(funded).unwrap();
     let forwarder = app.init_account(funded).unwrap();
     let stranger = app.init_account(funded).unwrap();
 
     let wasm = Wasm::new(&app);
-    let code_id = wasm.store_code(&artifact(), None, &admin).unwrap().data.code_id;
+    let code_id = wasm
+        .store_code(&artifact(), None, &admin)
+        .unwrap()
+        .data
+        .code_id;
 
     let issuer = wasm
         .instantiate(
@@ -150,7 +148,11 @@ fn admin_rotation_requires_admin() {
         )
         .unwrap_err();
     let msg = format!("{}", err);
-    assert!(msg.contains("Unauthorized"), "expected Unauthorized, got: {}", msg);
+    assert!(
+        msg.contains("Unauthorized"),
+        "expected Unauthorized, got: {}",
+        msg
+    );
 
     // Admin succeeds.
     wasm.execute(

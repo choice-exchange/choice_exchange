@@ -151,14 +151,18 @@ pub enum ExecuteMsg {
     /// Must be `<= config.max_slippage_tolerance` — raises go through the
     /// timelocked `ProposeMaxSlippageRaise` flow. Does not touch any pending
     /// raise proposal (cancel explicitly if undesired).
-    TightenMaxSlippage { new_max: Decimal },
+    TightenMaxSlippage {
+        new_max: Decimal,
+    },
     /// Owner-only. Proposes a raise of `config.max_slippage_tolerance` to `new_max`.
     /// Must be strictly greater than the current cap and at or below
     /// `MAX_SLIPPAGE_TOLERANCE_CEILING`. Applies after
     /// `MAX_SLIPPAGE_RAISE_DELAY_SECONDS` via `ApplyMaxSlippageRaise` — the
     /// 48h window gives depositors time to exit if they disagree with the new
     /// ceiling. Only one raise can be pending at a time.
-    ProposeMaxSlippageRaise { new_max: Decimal },
+    ProposeMaxSlippageRaise {
+        new_max: Decimal,
+    },
     /// Owner-only. Finalizes the pending cap raise once the timelock elapses.
     ApplyMaxSlippageRaise,
     /// Owner-only. Clears the pending cap raise proposal.

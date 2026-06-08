@@ -590,7 +590,12 @@ fn setup_cw20_cw20_pair(seed_amt: u128) -> (ZapEnv, String, String) {
 
 fn init_four_accounts(
     app: &InjectiveTestApp,
-) -> (SigningAccount, SigningAccount, SigningAccount, SigningAccount) {
+) -> (
+    SigningAccount,
+    SigningAccount,
+    SigningAccount,
+    SigningAccount,
+) {
     let initial = &[
         Coin::new(1_000_000_000_000_000_000_000_000u128, DENOM_INJ),
         Coin::new(100_000_000_000_000u128, DENOM_ATOM),
@@ -1640,4 +1645,3 @@ fn admin_sweep_rescues_lp_token_balance() {
         treasury_lp_before + stuck_lp
     );
 }
-

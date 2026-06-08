@@ -33,9 +33,7 @@ use crate::proto::{
     TokenPair,
 };
 use crate::state::{LaunchStatus, LAUNCHES};
-use choice_pool_seeder::msg::{
-    ExecuteMsg as SeederExecuteMsg, LpDestination, PoolKind, SinkInit,
-};
+use choice_pool_seeder::msg::{ExecuteMsg as SeederExecuteMsg, LpDestination, PoolKind, SinkInit};
 use prost::Message;
 
 const PREFIX: &str = "shroom";
@@ -79,7 +77,10 @@ fn fee_funds() -> Vec<Coin> {
     vec![coin(CREATE_FEE, CREATE_FEE_DENOM)]
 }
 
-fn register_default(deps: &mut Deps, internal_id: u64) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
+fn register_default(
+    deps: &mut Deps,
+    internal_id: u64,
+) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
     register_with_choice_factory(deps, internal_id, None)
 }
 
@@ -109,7 +110,12 @@ fn register_with_choice_factory(
 }
 
 fn expected_denom(internal_id: u64) -> String {
-    format!("factory/{}/{}_{}", mock_env().contract.address, PREFIX, internal_id)
+    format!(
+        "factory/{}/{}_{}",
+        mock_env().contract.address,
+        PREFIX,
+        internal_id
+    )
 }
 
 fn denom_with_salt(internal_id: u64, salt: &str) -> String {
@@ -264,7 +270,10 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
         .iter()
         .position(|sm| sm.reply_on == ReplyOn::Success)
         .unwrap();
-    assert_eq!(create_pair_idx, 2, "CreateTokenPair must be at dispatch position 2");
+    assert_eq!(
+        create_pair_idx, 2,
+        "CreateTokenPair must be at dispatch position 2"
+    );
 
     #[allow(deprecated)]
     match &sub.msg {
@@ -296,7 +305,10 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
             assert_eq!(type_url, MsgCreateDenom::TYPE_URL);
             let decoded = MsgCreateDenom::decode(value.as_slice()).unwrap();
             assert_eq!(decoded.subdenom, format!("{}_{}", PREFIX, 42));
-            assert!(decoded.allow_admin_burn, "Path B Leg A requires admin burn-from");
+            assert!(
+                decoded.allow_admin_burn,
+                "Path B Leg A requires admin burn-from"
+            );
             assert_eq!(decoded.decimals, 18);
         }
         other => panic!("expected Stargate CreateDenom, got {:?}", other),
@@ -306,9 +318,14 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
         CosmosMsg::Custom(w) => {
             assert_eq!(w.route, InjectiveRoute::Tokenfactory);
             match &w.msg_data {
-                InjectiveMsg::Mint { amount, mint_to, .. } => {
+                InjectiveMsg::Mint {
+                    amount, mint_to, ..
+                } => {
                     assert_eq!(amount.denom, denom);
-                    assert_eq!(amount.amount, Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)));
+                    assert_eq!(
+                        amount.amount,
+                        Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18))
+                    );
                     assert_eq!(*mint_to, mock_env().contract.address.to_string());
                 }
                 other => panic!("expected Mint, got {:?}", other),
@@ -318,9 +335,19 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
     }
 
     match plain[2] {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, funds, .. }) => {
-            assert_eq!(contract_addr, &deps.api.addr_make("seeder_factory").to_string());
-            assert!(funds.is_empty(), "no funds on CreateSink — Legs B+C feed the sink");
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr,
+            funds,
+            ..
+        }) => {
+            assert_eq!(
+                contract_addr,
+                &deps.api.addr_make("seeder_factory").to_string()
+            );
+            assert!(
+                funds.is_empty(),
+                "no funds on CreateSink — Legs B+C feed the sink"
+            );
         }
         other => panic!("expected WasmMsg::Execute, got {:?}", other),
     }
@@ -339,9 +366,17 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
         other => panic!("expected BankMsg::Send, got {:?}", other),
     }
 
-    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 42)).unwrap();
+    let stored = LAUNCHES
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("evm_authority"), 42),
+        )
+        .unwrap();
     assert_eq!(stored.status, LaunchStatus::Registered);
-    assert_eq!(stored.cw_held, Uint128::new(200_000_000u128) * Uint128::new(10u128.pow(18)));
+    assert_eq!(
+        stored.cw_held,
+        Uint128::new(200_000_000u128) * Uint128::new(10u128.pow(18))
+    );
     assert_eq!(stored.erc20_address, None, "filled in by reply handler");
 }
 
@@ -350,7 +385,10 @@ fn register_launch_rejects_duplicate_internal_id() {
     let mut deps = setup();
     register_default(&mut deps, 7).unwrap();
     let err = register_default(&mut deps, 7).unwrap_err();
-    assert!(matches!(err, ContractError::LaunchAlreadyRegistered { id: 7 }));
+    assert!(matches!(
+        err,
+        ContractError::LaunchAlreadyRegistered { id: 7 }
+    ));
 }
 
 #[test]
@@ -502,7 +540,12 @@ fn register_launch_with_choice_factory_chains_add_native_token_decimals() {
     assert_eq!(add_msg, coins(1u128, &denom));
 
     // cw_held was reduced by 1 wei to fund the dust.
-    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 50)).unwrap();
+    let stored = LAUNCHES
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("evm_authority"), 50),
+        )
+        .unwrap();
     let expected_cw_held =
         Uint128::new(200_000_000u128) * Uint128::new(10u128.pow(18)) - Uint128::one();
     assert_eq!(stored.cw_held, expected_cw_held);
@@ -545,8 +588,10 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
     // launch denom (capped at evm_supply), not the relayed `leftover`. Seed the
     // authority with the unsold supply so the burn leg is emitted.
     let leftover_amt = Uint128::new(50_000_000u128) * Uint128::new(10u128.pow(18));
-    deps.querier
-        .with_balance(&[(&evm_authority, coins(leftover_amt.u128(), &expected_denom(9)))]);
+    deps.querier.with_balance(&[(
+        &evm_authority,
+        coins(leftover_amt.u128(), &expected_denom(9)),
+    )]);
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
         deps.as_mut(),
@@ -591,7 +636,13 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
         other => panic!("expected BankMsg::Send, got {:?}", other),
     }
     assert_eq!(
-        LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 9)).unwrap().status,
+        LAUNCHES
+            .load(
+                deps.as_ref().storage,
+                (&deps.api.addr_make("evm_authority"), 9)
+            )
+            .unwrap()
+            .status,
         LaunchStatus::Delivered
     );
 }
@@ -617,7 +668,10 @@ fn deliver_to_seeder_with_zero_leftover_omits_burn() {
     .unwrap();
     // Burn skipped → only BankMsg::Send to seeder.
     assert_eq!(res.messages.len(), 1);
-    assert!(matches!(res.messages[0].msg, CosmosMsg::Bank(BankMsg::Send { .. })));
+    assert!(matches!(
+        res.messages[0].msg,
+        CosmosMsg::Bank(BankMsg::Send { .. })
+    ));
 }
 
 #[test]
@@ -657,7 +711,10 @@ fn deliver_to_seeder_rejects_leftover_over_evm_supply() {
         },
     )
     .unwrap_err();
-    assert!(matches!(err, ContractError::LeftoverExceedsEvmSupply { .. }));
+    assert!(matches!(
+        err,
+        ContractError::LeftoverExceedsEvmSupply { .. }
+    ));
 }
 
 #[test]
@@ -714,14 +771,23 @@ fn refund_keeper_path_burns_cw_held() {
     match &res.messages[0].msg {
         CosmosMsg::Custom(w) => match &w.msg_data {
             InjectiveMsg::Burn { amount, .. } => {
-                assert_eq!(amount.amount, Uint128::new(200_000_000u128) * Uint128::new(10u128.pow(18)));
+                assert_eq!(
+                    amount.amount,
+                    Uint128::new(200_000_000u128) * Uint128::new(10u128.pow(18))
+                );
             }
             other => panic!("expected Burn, got {:?}", other),
         },
         other => panic!("expected Custom Injective msg, got {:?}", other),
     }
     assert_eq!(
-        LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 21)).unwrap().status,
+        LAUNCHES
+            .load(
+                deps.as_ref().storage,
+                (&deps.api.addr_make("evm_authority"), 21)
+            )
+            .unwrap()
+            .status,
         LaunchStatus::Refunded
     );
 }
@@ -743,7 +809,10 @@ fn refund_non_keeper_pre_deadline_is_rejected() {
         },
     )
     .unwrap_err();
-    assert!(matches!(err, ContractError::RefundDeadlineNotReached { .. }));
+    assert!(matches!(
+        err,
+        ContractError::RefundDeadlineNotReached { .. }
+    ));
 }
 
 #[test]
@@ -784,7 +853,13 @@ fn refund_post_deadline_admin_succeeds_stranger_rejected() {
     )
     .unwrap();
     assert_eq!(
-        LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 23)).unwrap().status,
+        LAUNCHES
+            .load(
+                deps.as_ref().storage,
+                (&deps.api.addr_make("evm_authority"), 23)
+            )
+            .unwrap()
+            .status,
         LaunchStatus::Refunded
     );
 }
@@ -850,7 +925,12 @@ fn reply_decodes_token_pair_response_and_patches_erc20() {
     register_default(&mut deps, 99).unwrap();
     let erc20 = "0x1234567890123456789012345678901234567890";
     simulate_create_token_pair_reply(&mut deps, 99, erc20);
-    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 99)).unwrap();
+    let stored = LAUNCHES
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("evm_authority"), 99),
+        )
+        .unwrap();
     assert_eq!(stored.erc20_address.as_deref(), Some(erc20));
 }
 
@@ -932,14 +1012,26 @@ fn two_authorities_share_internal_id_without_record_collision() {
             salt_suffix: None,
             clmm_pool_auth: None,
         };
-        execute(deps.as_mut(), mock_env(), message_info(&keeper, &fee_funds()), msg).unwrap();
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&keeper, &fee_funds()),
+            msg,
+        )
+        .unwrap();
     }
 
     let rec_a = LAUNCHES
-        .load(deps.as_ref().storage, (&deps.api.addr_make("authority_a"), 0))
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("authority_a"), 0),
+        )
         .unwrap();
     let rec_b = LAUNCHES
-        .load(deps.as_ref().storage, (&deps.api.addr_make("authority_b"), 0))
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("authority_b"), 0),
+        )
         .unwrap();
     assert_eq!(rec_a.evm_authority.to_string(), auth_a);
     assert_eq!(rec_b.evm_authority.to_string(), auth_b);
@@ -987,13 +1079,19 @@ fn renounce_denom_admin_after_delivered_emits_change_admin() {
             assert_eq!(type_url, MsgChangeAdmin::TYPE_URL);
             let decoded = MsgChangeAdmin::decode(value.as_slice()).unwrap();
             assert_eq!(decoded.denom, expected_denom(5));
-            assert_eq!(decoded.new_admin, "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49");
+            assert_eq!(
+                decoded.new_admin,
+                "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49"
+            );
         }
         other => panic!("expected Stargate MsgChangeAdmin, got {:?}", other),
     }
 
     let rec = LAUNCHES
-        .load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 5))
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("evm_authority"), 5),
+        )
         .unwrap();
     assert!(rec.admin_renounced);
 
@@ -1008,7 +1106,10 @@ fn renounce_denom_admin_after_delivered_emits_change_admin() {
         },
     )
     .unwrap_err();
-    assert!(matches!(err, ContractError::DenomAdminAlreadyRenounced { .. }));
+    assert!(matches!(
+        err,
+        ContractError::DenomAdminAlreadyRenounced { .. }
+    ));
 }
 
 #[test]
@@ -1180,7 +1281,12 @@ fn register_launch_salt_suffix_changes_denom() {
         42,
         "a1b2c3"
     );
-    let stored = LAUNCHES.load(deps.as_ref().storage, (&deps.api.addr_make("evm_authority"), 42)).unwrap();
+    let stored = LAUNCHES
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("evm_authority"), 42),
+        )
+        .unwrap();
     assert_eq!(stored.denom, expected);
 
     // And the CreateDenom subdenom carries the suffix.
@@ -1204,14 +1310,20 @@ fn register_launch_salt_suffix_changes_denom() {
 fn register_launch_rejects_non_alnum_salt_suffix() {
     let mut deps = setup();
     let err = register_full(&mut deps, 1, Some("bad-salt".to_string()), None).unwrap_err();
-    assert!(matches!(err, ContractError::SaltSuffixInvalid { .. }), "{err:?}");
+    assert!(
+        matches!(err, ContractError::SaltSuffixInvalid { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]
 fn register_launch_rejects_empty_salt_suffix() {
     let mut deps = setup();
     let err = register_full(&mut deps, 1, Some(String::new()), None).unwrap_err();
-    assert!(matches!(err, ContractError::SaltSuffixInvalid { .. }), "{err:?}");
+    assert!(
+        matches!(err, ContractError::SaltSuffixInvalid { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -1219,7 +1331,10 @@ fn register_launch_rejects_overlong_subdenom() {
     let mut deps = setup();
     // prefix(6) + "_" + id-digits + "_" + 40 chars overflows the 44-char cap.
     let err = register_full(&mut deps, 1, Some("a".repeat(40)), None).unwrap_err();
-    assert!(matches!(err, ContractError::SubdenomTooLong { .. }), "{err:?}");
+    assert!(
+        matches!(err, ContractError::SubdenomTooLong { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -1241,9 +1356,11 @@ fn register_launch_clmm_pool_auth_emits_authorize_creation() {
 
     // Find the AuthorizeCreation message (the WasmExec aimed at the CLMM factory).
     let found = res.messages.iter().find_map(|sm| match &sm.msg {
-        CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, funds })
-            if contract_addr == &clmm_factory.to_string() =>
-        {
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr,
+            msg,
+            funds,
+        }) if contract_addr == &clmm_factory.to_string() => {
             assert!(funds.is_empty(), "AuthorizeCreation carries no funds");
             let parsed: choice_clmm_common::factory::ExecuteMsg = from_json(msg).unwrap();
             Some(parsed)
@@ -1281,7 +1398,11 @@ fn register_launch_clmm_pool_auth_emits_authorize_creation() {
 fn register_launch_without_clmm_pool_auth_keeps_legacy_chain() {
     let mut deps = setup();
     let res = register_full(&mut deps, 42, None, None).unwrap();
-    assert_eq!(res.messages.len(), 5, "no auth message when clmm_pool_auth is None");
+    assert_eq!(
+        res.messages.len(),
+        5,
+        "no auth message when clmm_pool_auth is None"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -1376,7 +1497,10 @@ fn register_launch_rejects_xyk_payload_with_stray_auth() {
         ttl_seconds: 0,
     };
     let err = register_raw(&mut deps, 1, payload, Some(auth)).unwrap_err();
-    assert!(matches!(err, ContractError::ClmmAuthUnexpected {}), "{err:?}");
+    assert!(
+        matches!(err, ContractError::ClmmAuthUnexpected {}),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -1399,5 +1523,8 @@ fn register_launch_rejects_undecodable_sink_payload() {
     let mut deps = setup();
     let payload = Binary::from(br#"{"not_create_sink":{}}"#.to_vec());
     let err = register_raw(&mut deps, 1, payload, None).unwrap_err();
-    assert!(matches!(err, ContractError::SinkPayloadDecode(_)), "{err:?}");
+    assert!(
+        matches!(err, ContractError::SinkPayloadDecode(_)),
+        "{err:?}"
+    );
 }

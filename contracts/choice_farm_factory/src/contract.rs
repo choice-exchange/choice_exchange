@@ -24,9 +24,9 @@ use choice::staking::{
 
 use crate::state::{
     Config, FarmRecord, FundAfter, PendingFarm, PendingFarmCodeIdUpdate, CONFIG, DEFAULT_LIMIT,
-    FARMS, FARM_BY_ADDR, INJ_DENOM, INSTANTIATE_FARM_REPLY_ID, MAX_LIMIT,
-    MAX_SCHEDULE_SLOT_DURATION_SECONDS, MAX_SCHEDULE_SLOTS, NEXT_FARM_ID, PENDING_FARM,
-    PENDING_FARM_CODE_ID, TIMELOCK_DELAY_SECONDS,
+    FARMS, FARM_BY_ADDR, INJ_DENOM, INSTANTIATE_FARM_REPLY_ID, MAX_LIMIT, MAX_SCHEDULE_SLOTS,
+    MAX_SCHEDULE_SLOT_DURATION_SECONDS, NEXT_FARM_ID, PENDING_FARM, PENDING_FARM_CODE_ID,
+    TIMELOCK_DELAY_SECONDS,
 };
 
 const CONTRACT_NAME: &str = "crates.io:choice-farm-factory";
@@ -55,7 +55,9 @@ pub fn instantiate(
     let farm_owner = deps.api.addr_validate(&msg.farm_owner)?;
 
     if msg.instantiate_fee_inj.is_zero() {
-        return Err(StdError::generic_err("instantiate_fee_inj must be non-zero"));
+        return Err(StdError::generic_err(
+            "instantiate_fee_inj must be non-zero",
+        ));
     }
     if msg.farm_code_id == 0 {
         return Err(StdError::generic_err("farm_code_id must be non-zero"));
@@ -86,12 +88,7 @@ pub fn instantiate(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn execute(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    msg: ExecuteMsg,
-) -> StdResult<Response> {
+pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> StdResult<Response> {
     match msg {
         ExecuteMsg::CreateFarm {
             reward_token,
@@ -109,19 +106,11 @@ pub fn execute(
             fee_collector,
             instantiate_fee_inj,
             farm_owner,
-        } => execute_update_config(
-            deps,
-            info,
-            fee_collector,
-            instantiate_fee_inj,
-            farm_owner,
-        ),
+        } => execute_update_config(deps, info, fee_collector, instantiate_fee_inj, farm_owner),
         ExecuteMsg::ProposeUpdateFarmCodeId { farm_code_id } => {
             execute_propose_update_farm_code_id(deps, env, info, farm_code_id)
         }
-        ExecuteMsg::ApplyUpdateFarmCodeId {} => {
-            execute_apply_update_farm_code_id(deps, env, info)
-        }
+        ExecuteMsg::ApplyUpdateFarmCodeId {} => execute_apply_update_farm_code_id(deps, env, info),
         ExecuteMsg::CancelUpdateFarmCodeIdProposal {} => {
             execute_cancel_update_farm_code_id(deps, info)
         }
@@ -159,7 +148,9 @@ fn execute_create_farm(
     // mismatch means deployment hygiene was broken (e.g. someone ran
     // MsgUpdateAdmin on the factory but didn't update farm_owner). Spawning
     // would create a farm whose admin diverges from what users believe.
-    let factory_info = deps.querier.query_wasm_contract_info(env.contract.address.as_str())?;
+    let factory_info = deps
+        .querier
+        .query_wasm_contract_info(env.contract.address.as_str())?;
     let expected_admin = deps.api.addr_humanize(&config.farm_owner)?;
     match &factory_info.admin {
         Some(actual) if actual.as_str() == expected_admin.as_str() => {}
@@ -327,7 +318,10 @@ fn execute_create_farm(
 pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> StdResult<Response> {
     match reply.id {
         INSTANTIATE_FARM_REPLY_ID => handle_instantiate_farm_reply(deps, env, reply),
-        _ => Err(StdError::generic_err(format!("unknown reply id {}", reply.id))),
+        _ => Err(StdError::generic_err(format!(
+            "unknown reply id {}",
+            reply.id
+        ))),
     }
 }
 
@@ -473,7 +467,9 @@ fn execute_update_config(
     }
     if let Some(fee) = instantiate_fee_inj {
         if fee.is_zero() {
-            return Err(StdError::generic_err("instantiate_fee_inj must be non-zero"));
+            return Err(StdError::generic_err(
+                "instantiate_fee_inj must be non-zero",
+            ));
         }
         config.instantiate_fee_inj = fee;
         attrs.push(("instantiate_fee_inj", fee.to_string()));
@@ -553,10 +549,7 @@ fn execute_apply_update_farm_code_id(
     ]))
 }
 
-fn execute_cancel_update_farm_code_id(
-    deps: DepsMut,
-    info: MessageInfo,
-) -> StdResult<Response> {
+fn execute_cancel_update_farm_code_id(deps: DepsMut, info: MessageInfo) -> StdResult<Response> {
     let config = CONFIG.load(deps.storage)?;
     let sender_raw = deps.api.addr_canonicalize(info.sender.as_str())?;
     if sender_raw != config.owner {
@@ -599,11 +592,7 @@ fn execute_propose_new_owner(
     ]))
 }
 
-fn execute_apply_owner_rotation(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-) -> StdResult<Response> {
+fn execute_apply_owner_rotation(deps: DepsMut, env: Env, info: MessageInfo) -> StdResult<Response> {
     let mut config = CONFIG.load(deps.storage)?;
     let sender_raw = deps.api.addr_canonicalize(info.sender.as_str())?;
     if sender_raw != config.owner {
@@ -777,9 +766,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::PendingOwnerRotation {} => to_json_binary(&query_pending_owner(deps)?),
-        QueryMsg::PendingFarmCodeIdUpdate {} => {
-            to_json_binary(&query_pending_farm_code_id(deps)?)
-        }
+        QueryMsg::PendingFarmCodeIdUpdate {} => to_json_binary(&query_pending_farm_code_id(deps)?),
         QueryMsg::Farm { id } => to_json_binary(&query_farm(deps, id)?),
         QueryMsg::FarmByAddr { addr } => to_json_binary(&query_farm_by_addr(deps, addr)?),
         QueryMsg::Farms { start_after, limit } => {
@@ -793,10 +780,7 @@ fn query_config(deps: Deps) -> StdResult<ConfigResponse> {
     let config = CONFIG.load(deps.storage)?;
     Ok(ConfigResponse {
         owner: deps.api.addr_humanize(&config.owner)?.to_string(),
-        fee_collector: deps
-            .api
-            .addr_humanize(&config.fee_collector)?
-            .to_string(),
+        fee_collector: deps.api.addr_humanize(&config.fee_collector)?.to_string(),
         instantiate_fee_inj: config.instantiate_fee_inj,
         farm_code_id: config.farm_code_id,
         farm_owner: deps.api.addr_humanize(&config.farm_owner)?.to_string(),
@@ -901,4 +885,3 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
         .add_attribute("from_version", stored.version)
         .add_attribute("to_version", CONTRACT_VERSION))
 }
-

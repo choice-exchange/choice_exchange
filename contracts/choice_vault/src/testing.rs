@@ -6,9 +6,9 @@ mod tests {
         execute, instantiate, migrate, query, reply, FINAL_SWAP_REPLY_ID, HARVEST_REPLY_ID,
         PROVIDE_LIQUIDITY_REPLY_ID, ROUTE_SWAP_REPLY_ID,
     };
-    use crate::msg::MigrateMsg;
     use crate::error::ContractError;
     use crate::mock_querier::mock_dependencies;
+    use crate::msg::MigrateMsg;
     use crate::msg::{
         CompoundRoutePayload, Cw20HookMsg, HarvestReplyPayload, PendingDepositsResponse,
         UserInfoResponse,
@@ -223,8 +223,7 @@ mod tests {
 
         // Total shares should still be zero
         let total_shares: Uint128 =
-            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
-                .unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap()).unwrap();
         assert_eq!(total_shares, Uint128::zero());
 
         // 6. Verify the returned message
@@ -337,8 +336,7 @@ mod tests {
 
         // Verify that total shares has NOT changed.
         let total_shares: Uint128 =
-            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
-                .unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap()).unwrap();
         assert_eq!(total_shares, initial_shares); // Still 100
     }
 
@@ -476,8 +474,7 @@ mod tests {
         // 7. Verify the contract's total shares have been updated correctly.
         // New total shares = 100 (from user1) + 50 (from user2) = 150
         let total_shares: Uint128 =
-            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
-                .unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap()).unwrap();
         assert_eq!(total_shares, initial_total_shares + expected_new_shares);
     }
 
@@ -801,8 +798,7 @@ mod tests {
         // C-3 regression: proposing a new compounder must not take effect until the timelock
         // expires. ApplyCompounderRotation before the delay must error.
         let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
-        let (mut deps, owner_addr, _, _) =
-            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let (mut deps, owner_addr, _, _) = setup_vault_for_c3(&initial_compounder, Uint128::zero());
         let new_compounder = deps.api.addr_make("keeper1");
 
         execute(
@@ -846,8 +842,7 @@ mod tests {
         // C-3 regression: once the timelock has elapsed, the owner can finalize the rotation
         // and the new compounder replaces the old. The old compounder loses access.
         let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
-        let (mut deps, owner_addr, _, _) =
-            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let (mut deps, owner_addr, _, _) = setup_vault_for_c3(&initial_compounder, Uint128::zero());
         let new_compounder = deps.api.addr_make("keeper1");
 
         let propose_env = mock_env();
@@ -917,8 +912,7 @@ mod tests {
     #[test]
     fn test_cancel_compounder_proposal_clears_pending() {
         let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
-        let (mut deps, owner_addr, _, _) =
-            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let (mut deps, owner_addr, _, _) = setup_vault_for_c3(&initial_compounder, Uint128::zero());
         let proposed = deps.api.addr_make("keeper1");
 
         execute(
@@ -960,8 +954,7 @@ mod tests {
         // C-3 regression: users can self-activate their pending deposits without waiting on
         // the keeper, so a dead keeper cannot permanently strand their capital.
         let initial_compounder = cosmwasm_std::testing::MockApi::default().addr_make("keeper0");
-        let (mut deps, _, user_addr, _) =
-            setup_vault_for_c3(&initial_compounder, Uint128::zero());
+        let (mut deps, _, user_addr, _) = setup_vault_for_c3(&initial_compounder, Uint128::zero());
 
         execute(
             deps.as_mut(),
@@ -1124,8 +1117,7 @@ mod tests {
 
         // Total shares in the contract should be zero
         let total_shares: Uint128 =
-            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
-                .unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap()).unwrap();
         assert_eq!(total_shares, Uint128::zero());
 
         // 6. Verify the returned messages
@@ -1381,8 +1373,7 @@ mod tests {
 
         // Total shares should now be 60
         let total_shares: Uint128 =
-            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap())
-                .unwrap();
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalShares {}).unwrap()).unwrap();
         assert_eq!(total_shares, expected_remaining_shares);
 
         // 6. Verify returned messages
@@ -1425,7 +1416,7 @@ mod tests {
 
         let token_a_addr = deps.api.addr_make("token_a0000"); // CW20
         let token_b_denom = "uusd"; // Native
-        // reward_token must be one of the pair's assets (H-2) — pick token_b (native).
+                                    // reward_token must be one of the pair's assets (H-2) — pick token_b (native).
         let reward_denom = token_b_denom;
 
         let creator_addr = deps.api.addr_make("creator");
@@ -1644,7 +1635,7 @@ mod tests {
 
         let token_a_denom = "uatom"; // Native
         let token_b_denom = "uusd"; // Native
-        // reward_token must be one of the pair's assets (H-2) — pick token_a.
+                                    // reward_token must be one of the pair's assets (H-2) — pick token_a.
         let reward_denom = token_a_denom;
 
         let pending_rewards = Uint128::new(20);
@@ -2140,11 +2131,8 @@ mod tests {
 
         let minted_lp = Uint128::new(50);
         let minimum_required = Uint128::new(100);
-        deps.querier.with_token_balance(
-            lp_token_addr.as_ref(),
-            vault_addr.as_ref(),
-            minted_lp,
-        );
+        deps.querier
+            .with_token_balance(lp_token_addr.as_ref(), vault_addr.as_ref(), minted_lp);
 
         let mut env = mock_env();
         env.contract.address = vault_addr;
@@ -4009,7 +3997,10 @@ mod tests {
         let res3 = query(deps.as_ref(), mock_env(), query_msg_3).unwrap();
         let page3: PendingDepositsResponse = from_json(&res3).unwrap();
 
-        assert!(page3.users.is_empty(), "Page 3 should have no pending users");
+        assert!(
+            page3.users.is_empty(),
+            "Page 3 should have no pending users"
+        );
 
         // The cursor must still advance past any non-pending users that were
         // iterated on this page, so paginate again to confirm termination.
@@ -4206,10 +4197,9 @@ mod tests {
         // The pending deposit should be the sum of both deposits.
         assert_eq!(user_info.pending_deposit, Uint128::new(150));
 
-        let total_pending: Uint128 = from_json(
-            query(deps.as_ref(), mock_env(), QueryMsg::TotalPendingDeposits {}).unwrap(),
-        )
-        .unwrap();
+        let total_pending: Uint128 =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TotalPendingDeposits {}).unwrap())
+                .unwrap();
         assert_eq!(total_pending, Uint128::new(150));
     }
 
@@ -5238,7 +5228,13 @@ mod tests {
             },
         );
 
-        (deps, farm_contract_addr, user_addr, user_shares, total_bonded)
+        (
+            deps,
+            farm_contract_addr,
+            user_addr,
+            user_shares,
+            total_bonded,
+        )
     }
 
     #[test]
@@ -5579,7 +5575,10 @@ mod tests {
             instantiate_msg,
         )
         .unwrap_err();
-        assert!(matches!(err, ContractError::CompoundPathMustEndOnPairAsset {}));
+        assert!(matches!(
+            err,
+            ContractError::CompoundPathMustEndOnPairAsset {}
+        ));
     }
 
     #[test]
@@ -5623,18 +5622,23 @@ mod tests {
             instantiate_msg,
         )
         .unwrap_err();
-        assert!(matches!(err, ContractError::CompoundPathMustEndOnPairAsset {}));
+        assert!(matches!(
+            err,
+            ContractError::CompoundPathMustEndOnPairAsset {}
+        ));
     }
 
     // -------------------------------------------------------------------------
     // Batch 1 — instantiate & config hygiene (M-5, M-6, M-7)
     // -------------------------------------------------------------------------
 
-    fn make_valid_instantiate_msg(deps: &cosmwasm_std::OwnedDeps<
-        cosmwasm_std::MemoryStorage,
-        cosmwasm_std::testing::MockApi,
-        crate::mock_querier::WasmMockQuerier,
-    >) -> (InstantiateMsg, cosmwasm_std::Addr) {
+    fn make_valid_instantiate_msg(
+        deps: &cosmwasm_std::OwnedDeps<
+            cosmwasm_std::MemoryStorage,
+            cosmwasm_std::testing::MockApi,
+            crate::mock_querier::WasmMockQuerier,
+        >,
+    ) -> (InstantiateMsg, cosmwasm_std::Addr) {
         let owner_addr = deps.api.addr_make("owner_batch1");
         let msg = InstantiateMsg {
             owner: owner_addr.to_string(),
@@ -5673,13 +5677,8 @@ mod tests {
         msg.slippage_tolerance = Decimal::percent(26); // just over the 25% cap
 
         let creator = deps.api.addr_make("creator");
-        let err = instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap_err();
+        let err =
+            instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap_err();
         match err {
             ContractError::SlippageToleranceAboveMax { got, max } => {
                 assert_eq!(got, Decimal::percent(26));
@@ -5697,13 +5696,7 @@ mod tests {
         msg.slippage_tolerance = crate::contract::DEFAULT_MAX_SLIPPAGE_TOLERANCE;
 
         let creator = deps.api.addr_make("creator");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
     }
 
     #[test]
@@ -5713,13 +5706,7 @@ mod tests {
         let mut deps = mock_dependencies();
         let (msg, owner) = make_valid_instantiate_msg(&deps);
         let creator = deps.api.addr_make("creator");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
 
         let err = execute(
             deps.as_mut(),
@@ -5750,13 +5737,7 @@ mod tests {
         msg.fee_percentage = Some(Decimal::percent(5));
 
         let creator = deps.api.addr_make("creator");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
 
         // Non-owner cannot clear.
         let rando = deps.api.addr_make("rando");
@@ -5849,13 +5830,7 @@ mod tests {
             reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator_batch2");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
         (deps, owner, farm)
     }
 
@@ -5972,13 +5947,7 @@ mod tests {
             reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator_m8");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
 
         // Corrupt state to the impossible shape the dead branch guarded against:
         // user has shares, but total_shares is zero.
@@ -6150,13 +6119,7 @@ mod tests {
             reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
         deps.querier.with_staker_info(
             farm.to_string(),
             StakerInfoResponse {
@@ -6213,22 +6176,16 @@ mod tests {
     fn test_optimal_zap_amount_matches_fee_derivation() {
         // H-3: spot-check the closed-form zap against the derivation. For (Rx=10_000, A=30)
         // with fee=0.3%, the optimal swap is ~15 (very slightly over A/2 due to fee).
-        let s = crate::contract::optimal_zap_amount_xyk(
-            Uint128::new(30),
-            Uint128::new(10_000),
-        )
-        .unwrap();
+        let s = crate::contract::optimal_zap_amount_xyk(Uint128::new(30), Uint128::new(10_000))
+            .unwrap();
         // The closed-form yields 15 for these parameters (naive 50/50 would also be 15, but
         // this test-pins the formula against a known-good manual computation).
         assert_eq!(s, Uint128::new(15));
 
         // For a smaller pool (A closer to Rx), fee impact is more visible and s should be
         // well below A/2. For (Rx=1_000, A=1_000) the naive 50/50 is 500; the optimal is less.
-        let s = crate::contract::optimal_zap_amount_xyk(
-            Uint128::new(1_000),
-            Uint128::new(1_000),
-        )
-        .unwrap();
+        let s = crate::contract::optimal_zap_amount_xyk(Uint128::new(1_000), Uint128::new(1_000))
+            .unwrap();
         assert!(
             s < Uint128::new(500),
             "for A=Rx the optimal zap is strictly below A/2; got {}",
@@ -6239,21 +6196,15 @@ mod tests {
 
     #[test]
     fn test_optimal_zap_amount_zero_amount() {
-        let s = crate::contract::optimal_zap_amount_xyk(
-            Uint128::zero(),
-            Uint128::new(10_000),
-        )
-        .unwrap();
+        let s =
+            crate::contract::optimal_zap_amount_xyk(Uint128::zero(), Uint128::new(10_000)).unwrap();
         assert_eq!(s, Uint128::zero());
     }
 
     #[test]
     fn test_optimal_zap_amount_zero_reserve_errors() {
-        let err = crate::contract::optimal_zap_amount_xyk(
-            Uint128::new(100),
-            Uint128::zero(),
-        )
-        .unwrap_err();
+        let err = crate::contract::optimal_zap_amount_xyk(Uint128::new(100), Uint128::zero())
+            .unwrap_err();
         assert!(err.to_string().contains("zero offer-side reserve"));
     }
 
@@ -6297,13 +6248,7 @@ mod tests {
             reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
 
         deps.querier.with_staker_info(
             farm.to_string(),
@@ -6336,11 +6281,8 @@ mod tests {
             }],
         )]);
         // Needed for the provide_liquidity_reply path.
-        deps.querier.with_token_balance(
-            lp_token.as_ref(),
-            vault_addr.as_ref(),
-            Uint128::new(50),
-        );
+        deps.querier
+            .with_token_balance(lp_token.as_ref(), vault_addr.as_ref(), Uint128::new(50));
 
         let mut env = mock_env();
         env.contract.address = vault_addr.clone();
@@ -6408,13 +6350,7 @@ mod tests {
             reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
 
         let payload = HarvestReplyPayload {
             reward_amount_to_compound: Uint128::new(100),
@@ -6559,13 +6495,7 @@ mod tests {
             reward_to_lp_token_route: vec![],
         };
         let creator = deps.api.addr_make("creator_pause");
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            message_info(&creator, &[]),
-            msg,
-        )
-        .unwrap();
+        instantiate(deps.as_mut(), mock_env(), message_info(&creator, &[]), msg).unwrap();
         (deps, owner, compounder)
     }
 
@@ -6818,11 +6748,19 @@ mod tests {
             owner: owner.to_string(),
             pair_contract: pair.to_string(),
             farm_contract: farm.to_string(),
-            lp_token: AssetInfo::NativeToken { denom: "lp".to_string() },
-            reward_token: AssetInfo::NativeToken { denom: "token_a".to_string() },
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp".to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
             asset_infos: [
-                AssetInfo::NativeToken { denom: "token_a".to_string() },
-                AssetInfo::NativeToken { denom: "token_b".to_string() },
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
             ],
             fee_recipient: None,
             fee_percentage: None,
@@ -6849,11 +6787,15 @@ mod tests {
             PoolResponse {
                 assets: [
                     Asset {
-                        info: AssetInfo::NativeToken { denom: "token_a".to_string() },
+                        info: AssetInfo::NativeToken {
+                            denom: "token_a".to_string(),
+                        },
                         amount: Uint128::new(10_000),
                     },
                     Asset {
-                        info: AssetInfo::NativeToken { denom: "token_b".to_string() },
+                        info: AssetInfo::NativeToken {
+                            denom: "token_b".to_string(),
+                        },
                         amount: Uint128::new(10_000),
                     },
                 ],
@@ -6883,7 +6825,10 @@ mod tests {
         match err {
             ContractError::MinimumLpBelowHeuristic { minimum, floor } => {
                 assert_eq!(minimum, Uint128::new(1));
-                assert!(!floor.is_zero(), "floor must be non-zero for this pool scale");
+                assert!(
+                    !floor.is_zero(),
+                    "floor must be non-zero for this pool scale"
+                );
                 assert!(minimum < floor);
             }
             other => panic!("expected MinimumLpBelowHeuristic, got {:?}", other),
@@ -6947,11 +6892,19 @@ mod tests {
             owner: owner.to_string(),
             pair_contract: pair.to_string(),
             farm_contract: farm.to_string(),
-            lp_token: AssetInfo::NativeToken { denom: "lp".to_string() },
-            reward_token: AssetInfo::NativeToken { denom: "token_a".to_string() },
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp".to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
             asset_infos: [
-                AssetInfo::NativeToken { denom: "token_a".to_string() },
-                AssetInfo::NativeToken { denom: "token_b".to_string() },
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
             ],
             fee_recipient: None,
             fee_percentage: None,
@@ -6975,8 +6928,12 @@ mod tests {
         deps.querier.with_pool(
             pair.to_string(),
             big_pool_response(
-                AssetInfo::NativeToken { denom: "token_a".to_string() },
-                AssetInfo::NativeToken { denom: "token_b".to_string() },
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
             ),
         );
 
@@ -7013,11 +6970,19 @@ mod tests {
             owner: owner.to_string(),
             pair_contract: pair.to_string(),
             farm_contract: farm.to_string(),
-            lp_token: AssetInfo::NativeToken { denom: "lp".to_string() },
-            reward_token: AssetInfo::NativeToken { denom: "token_a".to_string() },
+            lp_token: AssetInfo::NativeToken {
+                denom: "lp".to_string(),
+            },
+            reward_token: AssetInfo::NativeToken {
+                denom: "token_a".to_string(),
+            },
             asset_infos: [
-                AssetInfo::NativeToken { denom: "token_a".to_string() },
-                AssetInfo::NativeToken { denom: "token_b".to_string() },
+                AssetInfo::NativeToken {
+                    denom: "token_a".to_string(),
+                },
+                AssetInfo::NativeToken {
+                    denom: "token_b".to_string(),
+                },
             ],
             fee_recipient: Some(fee_recipient.to_string()),
             fee_percentage: Some(Decimal::percent(50)),
@@ -7043,11 +7008,15 @@ mod tests {
             PoolResponse {
                 assets: [
                     Asset {
-                        info: AssetInfo::NativeToken { denom: "token_a".to_string() },
+                        info: AssetInfo::NativeToken {
+                            denom: "token_a".to_string(),
+                        },
                         amount: Uint128::new(10_000),
                     },
                     Asset {
-                        info: AssetInfo::NativeToken { denom: "token_b".to_string() },
+                        info: AssetInfo::NativeToken {
+                            denom: "token_b".to_string(),
+                        },
                         amount: Uint128::new(10_000),
                     },
                 ],
@@ -7095,7 +7064,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::TightenMaxSlippage { new_max: Decimal::percent(10) },
+            ExecuteMsg::TightenMaxSlippage {
+                new_max: Decimal::percent(10),
+            },
         )
         .unwrap();
         assert!(res
@@ -7103,7 +7074,8 @@ mod tests {
             .iter()
             .any(|a| a.key == "action" && a.value == "tighten_max_slippage"));
 
-        let cfg: Config = from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+        let cfg: Config =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
         assert_eq!(cfg.max_slippage_tolerance, Decimal::percent(10));
     }
 
@@ -7122,11 +7094,14 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::TightenMaxSlippage { new_max: Decimal::percent(5) },
+            ExecuteMsg::TightenMaxSlippage {
+                new_max: Decimal::percent(5),
+            },
         )
         .unwrap();
 
-        let cfg: Config = from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+        let cfg: Config =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
         assert_eq!(cfg.max_slippage_tolerance, Decimal::percent(5));
         assert_eq!(cfg.slippage_tolerance, Decimal::percent(5));
     }
@@ -7143,7 +7118,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::TightenMaxSlippage { new_max: Decimal::percent(30) },
+            ExecuteMsg::TightenMaxSlippage {
+                new_max: Decimal::percent(30),
+            },
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::MaxSlippageMustNotRaise { .. }));
@@ -7161,7 +7138,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&stranger, &[]),
-            ExecuteMsg::TightenMaxSlippage { new_max: Decimal::percent(10) },
+            ExecuteMsg::TightenMaxSlippage {
+                new_max: Decimal::percent(10),
+            },
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::Unauthorized {}));
@@ -7179,7 +7158,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::ProposeMaxSlippageRaise { new_max: Decimal::percent(25) },
+            ExecuteMsg::ProposeMaxSlippageRaise {
+                new_max: Decimal::percent(25),
+            },
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::MaxSlippageMustBeHigher { .. }));
@@ -7197,7 +7178,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::ProposeMaxSlippageRaise { new_max: Decimal::percent(60) },
+            ExecuteMsg::ProposeMaxSlippageRaise {
+                new_max: Decimal::percent(60),
+            },
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::MaxSlippageAboveCeiling { .. }));
@@ -7214,7 +7197,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::ProposeMaxSlippageRaise { new_max: Decimal::percent(40) },
+            ExecuteMsg::ProposeMaxSlippageRaise {
+                new_max: Decimal::percent(40),
+            },
         )
         .unwrap();
 
@@ -7229,7 +7214,8 @@ mod tests {
         assert!(matches!(err, ContractError::MaxSlippageRaiseNotReady {}));
 
         // Cap is unchanged.
-        let cfg: Config = from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+        let cfg: Config =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
         assert_eq!(cfg.max_slippage_tolerance, Decimal::percent(25));
     }
 
@@ -7244,14 +7230,17 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::ProposeMaxSlippageRaise { new_max: Decimal::percent(40) },
+            ExecuteMsg::ProposeMaxSlippageRaise {
+                new_max: Decimal::percent(40),
+            },
         )
         .unwrap();
 
         let mut env = mock_env();
-        env.block.time = env.block.time.plus_seconds(
-            crate::state::MAX_SLIPPAGE_RAISE_DELAY_SECONDS + 1,
-        );
+        env.block.time = env
+            .block
+            .time
+            .plus_seconds(crate::state::MAX_SLIPPAGE_RAISE_DELAY_SECONDS + 1);
         execute(
             deps.as_mut(),
             env,
@@ -7260,7 +7249,8 @@ mod tests {
         )
         .unwrap();
 
-        let cfg: Config = from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+        let cfg: Config =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
         assert_eq!(cfg.max_slippage_tolerance, Decimal::percent(40));
         assert!(cfg.pending_max_slippage.is_none());
         assert!(cfg.pending_max_slippage_effective_at.is_none());
@@ -7278,7 +7268,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::ProposeMaxSlippageRaise { new_max: Decimal::percent(40) },
+            ExecuteMsg::ProposeMaxSlippageRaise {
+                new_max: Decimal::percent(40),
+            },
         )
         .unwrap();
 
@@ -7286,10 +7278,15 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::ProposeMaxSlippageRaise { new_max: Decimal::percent(45) },
+            ExecuteMsg::ProposeMaxSlippageRaise {
+                new_max: Decimal::percent(45),
+            },
         )
         .unwrap_err();
-        assert!(matches!(err, ContractError::MaxSlippageRaiseAlreadyPending {}));
+        assert!(matches!(
+            err,
+            ContractError::MaxSlippageRaiseAlreadyPending {}
+        ));
     }
 
     #[test]
@@ -7303,7 +7300,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::ProposeMaxSlippageRaise { new_max: Decimal::percent(40) },
+            ExecuteMsg::ProposeMaxSlippageRaise {
+                new_max: Decimal::percent(40),
+            },
         )
         .unwrap();
         execute(
@@ -7315,7 +7314,12 @@ mod tests {
         .unwrap();
 
         let pending: crate::msg::PendingMaxSlippageRaiseResponse = from_json(
-            query(deps.as_ref(), mock_env(), QueryMsg::PendingMaxSlippageRaise {}).unwrap(),
+            query(
+                deps.as_ref(),
+                mock_env(),
+                QueryMsg::PendingMaxSlippageRaise {},
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(pending.pending_max_slippage.is_none());
@@ -7337,7 +7341,9 @@ mod tests {
             deps.as_mut(),
             mock_env(),
             message_info(&owner, &[]),
-            ExecuteMsg::TightenMaxSlippage { new_max: Decimal::percent(5) },
+            ExecuteMsg::TightenMaxSlippage {
+                new_max: Decimal::percent(5),
+            },
         )
         .unwrap();
 
@@ -7353,6 +7359,9 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(err, ContractError::SlippageToleranceAboveMax { .. }));
+        assert!(matches!(
+            err,
+            ContractError::SlippageToleranceAboveMax { .. }
+        ));
     }
 }

@@ -41,9 +41,7 @@ fn fund_via_reward_cw20(deps: &mut TestDeps, amount: Uint128) {
 fn bump_cw20_balance(deps: &mut TestDeps, label: &str, delta: Uint128) {
     let cw20_addr = deps.api.addr_make(label).to_string();
     let contract_addr = mock_env().contract.address.to_string();
-    let current = deps
-        .querier
-        .get_cw20_balance(&cw20_addr, &contract_addr);
+    let current = deps.querier.get_cw20_balance(&cw20_addr, &contract_addr);
     deps.querier.set_cw20_balance(
         cw20_addr,
         contract_addr,
@@ -56,9 +54,7 @@ fn bump_cw20_balance(deps: &mut TestDeps, label: &str, delta: Uint128) {
 fn bump_reward_cw20_balance(deps: &mut TestDeps, delta: Uint128) {
     let reward_addr = deps.api.addr_make("reward0000").to_string();
     let contract_addr = mock_env().contract.address.to_string();
-    let current = deps
-        .querier
-        .get_cw20_balance(&reward_addr, &contract_addr);
+    let current = deps.querier.get_cw20_balance(&reward_addr, &contract_addr);
     deps.querier.set_cw20_balance(
         reward_addr,
         contract_addr,
@@ -72,9 +68,7 @@ fn bump_reward_cw20_balance(deps: &mut TestDeps, delta: Uint128) {
 fn decrement_reward_cw20_balance(deps: &mut TestDeps, delta: Uint128) {
     let reward_addr = deps.api.addr_make("reward0000").to_string();
     let contract_addr = mock_env().contract.address.to_string();
-    let current = deps
-        .querier
-        .get_cw20_balance(&reward_addr, &contract_addr);
+    let current = deps.querier.get_cw20_balance(&reward_addr, &contract_addr);
     deps.querier.set_cw20_balance(
         reward_addr,
         contract_addr,
@@ -269,10 +263,7 @@ fn instantiate_native_multiple_coins_rejected() {
     };
     let info = message_info(
         &deps.api.addr_make("addr0000"),
-        &[
-            Coin::new(1_000_000u128, "uatom"),
-            Coin::new(1u128, "inj"),
-        ],
+        &[Coin::new(1_000_000u128, "uatom"), Coin::new(1u128, "inj")],
     );
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
     assert!(err.to_string().contains("at most one coin"), "got: {}", err);
@@ -296,7 +287,11 @@ fn instantiate_cw20_with_funds_rejected() {
         &[Coin::new(1_000_000u128, "uatom")],
     );
     let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
-    assert!(err.to_string().contains("cw20 reward farms"), "got: {}", err);
+    assert!(
+        err.to_string().contains("cw20 reward farms"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
@@ -789,7 +784,11 @@ fn test_migrate_staking() {
     let info = message_info(&deps.api.addr_make("addr0000"), &[]);
     let propose_res = execute(deps.as_mut(), env.clone(), info.clone(), propose_msg).unwrap();
     assert_eq!(
-        propose_res.attributes.iter().find(|a| a.key == "action").map(|a| a.value.as_str()),
+        propose_res
+            .attributes
+            .iter()
+            .find(|a| a.key == "action")
+            .map(|a| a.value.as_str()),
         Some("propose_migrate_staking")
     );
     // No fund movement yet — propose just records intent.
@@ -805,7 +804,10 @@ fn test_migrate_staking() {
     }
 
     // Unauthorized apply after timelock elapses — reject.
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
     let outsider = message_info(&deps.api.addr_make("notaddr0000"), &[]);
     match execute(deps.as_mut(), env.clone(), outsider, apply_msg.clone()) {
         Err(StdError::GenericErr { msg, .. }) => assert_eq!(msg, "unauthorized"),
@@ -826,7 +828,10 @@ fn test_migrate_staking() {
     let res = execute(deps.as_mut(), env, info, apply_msg).unwrap();
 
     assert_eq!(
-        res.attributes.iter().find(|a| a.key == "action").map(|a| a.value.as_str()),
+        res.attributes
+            .iter()
+            .find(|a| a.key == "action")
+            .map(|a| a.value.as_str()),
         Some("apply_migrate_staking"),
     );
     let remaining_attr = res
@@ -839,7 +844,10 @@ fn test_migrate_staking() {
     let remaining: Uint128 = remaining_attr.parse().unwrap();
 
     if remaining.is_zero() {
-        assert!(res.messages.is_empty(), "no forwarding msg when remainder is zero");
+        assert!(
+            res.messages.is_empty(),
+            "no forwarding msg when remainder is zero"
+        );
     } else {
         assert_eq!(
             res.messages,
@@ -906,11 +914,7 @@ fn instantiate_for_update_config_tests() -> (TestDeps, cosmwasm_std::Addr) {
         staking_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("staking0000").to_string(),
         },
-        distribution_schedule: vec![(
-            start + 1000,
-            start + 1100,
-            Uint128::from(1_000_000u128),
-        )],
+        distribution_schedule: vec![(start + 1000, start + 1100, Uint128::from(1_000_000u128))],
     };
     instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
     (deps, owner)
@@ -977,7 +981,10 @@ fn test_update_config_timelocked_happy_path() {
         _ => panic!("expected timelock rejection"),
     }
 
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
 
     // Outsider still can't apply.
     let err = execute(
@@ -1073,7 +1080,10 @@ fn test_update_config_cancel_and_repropose() {
         },
     )
     .unwrap();
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS - 60);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS - 60);
 
     let third = vec![(start + 4000, start + 4100, Uint128::from(4_000_000u128))];
     execute(
@@ -1153,7 +1163,10 @@ fn test_update_config_assert_at_apply() {
     )
     .unwrap();
 
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
 
     let err = execute(
         deps.as_mut(),
@@ -1192,11 +1205,9 @@ fn test_update_config_slot_duration_cap_rejected() {
     )
     .unwrap_err();
     match err {
-        StdError::GenericErr { msg, .. } => assert!(
-            msg.contains("slot duration exceeds max"),
-            "got: {}",
-            msg
-        ),
+        StdError::GenericErr { msg, .. } => {
+            assert!(msg.contains("slot duration exceeds max"), "got: {}", msg)
+        }
         _ => panic!("expected slot-duration rejection"),
     }
 }
@@ -1216,11 +1227,7 @@ fn instantiate_for_add_schedules_native() -> (TestDeps, cosmwasm_std::Addr) {
         staking_token: AssetInfo::Token {
             contract_addr: deps.api.addr_make("staking0000").to_string(),
         },
-        distribution_schedule: vec![(
-            start + 1000,
-            start + 1100,
-            Uint128::from(1_000_000u128),
-        )],
+        distribution_schedule: vec![(start + 1000, start + 1100, Uint128::from(1_000_000u128))],
     };
     instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
     (deps, owner)
@@ -1424,11 +1431,9 @@ fn test_add_schedules_native_wrong_denom_rejected() {
     )
     .unwrap_err();
     match err {
-        StdError::GenericErr { msg, .. } => assert!(
-            msg.contains("wrong denom in funds"),
-            "got: {}",
-            msg
-        ),
+        StdError::GenericErr { msg, .. } => {
+            assert!(msg.contains("wrong denom in funds"), "got: {}", msg)
+        }
         _ => panic!("expected wrong-denom rejection"),
     }
 }
@@ -1452,11 +1457,9 @@ fn test_add_schedules_native_wrong_amount_rejected() {
     )
     .unwrap_err();
     match err {
-        StdError::GenericErr { msg, .. } => assert!(
-            msg.contains("funds amount mismatch"),
-            "got: {}",
-            msg
-        ),
+        StdError::GenericErr { msg, .. } => {
+            assert!(msg.contains("funds amount mismatch"), "got: {}", msg)
+        }
         _ => panic!("expected amount-mismatch rejection"),
     }
 }
@@ -1527,11 +1530,9 @@ fn test_add_schedules_slot_duration_cap_rejected() {
     )
     .unwrap_err();
     match err {
-        StdError::GenericErr { msg, .. } => assert!(
-            msg.contains("slot duration exceeds max"),
-            "got: {}",
-            msg
-        ),
+        StdError::GenericErr { msg, .. } => {
+            assert!(msg.contains("slot duration exceeds max"), "got: {}", msg)
+        }
         _ => panic!("expected slot-duration rejection"),
     }
 }
@@ -1853,10 +1854,7 @@ fn test_fund_cw20() {
     };
 
     // Native Fund is rejected when reward_token is CW20.
-    let native_info = message_info(
-        &deps.api.addr_make("funder"),
-        &coins(100, "inj"),
-    );
+    let native_info = message_info(&deps.api.addr_make("funder"), &coins(100, "inj"));
     let err = execute(deps.as_mut(), mock_env(), native_info, ExecuteMsg::Fund {}).unwrap_err();
     match err {
         StdError::GenericErr { msg, .. } => assert!(msg.contains("reward token is cw20")),
@@ -2111,10 +2109,19 @@ fn test_zero_bond_period_preserves_funds_through_migrate() {
     let propose = ExecuteMsg::ProposeMigrateStaking {
         new_staking_contract: deps.api.addr_make("newstaking").to_string(),
     };
-    execute(deps.as_mut(), env.clone(), message_info(&owner, &[]), propose).unwrap();
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        message_info(&owner, &[]),
+        propose,
+    )
+    .unwrap();
 
     // Wait out the timelock, then apply.
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
     let res = execute(
         deps.as_mut(),
         env,
@@ -2198,7 +2205,12 @@ fn test_owner_rotation_timelocked_happy_path() {
     .unwrap();
 
     // Query surfaces the pending rotation.
-    let res = query(deps.as_ref(), env.clone(), QueryMsg::PendingOwnerRotation {}).unwrap();
+    let res = query(
+        deps.as_ref(),
+        env.clone(),
+        QueryMsg::PendingOwnerRotation {},
+    )
+    .unwrap();
     let pending: PendingOwnerRotationResponse = from_json(&res).unwrap();
     assert_eq!(pending.pending_owner, Some(new_owner.to_string()));
     assert_eq!(
@@ -2222,7 +2234,10 @@ fn test_owner_rotation_timelocked_happy_path() {
     }
 
     // Advance past the timelock.
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
 
     // Outsider still can't apply.
     let err = execute(
@@ -2255,7 +2270,12 @@ fn test_owner_rotation_timelocked_happy_path() {
     let config: ConfigResponse = from_json(&res).unwrap();
     assert_eq!(config.owner, new_owner.to_string());
 
-    let res = query(deps.as_ref(), env.clone(), QueryMsg::PendingOwnerRotation {}).unwrap();
+    let res = query(
+        deps.as_ref(),
+        env.clone(),
+        QueryMsg::PendingOwnerRotation {},
+    )
+    .unwrap();
     let pending: PendingOwnerRotationResponse = from_json(&res).unwrap();
     assert_eq!(pending.pending_owner, None);
     assert_eq!(pending.effective_at, None);
@@ -2344,7 +2364,12 @@ fn test_owner_rotation_cancel_and_reset() {
     )
     .unwrap();
 
-    let res = query(deps.as_ref(), env.clone(), QueryMsg::PendingOwnerRotation {}).unwrap();
+    let res = query(
+        deps.as_ref(),
+        env.clone(),
+        QueryMsg::PendingOwnerRotation {},
+    )
+    .unwrap();
     let pending: PendingOwnerRotationResponse = from_json(&res).unwrap();
     assert_eq!(pending.pending_owner, None);
     assert_eq!(pending.effective_at, None);
@@ -2352,7 +2377,10 @@ fn test_owner_rotation_cancel_and_reset() {
     // After a further elapse that WOULD have covered the delay, apply still
     // rejects because the proposal was cancelled.
     let mut later = env;
-    later.block.time = later.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS * 10);
+    later.block.time = later
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS * 10);
     let err = execute(
         deps.as_mut(),
         later,
@@ -2386,11 +2414,13 @@ fn test_owner_rotation_repropose_resets_timer() {
         },
     )
     .unwrap();
-    let first_effective =
-        env.block.time.seconds() + crate::state::TIMELOCK_DELAY_SECONDS;
+    let first_effective = env.block.time.seconds() + crate::state::TIMELOCK_DELAY_SECONDS;
 
     // Let some but not all of the delay pass.
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS / 2);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS / 2);
 
     execute(
         deps.as_mut(),
@@ -2402,7 +2432,12 @@ fn test_owner_rotation_repropose_resets_timer() {
     )
     .unwrap();
 
-    let res = query(deps.as_ref(), env.clone(), QueryMsg::PendingOwnerRotation {}).unwrap();
+    let res = query(
+        deps.as_ref(),
+        env.clone(),
+        QueryMsg::PendingOwnerRotation {},
+    )
+    .unwrap();
     let pending: PendingOwnerRotationResponse = from_json(&res).unwrap();
     assert_eq!(pending.pending_owner, Some(second.to_string()));
     let second_effective = pending.effective_at.unwrap();
@@ -2476,7 +2511,10 @@ fn test_migrate_staking_timelocked_happy_path() {
     }
 
     // Advance past the timelock.
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
 
     // Outsider still can't apply.
     let err = execute(
@@ -2593,7 +2631,10 @@ fn test_migrate_staking_cancel() {
 
     // Post-cancel, apply still errors even after waiting.
     let mut later = env;
-    later.block.time = later.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS * 10);
+    later.block.time = later
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS * 10);
     let err = execute(
         deps.as_mut(),
         later,
@@ -2625,13 +2666,7 @@ fn test_migrate_staking_preserves_bonded_stake() {
         distribution_schedule: vec![(start, start + 100, Uint128::from(1_000_000u128))],
     };
     let owner = deps.api.addr_make("addr0000");
-    instantiate(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&owner, &[]),
-        msg,
-    )
-    .unwrap();
+    instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
 
     fund_via_reward_cw20(&mut deps, Uint128::from(2_000_000u128));
 
@@ -2669,7 +2704,10 @@ fn test_migrate_staking_preserves_bonded_stake() {
 
     // Apply after timelock. By then all 1M from the schedule has been distributed
     // to the sole bonder; the other 1M of undistributed_rewards moves.
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
     let res = execute(
         deps.as_mut(),
         env,
@@ -2728,13 +2766,7 @@ fn test_migrate_staking_same_token_does_not_drain_bond() {
         },
         distribution_schedule: vec![(start, start + 100, Uint128::from(1_000_000u128))],
     };
-    instantiate(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&owner, &[]),
-        msg,
-    )
-    .unwrap();
+    instantiate(deps.as_mut(), mock_env(), message_info(&owner, &[]), msg).unwrap();
 
     // Fund 2_000_000 via the shared CW20. Mock balance bumped first so the
     // M-1 reconcile inside receive_cw20 sees the delta.
@@ -2788,7 +2820,10 @@ fn test_migrate_staking_same_token_does_not_drain_bond() {
     )
     .unwrap();
 
-    env.block.time = env.block.time.plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
+    env.block.time = env
+        .block
+        .time
+        .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 1);
     let res = execute(
         deps.as_mut(),
         env,
@@ -2811,7 +2846,11 @@ fn test_migrate_staking_same_token_does_not_drain_bond() {
         "same-token migration must reserve total_bond_amount AND unclaimed_pending"
     );
 
-    assert_eq!(res.messages.len(), 1, "expected one outbound Cw20::Transfer");
+    assert_eq!(
+        res.messages.len(),
+        1,
+        "expected one outbound Cw20::Transfer"
+    );
     match &res.messages[0].msg {
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: cw20_addr,
@@ -2837,7 +2876,12 @@ fn test_migrate_staking_same_token_does_not_drain_bond() {
         .block
         .time
         .plus_seconds(crate::state::TIMELOCK_DELAY_SECONDS + 51);
-    let state_res = query(deps.as_ref(), env_after.clone(), QueryMsg::State { block_time: None }).unwrap();
+    let state_res = query(
+        deps.as_ref(),
+        env_after.clone(),
+        QueryMsg::State { block_time: None },
+    )
+    .unwrap();
     let state: StateResponse = from_json(&state_res).unwrap();
     assert_eq!(state.total_bond_amount, Uint128::from(100u128));
     assert_eq!(state.undistributed_rewards, Uint128::zero());
@@ -2856,9 +2900,9 @@ fn test_migrate_staking_same_token_does_not_drain_bond() {
         .messages
         .iter()
         .find_map(|m| match &m.msg {
-            CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. })
-                if contract_addr == &shared_addr.to_string() =>
-            {
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr, msg, ..
+            }) if contract_addr == &shared_addr.to_string() => {
                 from_json::<Cw20ExecuteMsg>(msg).ok()
             }
             _ => None,
@@ -2884,9 +2928,9 @@ fn test_migrate_staking_same_token_does_not_drain_bond() {
         .messages
         .iter()
         .find_map(|m| match &m.msg {
-            CosmosMsg::Wasm(WasmMsg::Execute { contract_addr, msg, .. })
-                if contract_addr == &shared_addr.to_string() =>
-            {
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr, msg, ..
+            }) if contract_addr == &shared_addr.to_string() => {
                 from_json::<Cw20ExecuteMsg>(msg).ok()
             }
             _ => None,
@@ -2964,7 +3008,11 @@ fn h1_tiny_bond_huge_emission_does_not_brick() {
         message_info(&attacker, &[]),
         ExecuteMsg::Withdraw {},
     );
-    assert!(res.is_ok(), "withdraw must not panic after H-1 fix: {:?}", res);
+    assert!(
+        res.is_ok(),
+        "withdraw must not panic after H-1 fix: {:?}",
+        res
+    );
 
     // Further interactions also stay healthy — the contract is alive.
     let res = execute(

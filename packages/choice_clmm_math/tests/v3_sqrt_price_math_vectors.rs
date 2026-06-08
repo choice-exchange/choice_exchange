@@ -69,7 +69,9 @@ fn v3_next_sqrt_price_zero_for_one_rounds_price_up() {
     let implied_in = get_amount0_delta(new_price, p, l, true).unwrap();
     assert!(
         implied_in <= amount_in,
-        "rounding direction wrong: implied_in {} > amount_in {}", implied_in, amount_in
+        "rounding direction wrong: implied_in {} > amount_in {}",
+        implied_in,
+        amount_in
     );
 }
 
@@ -87,7 +89,9 @@ fn v3_next_sqrt_price_one_for_zero_rounds_price_down() {
     let implied_in = get_amount1_delta(p, new_price, l, true).unwrap();
     assert!(
         implied_in <= amount_in,
-        "rounding direction wrong: implied_in {} > amount_in {}", implied_in, amount_in
+        "rounding direction wrong: implied_in {} > amount_in {}",
+        implied_in,
+        amount_in
     );
 }
 
@@ -122,14 +126,8 @@ fn v3_next_sqrt_price_from_output_too_large_errors() {
 fn v3_amount0_delta_returns_zero_for_zero_liquidity() {
     let a = q96();
     let b = q96() * Uint256::from(2u128);
-    assert_eq!(
-        get_amount0_delta(a, b, 0, true).unwrap(),
-        Uint256::zero()
-    );
-    assert_eq!(
-        get_amount0_delta(a, b, 0, false).unwrap(),
-        Uint256::zero()
-    );
+    assert_eq!(get_amount0_delta(a, b, 0, true).unwrap(), Uint256::zero());
+    assert_eq!(get_amount0_delta(a, b, 0, false).unwrap(), Uint256::zero());
 }
 
 #[test]

@@ -107,5 +107,9 @@ pub const PENDING_FLASH: Item<PendingFlash> = Item::new("pending_flash");
 
 /// Whether a flash loan is currently in progress (reentrancy lock held).
 pub fn is_locked(storage: &dyn Storage) -> bool {
-    REENTRANCY_LOCK.may_load(storage).ok().flatten().unwrap_or(false)
+    REENTRANCY_LOCK
+        .may_load(storage)
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }

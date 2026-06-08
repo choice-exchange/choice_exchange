@@ -65,7 +65,9 @@ fn instantiate_rejects_short_timelock() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("timelock_seconds must be at least"));
+    assert!(err
+        .to_string()
+        .contains("timelock_seconds must be at least"));
 }
 
 #[test]
@@ -123,7 +125,10 @@ fn propose_migrate_apply_full_path() {
         pending.action,
         Some(migrate_action(target.as_str(), 99, migrate_msg.clone()))
     );
-    assert_eq!(pending.effective_at, Some(env.block.time.seconds() + TIMELOCK));
+    assert_eq!(
+        pending.effective_at,
+        Some(env.block.time.seconds() + TIMELOCK)
+    );
 
     let err = execute(
         deps.as_mut(),
@@ -342,7 +347,10 @@ fn re_propose_resets_timer_and_overwrites_action() {
         pending.action,
         Some(execute_action(target.as_str(), exec_msg, vec![]))
     );
-    assert_eq!(pending.effective_at, Some(env.block.time.seconds() + TIMELOCK));
+    assert_eq!(
+        pending.effective_at,
+        Some(env.block.time.seconds() + TIMELOCK)
+    );
 }
 
 #[test]

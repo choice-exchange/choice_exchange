@@ -31,9 +31,8 @@ fn flash_fee(amount: Uint128, fee_pips: u32) -> Result<Uint128, ContractError> {
         Uint256::from(fee_pips),
         Uint256::from(FEE_DENOMINATOR),
     )?;
-    Uint128::try_from(fee).map_err(|_| {
-        ContractError::Std(StdError::generic_err("flash: fee exceeds u128"))
-    })
+    Uint128::try_from(fee)
+        .map_err(|_| ContractError::Std(StdError::generic_err("flash: fee exceeds u128")))
 }
 
 /// Query the pool's own balance of `asset`.

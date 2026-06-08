@@ -67,7 +67,9 @@ pub enum ContractError {
     #[error("max_slippage_tolerance {proposed} must be strictly greater than current {current} to propose a raise")]
     MaxSlippageMustBeHigher { proposed: Decimal, current: Decimal },
 
-    #[error("max_slippage_tolerance {proposed} must be at most the current cap {current} to tighten")]
+    #[error(
+        "max_slippage_tolerance {proposed} must be at most the current cap {current} to tighten"
+    )]
     MaxSlippageMustNotRaise { proposed: Decimal, current: Decimal },
 
     #[error("max_slippage_tolerance {proposed} exceeds absolute ceiling {ceiling}")]

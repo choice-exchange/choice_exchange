@@ -51,7 +51,8 @@ pub fn instantiate(
 
     let (reward_token_kind, reward_token_addr) = asset_info_event_parts(&msg.reward_token);
     let (staking_token_kind, staking_token_addr) = asset_info_event_parts(&msg.staking_token);
-    let (start_time, end_time, total_reward) = distribution_schedule_summary(&msg.distribution_schedule)?;
+    let (start_time, end_time, total_reward) =
+        distribution_schedule_summary(&msg.distribution_schedule)?;
 
     // Accept reward pre-funding atomically with creation. Two valid shapes:
     //   1) native reward + info.funds == [{reward_denom: total_reward}] → credit now
@@ -139,7 +140,9 @@ fn asset_info_event_parts(info: &AssetInfo) -> (&'static str, String) {
     }
 }
 
-fn distribution_schedule_summary(schedule: &[(u64, u64, Uint128)]) -> StdResult<(u64, u64, Uint128)> {
+fn distribution_schedule_summary(
+    schedule: &[(u64, u64, Uint128)],
+) -> StdResult<(u64, u64, Uint128)> {
     let start = schedule.iter().map(|(s, _, _)| *s).min().unwrap_or(0);
     let end = schedule.iter().map(|(_, e, _)| *e).max().unwrap_or(0);
     let total = schedule
@@ -188,9 +191,7 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
         ExecuteMsg::ApplyUpdateConfig {} => apply_update_config(deps, env, info),
         ExecuteMsg::CancelUpdateConfigProposal {} => cancel_update_config_proposal(deps, info),
         ExecuteMsg::AddSchedules { schedules } => add_schedules(deps, env, info, schedules),
-        ExecuteMsg::ProposeNewOwner { new_owner } => {
-            propose_new_owner(deps, env, info, new_owner)
-        }
+        ExecuteMsg::ProposeNewOwner { new_owner } => propose_new_owner(deps, env, info, new_owner),
         ExecuteMsg::ApplyOwnerRotation {} => apply_owner_rotation(deps, env, info),
         ExecuteMsg::CancelOwnerProposal {} => cancel_owner_proposal(deps, info),
     }
@@ -222,12 +223,7 @@ pub fn receive_cw20(
 
             // M-1: verify the CW20 actually moved the tokens it claims to have
             // before crediting the bond.
-            reconcile_cw20_receive(
-                deps.branch(),
-                &env,
-                info.sender.as_str(),
-                cw20_msg.amount,
-            )?;
+            reconcile_cw20_receive(deps.branch(), &env, info.sender.as_str(), cw20_msg.amount)?;
 
             let cw20_sender = deps.api.addr_validate(&cw20_msg.sender)?;
             bond(deps, env, cw20_sender, cw20_msg.amount)
@@ -247,12 +243,7 @@ pub fn receive_cw20(
                 }
             }
             // M-1: same reconcile for Fund flow.
-            reconcile_cw20_receive(
-                deps.branch(),
-                &env,
-                info.sender.as_str(),
-                cw20_msg.amount,
-            )?;
+            reconcile_cw20_receive(deps.branch(), &env, info.sender.as_str(), cw20_msg.amount)?;
             fund(deps, cw20_msg.amount, &cw20_msg.sender)
         }
         Err(_) => Err(StdError::generic_err("data should be given")),
@@ -285,7 +276,12 @@ pub fn bond(deps: DepsMut, env: Env, sender_addr: Addr, amount: Uint128) -> StdR
     ]))
 }
 
-pub fn unbond(mut deps: DepsMut, env: Env, info: MessageInfo, amount: Uint128) -> StdResult<Response> {
+pub fn unbond(
+    mut deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    amount: Uint128,
+) -> StdResult<Response> {
     if amount.is_zero() {
         return Err(StdError::generic_err("Cannot unbond zero amount"));
     }
@@ -476,11 +472,7 @@ pub fn propose_update_config(
 /// Flushes accrued credits at the OLD schedule first so `assert_new_schedules`
 /// compares the new schedule against the current real block time, not a
 /// stale `last_distributed`.
-pub fn apply_update_config(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-) -> StdResult<Response> {
+pub fn apply_update_config(deps: DepsMut, env: Env, info: MessageInfo) -> StdResult<Response> {
     let config: Config = read_config(deps.storage)?;
     let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
     if sender_addr_raw != config.owner {
@@ -524,10 +516,7 @@ pub fn apply_update_config(
 }
 
 /// Owner clears a pending schedule update.
-pub fn cancel_update_config_proposal(
-    deps: DepsMut,
-    info: MessageInfo,
-) -> StdResult<Response> {
+pub fn cancel_update_config_proposal(deps: DepsMut, info: MessageInfo) -> StdResult<Response> {
     let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
     let config: Config = read_config(deps.storage)?;
     if sender_addr_raw != config.owner {
@@ -614,7 +603,9 @@ pub fn add_schedules(
                 return Err(StdError::generic_err(format!(
                     "add_schedules: native reward farm requires exactly one coin in funds \
                      ({} {}); got {} coin(s)",
-                    total_new, denom, info.funds.len()
+                    total_new,
+                    denom,
+                    info.funds.len()
                 )));
             }
             let received = &info.funds[0];
@@ -631,8 +622,7 @@ pub fn add_schedules(
                     total_new, received.amount
                 )));
             }
-            state.undistributed_rewards =
-                state.undistributed_rewards.checked_add(total_new)?;
+            state.undistributed_rewards = state.undistributed_rewards.checked_add(total_new)?;
         }
         AssetInfo::Token { contract_addr } => {
             if !info.funds.is_empty() {
@@ -642,8 +632,7 @@ pub fn add_schedules(
                      will pull tokens via TransferFrom",
                 ));
             }
-            state.undistributed_rewards =
-                state.undistributed_rewards.checked_add(total_new)?;
+            state.undistributed_rewards = state.undistributed_rewards.checked_add(total_new)?;
             // Adding as a regular message (not a submessage) keeps semantics
             // simple: if TransferFrom fails — insufficient allowance, sender
             // balance, etc — the whole tx reverts including the state
@@ -671,7 +660,10 @@ pub fn add_schedules(
     Ok(response.add_attributes(vec![
         ("action", "add_schedules"),
         ("added", added_count.to_string().as_str()),
-        ("total_slots", config.distribution_schedule.len().to_string().as_str()),
+        (
+            "total_slots",
+            config.distribution_schedule.len().to_string().as_str(),
+        ),
         ("funded", total_new.to_string().as_str()),
     ]))
 }
@@ -864,11 +856,7 @@ fn reconcile_cw20_receive(
 /// decrementing the last-seen ledger before the message dispatches. The
 /// reconcile on the next inbound Receive of this CW20 will then see a delta
 /// that correctly equals (new_inbound + any_residual).
-fn decrement_last_seen_cw20(
-    deps: DepsMut,
-    cw20_contract: &str,
-    amount: Uint128,
-) -> StdResult<()> {
+fn decrement_last_seen_cw20(deps: DepsMut, cw20_contract: &str, amount: Uint128) -> StdResult<()> {
     let cw20_raw = deps.api.addr_canonicalize(cw20_contract)?;
     let last_seen = LAST_SEEN_CW20_BALANCE
         .may_load(deps.storage, cw20_raw.as_slice())?
@@ -882,10 +870,7 @@ fn decrement_last_seen_cw20(
 }
 
 /// Owner clears a pending migration. No-op if no proposal exists.
-pub fn cancel_migrate_staking_proposal(
-    deps: DepsMut,
-    info: MessageInfo,
-) -> StdResult<Response> {
+pub fn cancel_migrate_staking_proposal(deps: DepsMut, info: MessageInfo) -> StdResult<Response> {
     let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
     let config: Config = read_config(deps.storage)?;
     if sender_addr_raw != config.owner {
@@ -932,11 +917,7 @@ pub fn propose_new_owner(
 }
 
 /// Owner finalizes a pending owner rotation once the timelock has expired.
-pub fn apply_owner_rotation(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-) -> StdResult<Response> {
+pub fn apply_owner_rotation(deps: DepsMut, env: Env, info: MessageInfo) -> StdResult<Response> {
     let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
     let mut config: Config = read_config(deps.storage)?;
     if sender_addr_raw != config.owner {
@@ -953,7 +934,9 @@ pub fn apply_owner_rotation(
         .ok_or_else(|| StdError::generic_err("no pending owner rotation"))?;
 
     if env.block.time.seconds() < effective_at {
-        return Err(StdError::generic_err("owner rotation timelock has not elapsed"));
+        return Err(StdError::generic_err(
+            "owner rotation timelock has not elapsed",
+        ));
     }
 
     let new_owner_addr = deps.api.addr_humanize(&pending)?;
@@ -967,10 +950,7 @@ pub fn apply_owner_rotation(
 }
 
 /// Owner clears a pending owner proposal.
-pub fn cancel_owner_proposal(
-    deps: DepsMut,
-    info: MessageInfo,
-) -> StdResult<Response> {
+pub fn cancel_owner_proposal(deps: DepsMut, info: MessageInfo) -> StdResult<Response> {
     let sender_addr_raw: CanonicalAddr = deps.api.addr_canonicalize(info.sender.as_str())?;
     let mut config: Config = read_config(deps.storage)?;
     if sender_addr_raw != config.owner {
@@ -1076,8 +1056,7 @@ fn compute_reward(config: &Config, state: &mut State, block_time: u64) {
     // rest in `undistributed_rewards` for a future call (with a healthier
     // ratio, or after a Withdraw resets index_delta).
     let raw_increment =
-        Decimal::checked_from_ratio(distributed, state.total_bond_amount)
-            .unwrap_or(Decimal::MAX);
+        Decimal::checked_from_ratio(distributed, state.total_bond_amount).unwrap_or(Decimal::MAX);
     let headroom = Decimal::MAX
         .checked_sub(state.global_reward_index)
         .unwrap_or(Decimal::zero());
@@ -1192,9 +1171,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::StakerInfo { staker, block_time } => {
             to_json_binary(&query_staker_info(deps, staker, block_time)?)
         }
-        QueryMsg::PendingOwnerRotation {} => {
-            to_json_binary(&query_pending_owner_rotation(deps)?)
-        }
+        QueryMsg::PendingOwnerRotation {} => to_json_binary(&query_pending_owner_rotation(deps)?),
         QueryMsg::PendingMigration {} => to_json_binary(&query_pending_migration(deps)?),
         QueryMsg::PendingConfigUpdate {} => to_json_binary(&query_pending_config_update(deps)?),
     }

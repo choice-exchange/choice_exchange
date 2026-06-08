@@ -223,14 +223,12 @@ fn execute_apply(deps: DepsMut, env: Env) -> StdResult<Response> {
         }),
     };
 
-    Ok(Response::new()
-        .add_message(cosmos_msg)
-        .add_attributes(vec![
-            ("action", "apply"),
-            ("kind", kind),
-            ("contract", contract.as_str()),
-            ("code_id", code_id.as_str()),
-        ]))
+    Ok(Response::new().add_message(cosmos_msg).add_attributes(vec![
+        ("action", "apply"),
+        ("kind", kind),
+        ("contract", contract.as_str()),
+        ("code_id", code_id.as_str()),
+    ]))
 }
 
 fn execute_cancel(deps: DepsMut, info: MessageInfo) -> StdResult<Response> {
@@ -379,4 +377,3 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response
         .add_attribute("from_version", stored.version)
         .add_attribute("to_version", CONTRACT_VERSION))
 }
-

@@ -8,9 +8,7 @@ mod tests {
     };
     use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
     use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, QueryMsg};
-    use choice_clmm_common::pool::{
-        FeeGrowthInsideResponse, PoolState, QueryMsg as PoolQueryMsg,
-    };
+    use choice_clmm_common::pool::{FeeGrowthInsideResponse, PoolState, QueryMsg as PoolQueryMsg};
     use choice_clmm_common::types::AssetInfo;
     use cosmwasm_std::testing::{
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
@@ -22,7 +20,7 @@ mod tests {
     };
     use cw721::msg::OwnerOfResponse;
     use std::cell::RefCell;
-    
+
     fn native(denom: &str) -> AssetInfo {
         AssetInfo::NativeToken {
             denom: denom.to_string(),
@@ -77,18 +75,14 @@ mod tests {
                             FactoryQueryMsg::GetPool { .. } => SystemResult::Ok(
                                 ContractResult::Ok(to_json_binary(&self.pool_addr).unwrap()),
                             ),
-                            _ => SystemResult::Ok(
-                                ContractResult::Ok(to_json_binary(&"").unwrap()),
-                            ),
+                            _ => SystemResult::Ok(ContractResult::Ok(to_json_binary(&"").unwrap())),
                         }
                     } else if contract_addr == self.pool_addr {
                         let q: PoolQueryMsg = from_json(&msg).unwrap();
                         match q {
                             PoolQueryMsg::GetSlot0 {} => {
                                 let slot0 = PoolState {
-                                    sqrt_price: Uint256::from(
-                                        79228162514264337593543950336u128,
-                                    ), // 2^96
+                                    sqrt_price: Uint256::from(79228162514264337593543950336u128), // 2^96
                                     tick: 0,
                                     liquidity: Uint128::zero(),
                                 };
@@ -102,9 +96,7 @@ mod tests {
                                     fee_growth_inside_0_x128: f0,
                                     fee_growth_inside_1_x128: f1,
                                 };
-                                SystemResult::Ok(ContractResult::Ok(
-                                    to_json_binary(&resp).unwrap(),
-                                ))
+                                SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
                             }
                             _ => SystemResult::Err(SystemError::UnsupportedRequest {
                                 kind: format!("Unknown Pool Msg: {:?}", q),
@@ -157,7 +149,13 @@ mod tests {
         emitter: &str,
     ) -> Reply {
         ok_reply_with_burn_attrs_and_fg(
-            id, token_id, amount0, amount1, Uint256::zero(), Uint256::zero(), emitter,
+            id,
+            token_id,
+            amount0,
+            amount1,
+            Uint256::zero(),
+            Uint256::zero(),
+            emitter,
         )
     }
 
@@ -256,7 +254,6 @@ mod tests {
 
     #[test]
     fn test_instantiate() {
-
         let mut deps = setup_deps();
         let msg = InstantiateMsg {
             name: "Choice Positions".to_string(),
@@ -401,7 +398,6 @@ mod tests {
 
     #[test]
     fn mint_position_records_nft_state_and_liquidity() {
-
         let mut deps = setup_deps();
         instantiate_manager(&mut deps);
 
@@ -497,7 +493,6 @@ mod tests {
 
     #[test]
     fn increase_liquidity_accrues_existing_fees_to_nft() {
-
         let mut deps = setup_deps();
         instantiate_manager(&mut deps);
         let user = deps.api.addr_make("user");
@@ -554,7 +549,6 @@ mod tests {
 
     #[test]
     fn decrease_liquidity_credits_principal_and_fees_to_tokens_owed() {
-
         let mut deps = setup_deps();
         instantiate_manager(&mut deps);
         let user = deps.api.addr_make("user");
@@ -606,10 +600,16 @@ mod tests {
 
         let after = POSITIONS.load(&deps.storage, &token_id).unwrap();
         // principal credited
-        assert_eq!(after.tokens_owed_0, Uint128::new(400 + before.liquidity.u128()));
+        assert_eq!(
+            after.tokens_owed_0,
+            Uint128::new(400 + before.liquidity.u128())
+        );
         assert_eq!(after.tokens_owed_1, Uint128::new(600));
         // liquidity decreased by exactly `half`.
-        assert_eq!(after.liquidity.u128(), before.liquidity.u128() - half.u128());
+        assert_eq!(
+            after.liquidity.u128(),
+            before.liquidity.u128() - half.u128()
+        );
         assert_eq!(after.fee_growth_inside_0_last_x128, q128);
     }
 
@@ -694,10 +694,7 @@ mod tests {
             .iter()
             .find_map(|m| match &m.msg {
                 CosmosMsg::Wasm(WasmMsg::Execute { msg: bin, .. }) => {
-                    let pe: Result<
-                        choice_clmm_common::pool::ExecuteMsg,
-                        _,
-                    > = from_json(bin);
+                    let pe: Result<choice_clmm_common::pool::ExecuteMsg, _> = from_json(bin);
                     if let Ok(choice_clmm_common::pool::ExecuteMsg::Collect {
                         amount0_requested,
                         ..
@@ -732,7 +729,10 @@ mod tests {
         // Alice's NFT tokens_owed was zeroed after reply.
         let alice_after = POSITIONS.load(&deps.storage, &alice_id).unwrap();
         assert_eq!(alice_after.tokens_owed_0, Uint128::zero());
-        assert_eq!(alice_after.fee_growth_inside_0_last_x128, q128 * Uint256::from(2u128));
+        assert_eq!(
+            alice_after.fee_growth_inside_0_last_x128,
+            q128 * Uint256::from(2u128)
+        );
 
         // Bob's NFT is untouched (still snapshot = Q128, no tokens_owed).
         let bob_still = POSITIONS.load(&deps.storage, &bob_id).unwrap();
@@ -817,7 +817,9 @@ mod tests {
         let mut state = POSITIONS.load(&deps.storage, &token_id).unwrap();
         state.liquidity = Uint128::zero();
         state.tokens_owed_0 = Uint128::new(42);
-        POSITIONS.save(&mut deps.storage, &token_id, &state).unwrap();
+        POSITIONS
+            .save(&mut deps.storage, &token_id, &state)
+            .unwrap();
 
         let err = execute(
             deps.as_mut(),
@@ -841,17 +843,24 @@ mod tests {
         state.liquidity = Uint128::zero();
         state.tokens_owed_0 = Uint128::zero();
         state.tokens_owed_1 = Uint128::zero();
-        POSITIONS.save(&mut deps.storage, &token_id, &state).unwrap();
+        POSITIONS
+            .save(&mut deps.storage, &token_id, &state)
+            .unwrap();
 
         execute(
             deps.as_mut(),
             mock_env(),
             message_info(&user, &[]),
-            ExecuteMsg::Burn { token_id: token_id.clone() },
+            ExecuteMsg::Burn {
+                token_id: token_id.clone(),
+            },
         )
         .unwrap();
         // POSITIONS entry removed.
-        assert!(POSITIONS.may_load(&deps.storage, &token_id).unwrap().is_none());
+        assert!(POSITIONS
+            .may_load(&deps.storage, &token_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -938,7 +947,9 @@ mod tests {
         res.messages
             .iter()
             .find_map(|m| match &m.msg {
-                CosmosMsg::Wasm(WasmMsg::Execute { funds, msg: bin, .. }) => {
+                CosmosMsg::Wasm(WasmMsg::Execute {
+                    funds, msg: bin, ..
+                }) => {
                     let pe: Result<choice_clmm_common::pool::ExecuteMsg, _> = from_json(bin);
                     if matches!(pe, Ok(choice_clmm_common::pool::ExecuteMsg::Mint { .. })) {
                         Some(funds.clone())
@@ -1003,8 +1014,16 @@ mod tests {
         // Pending mint must record CANONICAL order: token0 == ATOM.
         let key: u64 = token_id.parse().unwrap();
         let pending = PENDING_MINT.load(&deps.storage, key).unwrap();
-        assert_eq!(pending.token0, native("ATOM"), "token0 must canonicalize to ATOM");
-        assert_eq!(pending.token1, native("OSMO"), "token1 must canonicalize to OSMO");
+        assert_eq!(
+            pending.token0,
+            native("ATOM"),
+            "token0 must canonicalize to ATOM"
+        );
+        assert_eq!(
+            pending.token1,
+            native("OSMO"),
+            "token1 must canonicalize to OSMO"
+        );
 
         // Range above current => only canonical token0 (ATOM) consumed.
         assert!(
@@ -1019,7 +1038,10 @@ mod tests {
         // Funds forwarded to the pool must be ATOM only (denom routed correctly).
         let funds = pool_mint_funds(&res);
         assert_eq!(funds.len(), 1, "only one denom forwarded");
-        assert_eq!(funds[0].denom, "ATOM", "forwarded denom must be canonical token0 ATOM");
+        assert_eq!(
+            funds[0].denom, "ATOM",
+            "forwarded denom must be canonical token0 ATOM"
+        );
 
         // Complete the reply and assert the persisted PositionState is canonical.
         let pool_addr = deps.api.addr_make("pool_addr").to_string();
@@ -1041,10 +1063,7 @@ mod tests {
         let user = deps.api.addr_make("user");
 
         // Reversed-order mint, range above current => token0 (ATOM) only.
-        let info = message_info(
-            &user,
-            &[Coin::new(Uint128::new(5_000), "ATOM")],
-        );
+        let info = message_info(&user, &[Coin::new(Uint128::new(5_000), "ATOM")]);
         let res = execute(
             deps.as_mut(),
             mock_env(),
@@ -1055,8 +1074,8 @@ mod tests {
                 fee: 500,
                 tick_lower: 10,
                 tick_upper: 100,
-                amount0_desired: Uint128::zero(),      // OSMO (caller order)
-                amount1_desired: Uint128::new(5_000),  // ATOM (caller order)
+                amount0_desired: Uint128::zero(), // OSMO (caller order)
+                amount1_desired: Uint128::new(5_000), // ATOM (caller order)
                 amount0_min: Uint128::zero(),
                 amount1_min: Uint128::zero(),
                 recipient: None,
@@ -1114,10 +1133,7 @@ mod tests {
         let user = deps.api.addr_make("user");
 
         // First mint (token_id 1) — DO NOT run its reply, leaving it pending.
-        let info = message_info(
-            &user,
-            &[Coin::new(Uint128::new(1_000), "ATOM")],
-        );
+        let info = message_info(&user, &[Coin::new(Uint128::new(1_000), "ATOM")]);
         let res1 = execute(
             deps.as_mut(),
             mock_env(),
@@ -1146,10 +1162,7 @@ mod tests {
             .clone();
 
         // Second mint (token_id 2), also left pending, with a DIFFERENT amount.
-        let info = message_info(
-            &user,
-            &[Coin::new(Uint128::new(2_000), "ATOM")],
-        );
+        let info = message_info(&user, &[Coin::new(Uint128::new(2_000), "ATOM")]);
         let res2 = execute(
             deps.as_mut(),
             mock_env(),

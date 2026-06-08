@@ -211,3 +211,177 @@ cargo test --release -p choice-clmm-math
 
 To hunt harder: raise `SEEDS`/`STEPS` in `adversarial_fuzz.rs`. On any failure the
 test prints `seed`, the minimal shrunk op prefix, and `FAILING ASSERTION: …`.
+
+---
+---
+
+# Follow-up engagement — closing the residual-risk gaps
+
+A second adversarial pass was commissioned to attack the corners the first pass
+explicitly deferred (the "Coverage & residual-risk bound" list above):
+CW20 / mixed-asset accounting, non-default tick spacings, extreme-tick swap
+depth, the dynamic-fee rate limit over multiple blocks, the factory, and the
+manager's own per-NFT bookkeeping. **Result: again no fund-safety or accounting
+violation.** Every new invariant was mutation-validated (table below), including
+the two that required a docker wasm rebuild (the manager, which the first pass
+left unvalidated). All contract sources are pristine afterward (`git diff` over
+`actions/`, `core/`, `math/`, the manager and factory `src/` is empty); the clean
+`artifacts/choice_clmm_manager.wasm` is back to its canonical size.
+
+## What was added
+
+| File | Tier | Tests |
+|---|---|---|
+| `choice_clmm_pool/src/adversarial_fuzz.rs` | mock | `fuzz_adversarial_invariants_all_spacings` (item 2), `fuzz_extreme_tick_density` + `swap_iteration_limit_reverts_without_partial_state` (item 3); `fuzz_full_drain_cleanup` extended to all spacings |
+| `choice_clmm_pool/src/regime_tests.rs` | mock | `max_liquidity_per_tick_enforced_per_spacing` (item 2); `dynamic_fee_rate_limit_fuzz`, `dynamic_fee_same_block_pin`, `dynamic_fee_manipulation_cannot_jerk_victim` (item 4); `cw20_receive_hook_partial_fill_refund_message_exact`, `cw20_allowance_swap_refunds_attached_native_message` (item 1, mock) |
+| `tests/cw20_accounting_fuzz.rs` | test-tube | `cw20_accounting_fuzz_native_cw20`, `cw20_accounting_fuzz_cw20_cw20`, `receive_hook_partial_fill_refunds_unused_cw20`, `cw20_input_swap_refunds_wrongly_attached_native` (item 1) |
+| `tests/factory_lifecycle.rs` | test-tube | `create_pool_address_matches_stored_and_config_is_canonical`, `duplicate_create_reverts`, `admin_entrypoints_are_owner_gated`, `antisquat_gate_blocks_then_allows_then_consumes` (item 5) |
+
+## Per-item coverage
+
+**Item 1 — CW20 / mixed-asset accounting (highest priority).** Two tiers:
+- *Test-tube model fuzzer* over native/CW20 and CW20/CW20 pools (real `cw20-base`
+  via `cw20_base_build.wasm`), settling from real bank + CW20 balances. Random
+  mint (allowance) / low-level swap / **Receive-hook swap** / burn / collect; the
+  pool's canonical token0/token1 order is read from the live config (never
+  guessed). After every op the pool is solvent (`balance(tok) ≥ Σ tokens_owed`);
+  after a full drain it owes nothing and strands ≤ a tight dust bound. Every
+  Receive-hook swap asserts the **partial-fill refund is exact** (`Δ trader CW20
+  == amount_in`). Focused tests pin the two refund branches: a liquidity-exhausted
+  Receive-hook swap refunds the unused CW20; a CW20-input swap with wrongly
+  attached native refunds the native in full (low-level `Swap` *and*
+  `SwapExactOutput`, with the swap output routed to a third party so the sender's
+  native delta isolates the refund).
+- *Mock refund-message tests* drive `execute_swap_exact_input_cw20` /
+  `execute_swap` directly and inspect the emitted `Cw20::Transfer` / `BankMsg::Send`
+  refund messages — the SAME `apply_swap` branches, mutation-validated at cargo
+  speed (no wasm), so the refund logic's non-vacuity is proven without a rebuild.
+
+**Item 2 — non-default tick spacings (1/60/200).** The model fuzzer is
+parametrized over `tick_spacing`; mint ticks are generated in compressed units
+× spacing so every spacing straddles bitmap word boundaries. All 7 invariants
+(SOLV/ACTL/NET/GROSS/DELTA/BMAP/DRAIN) re-run per spacing, and a per-spacing
+`MAX_LIQUIDITY_PER_TICK` test mints exactly the (spacing-specific) cap and proves
+one-over reverts.
+
+**Item 3 — extreme-tick density & swap depth.** A biased generator piles
+positions at `MIN_TICK`/`MAX_TICK`/full-range plus a dense band of adjacent
+unit-width positions, then drives large swaps that cross hundreds of ticks; the
+full invariant battery runs after every op (stressing the `u128↔i128`
+`liquidity_net` sign at the extremes). A dedicated test seeds an initialized tick
+at every spacing-1 tick past `MAX_SWAP_ITERATIONS`, fires an oversized swap, and
+asserts it reverts with `SwapIterationLimit` **leaving the swap-relevant state
+byte-identical** (no partially-applied crossing — structurally guaranteed because
+`compute_swap` takes `&dyn Storage`, regression-guarded here).
+
+**Item 4 — dynamic-fee / EMA rate-limit over multiple blocks.** A time-advancing
+fuzzer mutates `block.time` between real swaps and reconstructs the oracle's
+committed-fee/commit-time model, asserting after each swap: same-block swaps pay
+the first swap's fee (anti-manipulation pin); the fee moves ≤ `RATE·Δt` from the
+last committed fee; the fee stays in `[base, max]`. Focused tests pin the
+same-block invariant under intra-block price moves and prove a single
+price-slamming swap cannot jerk the next victim's fee beyond `RATE·Δt`.
+
+**Item 5 — factory (real VM).** The factory's `src/test.rs` mock suite is
+thorough; the test-tube suite adds what `mock_dependencies` cannot: the address
+the pool is actually instantiated at (`Instantiate2`, salt = sha256(key0‖key1‖
+fee)) equals the address the factory stores and serves from `GetPool`, and the
+pool there carries the canonical token order + the fee tier's tick_spacing.
+Plus end-to-end real reverts for duplicate creation, owner-gating of every admin
+entrypoint (with a freshly-enabled fee tier then usable), and the anti-squat
+`POOL_CREATION_AUTH` gate (reserved → blocks others → authorized create succeeds
+and consumes the reservation → slot then rejects duplicates).
+
+**Item 6 — manager per-NFT bookkeeping (mutation-validated via docker rebuild).**
+The first pass could not mutation-validate the manager because that needs a
+`./build_release.sh` rebuild; this pass did it. Three mutations were built into
+`choice_clmm_manager.wasm` and run against `manager_nft_attribution` +
+`manager_solvency_fuzz` (see the table). Net: the two suites are complementary —
+attribution catches *non-proportional* per-NFT corruption, solvency catches
+*over-crediting / over-collection* — and together they bite on both the per-NFT
+liquidity factor and the `fee_growth_inside_last` snapshot.
+
+## Invariant / mutation table (non-vacuity proof)
+
+All mutations reverted; sources verified pristine via `git diff`. The three
+manager mutations were applied to the wasm via `./build_release.sh` (docker), run,
+then reverted with a clean rebuild (`manager.wasm` back to its canonical size).
+
+| Item / test | Mutation | Caught? | Reverted? |
+|---|---|---|---|
+| 2 — all-spacings INV-BMAP | `flip_tick` compression spacing-blind (`tick/10`) | ✅ caught at **spacing 1 only** (spacing-10 sweep still passes): `tick 127 has a TICKS entry but bitmap bit (word 0,bit 127) is clear` | ✅ |
+| 2 — per-spacing cap | cap formula ignores spacing (hardcode spacing 10) | ✅ `spacing 1: minting one over the cap must revert` | ✅ |
+| 3 — extreme-density INV-ACTL | swap-crossing `add_liquidity` sign flip (`<0`→`>0`) | ✅ `INV-ACTL … active L 800001564093 != model 800004986085 (tick −16)` | ✅ |
+| 3 — iteration-cap clean revert | persist `POOL_STATE` before `compute_swap` | ✅ `POOL_STATE mutated on iteration-limit revert … liquidity 1000 → 1001` | ✅ |
+| 4 — rate limit | drop the per-second clamp (`clamped = raw_fee`) | ✅ `fee moved 579 ppm in 7s (> 350)`; victim fee jerked `3009 → 50000` (max) | ✅ |
+| 4 — same-block pin | recompute fee mid-block instead of returning committed | ✅ `same-block swap #0 charged 3498 != committed 3000` | ✅ |
+| 1 — Receive-hook refund (mock) | skip the `Cw20AlreadySent` partial-fill refund push | ✅ `partial fill must emit a CW20 refund Transfer to sender` | ✅ |
+| 1 — attached-native refund (mock) | no-op `push_native_refund` | ✅ `wrongly-attached native not fully refunded: got 0 of 9999` | ✅ |
+| 6 — manager (attribution + solvency) | reported-owed per-NFT liquidity → constant **(M2, docker)** | ✅ attribution `not proportional: 7/2050516626 vs 7/6151549880`; solvency `OVER-COLLECT … paid (57074,0) > owed (0,0)` | ✅ |
+| 6 — manager solvency | skip `fee_growth_inside_last` snapshot → over-credit **(M3, docker)** | ✅ solvency `SHORTFALL token1 … owed 95285, paid 60749` (attribution unaffected — over-count is proportional) | ✅ |
+
+*Recorded coverage edge (not a bug):* a fourth manager mutation — constant per-NFT
+liquidity in the **execute-path** `accrue_fees_to_nft` (M1) — was **not** caught.
+The attribution test reads owed via the read-only `PositionWithFees` query (which
+uses the un-mutated `state.liquidity`) *before* any collect, and an execute-path
+**under**-credit leaves the pool over-collateralized (still solvent) with the
+shortfall retained in the pool rather than stranded in the manager. This is a
+property of where these two suites assert, not a contract defect — the real
+query and execute paths share the identical `L·Δfg/2^128` formula and both are
+correct (M2 mutates the reported path and M3 the execute snapshot; both are
+caught). Noted so the boundary is explicit.
+
+*Test-authoring correction made during the engagement:* the first cut of
+`cw20_input_swap_refunds_wrongly_attached_native` asserted the sender's net USDT
+change was zero, but with a CW20 input the swap **output** is also USDT, so the
+sender's balance legitimately rose. Fixed by routing the swap output to a separate
+recipient, isolating the attached-native refund. (No contract change.)
+
+## Findings
+
+**No contract bug found** on any item. The CW20 refund branches, all four tick
+spacings and their per-tick caps, extreme-tick deep crossings and the clean
+iteration-cap revert, the dynamic-fee rate limit / same-block pin / manipulation
+resistance, the factory's deterministic-address + owner-gating + anti-squat
+behavior, and the manager's per-NFT liquidity and fee-growth-snapshot bookkeeping
+all held — and each was proven non-vacuous by a reverted mutation.
+
+## Coverage & residual-risk bound (updated)
+
+The prior pass's residual list is now largely closed: CW20 refund branches
+(mock-message + test-tube real-balance), non-default spacings (full battery),
+extreme-tick depth + iteration cap, the dynamic-fee multi-block dynamics, the
+factory (real-VM lifecycle), and the manager per-NFT bookkeeping (docker
+mutation-validated) are all covered. Remaining, genuinely low residual:
+- The reserved hook seam (`HOOK_BEFORE_SWAP` etc.) is inert (no engine, no
+  setter) and out of scope.
+- The manager execute-path under-accrual coverage edge noted above (not a bug;
+  the formula is shared with the validated read path).
+- CW20 `volatility_multiplier`/dynamic-fee interaction is exercised on native
+  pools only; the fee math is asset-type-agnostic so this is purely defensive.
+
+## Reproduce (follow-up)
+
+```bash
+cd choice_exchange
+
+# Item 2/3 (mock, multi-spacing + extreme density + iteration-cap revert):
+cargo test --release -p choice_clmm_pool adversarial_fuzz -- --nocapture
+cargo test --release -p choice_clmm_pool regime_tests::regime_tests::max_liquidity_per_tick_enforced_per_spacing
+
+# Item 4 (mock, time-advancing dynamic-fee fuzzer + focused):
+cargo test --release -p choice_clmm_pool dynamic_fee
+
+# Item 1 (mock CW20 refund-message tests):
+cargo test --release -p choice_clmm_pool cw20_
+
+# Item 1 (test-tube CW20 accounting — needs docker-built artifacts/*.wasm):
+cargo test -p choice-clmm-common --test cw20_accounting_fuzz
+
+# Item 5 (test-tube factory lifecycle):
+cargo test -p choice-clmm-common --test factory_lifecycle
+
+# Item 6 (manager attribution + solvency; mutation-validate by rebuilding the
+# manager wasm with ./build_release.sh after editing accrue_fees_to_nft):
+cargo test -p choice-clmm-common --test manager_nft_attribution --test manager_solvency_fuzz
+```

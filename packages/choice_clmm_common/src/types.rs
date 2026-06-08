@@ -141,8 +141,12 @@ mod tests {
     #[test]
     fn registry_key_distinguishes_variants_with_same_string() {
         let s = "inj1samestring";
-        let native = AssetInfo::NativeToken { denom: s.to_string() };
-        let cw20 = AssetInfo::Token { contract_addr: s.to_string() };
+        let native = AssetInfo::NativeToken {
+            denom: s.to_string(),
+        };
+        let cw20 = AssetInfo::Token {
+            contract_addr: s.to_string(),
+        };
 
         // `key()` (the raw value, for building messages) is identical...
         assert_eq!(native.key(), cw20.key());

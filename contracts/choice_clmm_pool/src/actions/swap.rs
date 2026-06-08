@@ -9,16 +9,14 @@ use crate::core::bitmap::next_initialized_tick_in_chunk;
 use crate::core::oracle::{get_dynamic_fee, update_oracle_and_fee};
 use crate::error::ContractError;
 use crate::state::{
-    PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE,
-    PROTOCOL_FEES_0, PROTOCOL_FEES_1, PROTOCOL_FEE_CONFIG, TICKS,
+    PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, PROTOCOL_FEES_0,
+    PROTOCOL_FEES_1, PROTOCOL_FEE_CONFIG, TICKS,
 };
 
 use choice_clmm_common::pool::{QuoteResponse, TickInfo};
 use choice_clmm_common::types::AssetInfo;
 use choice_clmm_math::full_math::mul_div;
-use choice_clmm_math::swap_math::{
-    compute_swap_step, compute_swap_step_exact_out, SwapStepResult,
-};
+use choice_clmm_math::swap_math::{compute_swap_step, compute_swap_step_exact_out, SwapStepResult};
 use choice_clmm_math::tick_math::{
     get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, max_sqrt_ratio, MAX_TICK, MIN_SQRT_RATIO,
     MIN_TICK,
@@ -267,9 +265,11 @@ pub fn compute_swap(
         .map_err(|_| StdError::generic_err("swap: calculated amount exceeds u128"))?;
     // The amount actually drawn down from `amount_specified` (input budget for
     // exact-input, output budget for exact-output).
-    let consumed = amount_specified.checked_sub(consumed_remaining).map_err(|_| {
-        StdError::generic_err("swap: remaining exceeds specified amount (invariant broken)")
-    })?;
+    let consumed = amount_specified
+        .checked_sub(consumed_remaining)
+        .map_err(|_| {
+            StdError::generic_err("swap: remaining exceeds specified amount (invariant broken)")
+        })?;
     // Exact-input: gross input = consumed budget, output = calculated.
     // Exact-output: output delivered = consumed budget, gross input = calculated.
     let (amount_in, amount_out) = if exact_input {
@@ -330,7 +330,11 @@ enum SwapInputSource<'a> {
 /// branches: a CW20 swap consumes no native coins, so any attached funds must be
 /// returned rather than silently absorbed into reserves (C-L1).
 fn push_native_refund(messages: &mut Vec<CosmosMsg>, recipient: &Addr, funds: &[Coin]) {
-    let refunds: Vec<Coin> = funds.iter().filter(|c| !c.amount.is_zero()).cloned().collect();
+    let refunds: Vec<Coin> = funds
+        .iter()
+        .filter(|c| !c.amount.is_zero())
+        .cloned()
+        .collect();
     if !refunds.is_empty() {
         messages.push(CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
             to_address: recipient.to_string(),
@@ -452,9 +456,9 @@ fn apply_swap(
             let mut refunds: Vec<Coin> = vec![];
             for coin in info_funds {
                 let refund = if coin.denom == denom {
-                    coin.amount.checked_sub(result.amount_in).map_err(|_| {
-                        StdError::generic_err("refund underflow (invariant broken)")
-                    })?
+                    coin.amount
+                        .checked_sub(result.amount_in)
+                        .map_err(|_| StdError::generic_err("refund underflow (invariant broken)"))?
                 } else {
                     coin.amount
                 };
@@ -486,9 +490,9 @@ fn apply_swap(
                     "CW20 receive: consumed more than sent (invariant broken)",
                 )));
             }
-            let refund = total_sent.checked_sub(result.amount_in).map_err(|_| {
-                StdError::generic_err("CW20 refund underflow (invariant broken)")
-            })?;
+            let refund = total_sent
+                .checked_sub(result.amount_in)
+                .map_err(|_| StdError::generic_err("CW20 refund underflow (invariant broken)"))?;
             if !refund.is_zero() {
                 messages.push(in_token.transfer_msg(sender.as_ref(), refund)?);
             }
@@ -1051,8 +1055,8 @@ mod iteration_cap_tests {
     use crate::core::bitmap::flip_tick;
     use crate::state::TICKS;
     use choice_clmm_common::pool::TickInfo;
-    use cosmwasm_std::testing::MockStorage;
     use choice_clmm_math::tick_math::get_sqrt_ratio_at_tick;
+    use cosmwasm_std::testing::MockStorage;
 
     /// A pool with an initialized tick at (almost) every spacing-1 tick forces
     /// the swap loop to cross one tick per iteration. A wide swap therefore tries
@@ -1089,11 +1093,11 @@ mod iteration_cap_tests {
             &storage,
             start_price,
             0,
-            1_000,         // initial active liquidity
+            1_000, // initial active liquidity
             Uint256::zero(),
             Uint256::zero(),
             spacing,
-            false,         // one_for_zero: price increases through ticks 1,2,3,...
+            false, // one_for_zero: price increases through ticks 1,2,3,...
             huge,
             limit,
             3_000,
@@ -1150,6 +1154,9 @@ mod iteration_cap_tests {
             0,
             true,
         );
-        assert!(res.is_ok(), "normal small swap must not hit the iteration cap");
+        assert!(
+            res.is_ok(),
+            "normal small swap must not hit the iteration cap"
+        );
     }
 }

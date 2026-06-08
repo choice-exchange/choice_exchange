@@ -1015,9 +1015,7 @@ fn query_launches(
     limit: Option<u32>,
 ) -> StdResult<LaunchesResponse> {
     let evm_authority = deps.api.addr_validate(&evm_authority)?;
-    let limit = limit
-        .unwrap_or(DEFAULT_QUERY_LIMIT)
-        .min(MAX_QUERY_LIMIT) as usize;
+    let limit = limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT) as usize;
     let min = start_after.map(Bound::exclusive);
     // Paginate within one authority's `internal_id` namespace.
     let launches: Vec<LaunchResponse> = LAUNCHES

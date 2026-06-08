@@ -117,11 +117,7 @@ impl WasmMockQuerier {
 
     /// Read what the fixture currently has stored for `(cw20_contract, account)`.
     /// Returns `Uint128::zero()` if unset.
-    pub fn get_cw20_balance(
-        &self,
-        cw20_contract: &str,
-        account: &str,
-    ) -> Uint128 {
+    pub fn get_cw20_balance(&self, cw20_contract: &str, account: &str) -> Uint128 {
         self.cw20_balances
             .get(&(cw20_contract.to_string(), account.to_string()))
             .cloned()

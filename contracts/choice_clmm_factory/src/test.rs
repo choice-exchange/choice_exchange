@@ -9,8 +9,8 @@ mod tests {
         message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage,
     };
     use cosmwasm_std::{
-        attr, from_json, Addr, CosmosMsg, Event, OwnedDeps, Reply, SubMsgResponse,
-        SubMsgResult, Uint256, WasmMsg,
+        attr, from_json, Addr, CosmosMsg, Event, OwnedDeps, Reply, SubMsgResponse, SubMsgResult,
+        Uint256, WasmMsg,
     };
     use sha2::{Digest, Sha256};
     use std::str::FromStr;
@@ -175,7 +175,8 @@ mod tests {
         // 1. The registry key now rides in the SubMsg payload (simulate what
         // execute_create_pool sets). Token0: ATOM, Token1: OSMO, Fee: 500
         let payload =
-            cosmwasm_std::to_json_binary(&("ATOM".to_string(), "OSMO".to_string(), 500u32)).unwrap();
+            cosmwasm_std::to_json_binary(&("ATOM".to_string(), "OSMO".to_string(), 500u32))
+                .unwrap();
 
         // 2. Mock the Reply from Instantiate2
         let pool_addr = deps.api.addr_make("osmo1pooladdress");
@@ -300,7 +301,16 @@ mod tests {
         let denom = factory_denom(&issuer, "shroom_1");
 
         // ttl == 0 → no expiry.
-        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+        authorize(
+            &mut deps,
+            &issuer,
+            denom.clone(),
+            native("inj"),
+            500,
+            &sink,
+            0,
+        )
+        .unwrap();
 
         // Query reflects it (and tolerates swapped token order).
         let bin = query(
@@ -362,7 +372,16 @@ mod tests {
         let mut deps = setup_factory();
         let owner = deps.api.addr_make("creator"); // setup_factory's instantiator
         let chosen = deps.api.addr_make("chosen");
-        authorize(&mut deps, &owner, native("uusdc"), native("inj"), 500, &chosen, 0).unwrap();
+        authorize(
+            &mut deps,
+            &owner,
+            native("uusdc"),
+            native("inj"),
+            500,
+            &chosen,
+            0,
+        )
+        .unwrap();
         assert!(POOL_CREATION_AUTH
             .may_load(&deps.storage, ("n:inj", "n:uusdc", 500))
             .unwrap()
@@ -377,7 +396,16 @@ mod tests {
         let squatter = deps.api.addr_make("squatter");
         let denom = factory_denom(&issuer, "shroom_1");
 
-        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+        authorize(
+            &mut deps,
+            &issuer,
+            denom.clone(),
+            native("inj"),
+            500,
+            &sink,
+            0,
+        )
+        .unwrap();
 
         // Squatter is blocked (note: passes tokens in the opposite order).
         let err = create_pool(
@@ -412,7 +440,16 @@ mod tests {
         let squatter = deps.api.addr_make("squatter");
         let denom = factory_denom(&issuer, "shroom_1");
 
-        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 100).unwrap();
+        authorize(
+            &mut deps,
+            &issuer,
+            denom.clone(),
+            native("inj"),
+            500,
+            &sink,
+            100,
+        )
+        .unwrap();
 
         // Past expiry, the slot reopens to anyone and the stale entry is swept.
         let mut env = mock_env();
@@ -434,7 +471,16 @@ mod tests {
         let squatter = deps.api.addr_make("squatter");
         let denom = factory_denom(&issuer, "shroom_1");
 
-        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+        authorize(
+            &mut deps,
+            &issuer,
+            denom.clone(),
+            native("inj"),
+            500,
+            &sink,
+            0,
+        )
+        .unwrap();
 
         // Even far in the future, a non-creator is still blocked.
         let mut env = mock_env();
@@ -471,7 +517,16 @@ mod tests {
         let sink = deps.api.addr_make("sink");
         let denom = factory_denom(&issuer, "shroom_1");
 
-        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+        authorize(
+            &mut deps,
+            &issuer,
+            denom.clone(),
+            native("inj"),
+            500,
+            &sink,
+            0,
+        )
+        .unwrap();
 
         // Cancel by the namespace owner releases the slot.
         let msg = ExecuteMsg::CancelCreationAuth {
@@ -493,7 +548,10 @@ mod tests {
             fee: 500,
         };
         let err = execute(deps.as_mut(), mock_env(), message_info(&issuer, &[]), msg).unwrap_err();
-        assert_eq!(err.to_string(), "Generic error: No reservation for this slot");
+        assert_eq!(
+            err.to_string(),
+            "Generic error: No reservation for this slot"
+        );
     }
 
     #[test]
@@ -504,7 +562,16 @@ mod tests {
         let attacker = deps.api.addr_make("attacker");
         let denom = factory_denom(&issuer, "shroom_1");
 
-        authorize(&mut deps, &issuer, denom.clone(), native("inj"), 500, &sink, 0).unwrap();
+        authorize(
+            &mut deps,
+            &issuer,
+            denom.clone(),
+            native("inj"),
+            500,
+            &sink,
+            0,
+        )
+        .unwrap();
 
         let msg = ExecuteMsg::CancelCreationAuth {
             token_a: denom,

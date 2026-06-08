@@ -73,11 +73,7 @@ pub fn update_oracle_and_fee(
     }
 
     // --- Raw dynamic fee from (updated) EMA ---
-    let raw_fee = compute_raw_dynamic_fee(
-        &config.fee_config,
-        oracle.price_ema_x96,
-        current_price,
-    )?;
+    let raw_fee = compute_raw_dynamic_fee(&config.fee_config, oracle.price_ema_x96, current_price)?;
 
     // --- Rate-limit the fee change per elapsed second ---
     let prev_fee = oracle.last_fee_ppm;

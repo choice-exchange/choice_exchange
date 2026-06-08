@@ -263,17 +263,13 @@ pub enum ExecuteMsg {
     /// **Factory admin.** Rotate the admin key. Both old and new admin must
     /// validate as bech32; otherwise unchecked (the timelock at the admin
     /// boundary provides the time delay).
-    UpdateAdmin {
-        new_admin: String,
-    },
+    UpdateAdmin { new_admin: String },
 
     /// **Factory admin.** Swap in a new sink code-id (presumably a v2 audited
     /// build). Future `CreateSink` calls instantiate against the new code-id;
     /// existing sinks are unaffected — they were instantiated against the
     /// old one and are immutable post-instantiate.
-    UpdateSinkCodeId {
-        new_sink_code_id: u64,
-    },
+    UpdateSinkCodeId { new_sink_code_id: u64 },
 
     /// **Sink internal sub-step.** Only callable by the sink itself; gated by
     /// `info.sender == env.contract.address`. Wraps the post-`CreatePair`
@@ -289,16 +285,12 @@ pub enum ExecuteMsg {
     /// manager's `Tokens` enumeration); with `Some`, collects exactly that one.
     /// There is intentionally no path here to decrease or burn liquidity —
     /// principal stays locked.
-    CollectFees {
-        token_id: Option<String>,
-    },
+    CollectFees { token_id: Option<String> },
 
     /// **Locker admin.** Rotate the `treasury` leg of the fee split. Errors if
     /// the locker was instantiated with no admin (immutable treasury). The
     /// `creator` leg is immutable and cannot be rotated through any path.
-    UpdateTreasury {
-        new_treasury: String,
-    },
+    UpdateTreasury { new_treasury: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

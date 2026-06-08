@@ -69,7 +69,8 @@ impl WasmMockQuerier {
                 }
                 // Handle pair Simulation {} query (used by the B-6 min-LP heuristic when
                 // walking the reward-to-LP route).
-                if let Ok(PairQueryMsg::Simulation { offer_asset }) = from_json::<PairQueryMsg>(msg) {
+                if let Ok(PairQueryMsg::Simulation { offer_asset }) = from_json::<PairQueryMsg>(msg)
+                {
                     let key = (
                         contract_addr.clone(),
                         to_json_string(&offer_asset.info).unwrap_or_default(),

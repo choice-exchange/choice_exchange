@@ -80,9 +80,7 @@ fn v3_rejects_fee_at_or_above_denominator() {
     let l: u128 = 1_000_000;
     let remaining = Uint256::from(100u128);
     assert!(compute_swap_step(current, target, l, remaining, FEE_DENOMINATOR, true).is_err());
-    assert!(
-        compute_swap_step(current, target, l, remaining, FEE_DENOMINATOR + 1, true).is_err()
-    );
+    assert!(compute_swap_step(current, target, l, remaining, FEE_DENOMINATOR + 1, true).is_err());
 }
 
 #[test]
@@ -90,12 +88,8 @@ fn v3_rejects_zero_sqrt_price() {
     let target = q96();
     let l: u128 = 1_000_000;
     let remaining = Uint256::from(100u128);
-    assert!(
-        compute_swap_step(Uint256::zero(), target, l, remaining, 3000, false).is_err()
-    );
-    assert!(
-        compute_swap_step(q96(), Uint256::zero(), l, remaining, 3000, false).is_err()
-    );
+    assert!(compute_swap_step(Uint256::zero(), target, l, remaining, 3000, false).is_err());
+    assert!(compute_swap_step(q96(), Uint256::zero(), l, remaining, 3000, false).is_err());
 }
 
 #[test]

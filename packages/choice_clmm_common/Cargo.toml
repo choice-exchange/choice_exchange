@@ -22,12 +22,7 @@ cosmwasm-schema      = { version = "2.2.2" }
 cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
 
 cw721 = "0.20.0"
-cw721-base = "0.20.0"
-cw721-metadata-onchain = "0.20.0"
 cw-utils = "2.0.0"
-
-injective-cosmwasm  = { version = "0.3.4-1" }
-injective-math      = { version = "0.3.4-1" }
 
 schemars = "0.8.22"
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
@@ -80,4 +75,14 @@ harness = true
 [[test]]
 name = "zap_lp_integration"
 path = "../../tests/zap_lp_integration.rs"
+harness = true
+
+[[test]]
+name = "cw20_accounting_fuzz"
+path = "../../tests/cw20_accounting_fuzz.rs"
+harness = true
+
+[[test]]
+name = "factory_lifecycle"
+path = "../../tests/factory_lifecycle.rs"
 harness = true

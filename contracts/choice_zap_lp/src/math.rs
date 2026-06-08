@@ -91,9 +91,7 @@ const _: () = {
     assert!(D_R_SQ == TWO_MINUS_F_TIMES_1000 * TWO_MINUS_F_TIMES_1000);
     // D_RX = 4 * (1-f+fk) * 1000 * 1000 - 2 * (2-f) * (f*k) * 1_000
     //      = 4 * 999 * 1000 - 2 * 1997 * 2 = 3_996_000 - 7988 = 3_988_012
-    assert!(
-        D_RX == 4 * 999 * 1_000 - 2 * TWO_MINUS_F_TIMES_1000 * F_K_TIMES_1000
-    );
+    assert!(D_RX == 4 * 999 * 1_000 - 2 * TWO_MINUS_F_TIMES_1000 * F_K_TIMES_1000);
     assert!(D_X_SQ == F_K_TIMES_1000 * F_K_TIMES_1000);
 };
 
@@ -225,8 +223,12 @@ pub fn simulate_swap_return(
         .map_err(|_| ContractError::SplitMathOverflow {})?
         / Uint256::from(1000u128);
     let mut commission = commission_floor;
-    if commission.checked_mul(Uint256::from(1000u128)).unwrap_or(Uint256::zero())
-        != gross.checked_mul(Uint256::from(COMMISSION_RATE_PERMILLE)).unwrap_or(Uint256::zero())
+    if commission
+        .checked_mul(Uint256::from(1000u128))
+        .unwrap_or(Uint256::zero())
+        != gross
+            .checked_mul(Uint256::from(COMMISSION_RATE_PERMILLE))
+            .unwrap_or(Uint256::zero())
     {
         commission += Uint256::from(1u128);
     }
