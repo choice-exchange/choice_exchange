@@ -3,11 +3,114 @@
 //! Selected cases from `v3-core/test/SwapMath.spec.ts`. These cover the
 //! fee-math and partial-step invariants that dominate swap safety.
 
+use std::str::FromStr;
+
 use choice_clmm_math::swap_math::{compute_swap_step, FEE_DENOMINATOR};
 use cosmwasm_std::Uint256;
 
 fn q96() -> Uint256 {
     Uint256::one() << 96
+}
+
+fn u(s: &str) -> Uint256 {
+    Uint256::from_str(s).unwrap()
+}
+
+/// Asserts a full `compute_swap_step` result against independently-computed
+/// reference values. The reference numbers were produced by a separate Python
+/// implementation of Uniswap V3's `computeSwapStep` (exact integer arithmetic),
+/// itself validated against the two published `getNextSqrtPriceFromInput`
+/// vectors (87150978765690771352898345369 and 72025602285694852357767227579).
+/// Pinning all four outputs — not just directional/structural properties —
+/// catches a magnitude divergence from V3 that preserves rounding direction.
+#[allow(clippy::too_many_arguments)]
+fn assert_step(
+    current: Uint256,
+    target: Uint256,
+    l: u128,
+    remaining: Uint256,
+    fee: u32,
+    zero_for_one: bool,
+    exp_next: Uint256,
+    exp_in: Uint256,
+    exp_out: Uint256,
+    exp_fee: Uint256,
+) {
+    let r = compute_swap_step(current, target, l, remaining, fee, zero_for_one).unwrap();
+    assert_eq!(r.sqrt_ratio_next_x96, exp_next, "sqrt_ratio_next mismatch");
+    assert_eq!(r.amount_in, exp_in, "amount_in mismatch");
+    assert_eq!(r.amount_out, exp_out, "amount_out mismatch");
+    assert_eq!(r.fee_amount, exp_fee, "fee_amount mismatch");
+}
+
+#[test]
+fn v3_parity_full_step_one_for_zero_fee_3000() {
+    // current=1.0, target=1.01, L=2e18, huge input, fee=3000ppm, !zero_for_one.
+    assert_step(
+        q96(),
+        q96() * Uint256::from(101u128) / Uint256::from(100u128),
+        2u128 * 10u128.pow(18),
+        Uint256::from(10u128).pow(30),
+        3000,
+        false,
+        u("80020444139406980969479389839"),
+        Uint256::from(20_000_000_000_000_000u128),
+        Uint256::from(19_801_980_198_019_801u128),
+        Uint256::from(60_180_541_624_875u128),
+    );
+}
+
+#[test]
+fn v3_parity_partial_step_one_for_zero_fee_3000() {
+    // Partial step: amount_in and amount_out are pinned independently, so the
+    // `amount_in + fee == remaining` relation is now backed by a real amount_in
+    // check rather than being satisfied tautologically by `fee = remaining - in`.
+    assert_step(
+        q96(),
+        q96() * Uint256::from(2u128),
+        10u128.pow(18),
+        Uint256::from(1_000u128),
+        3000,
+        false,
+        u("79228162514264416584021977057"),
+        Uint256::from(997u128),
+        Uint256::from(996u128),
+        Uint256::from(3u128),
+    );
+}
+
+#[test]
+fn v3_parity_full_step_zero_for_one_fee_500() {
+    // current=1.0, target=0.99, L=2e18, huge input, fee=500ppm, zero_for_one.
+    assert_step(
+        q96(),
+        q96() * Uint256::from(99u128) / Uint256::from(100u128),
+        2u128 * 10u128.pow(18),
+        Uint256::from(10u128).pow(30),
+        500,
+        true,
+        u("78435880889121694217608510832"),
+        Uint256::from(20_202_020_202_020_203u128),
+        Uint256::from(20_000_000_000_000_000u128),
+        Uint256::from(10_106_063_132_577u128),
+    );
+}
+
+#[test]
+fn v3_parity_partial_step_zero_for_one_fee_10000() {
+    // current=1.0, target=0.25, L=1e18, remaining=5e15, fee=10000ppm, zero_for_one.
+    assert_step(
+        q96(),
+        q96() / Uint256::from(2u128),
+        10u128.pow(18),
+        Uint256::from(5u128) * Uint256::from(10u128).pow(15),
+        10000,
+        true,
+        u("78837914835826993973375740421"),
+        Uint256::from(4_950_000_000_000_000u128),
+        Uint256::from(4_925_618_189_959_699u128),
+        Uint256::from(50_000_000_000_000u128),
+    );
 }
 
 #[test]
@@ -40,6 +143,13 @@ fn v3_partial_step_consumes_all_remaining() {
     let r = compute_swap_step(current, target, l, remaining, 3000, false).unwrap();
 
     assert_ne!(r.sqrt_ratio_next_x96, target, "must not reach target");
+    // NOTE: `amount_in + fee == remaining` alone is tautological here — the
+    // implementation defines `fee = remaining - amount_in`, so the sum always
+    // equals `remaining` regardless of whether amount_in is computed correctly.
+    // Pin amount_in (and amount_out) to the independent V3 reference so this
+    // test actually constrains the price math, not just the fee bookkeeping.
+    assert_eq!(r.amount_in, Uint256::from(997u128), "amount_in mismatch");
+    assert_eq!(r.amount_out, Uint256::from(996u128), "amount_out mismatch");
     assert_eq!(
         r.amount_in + r.fee_amount,
         remaining,

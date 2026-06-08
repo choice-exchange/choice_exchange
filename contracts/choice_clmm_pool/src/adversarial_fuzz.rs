@@ -45,7 +45,7 @@ mod adversarial_fuzz {
     };
     use choice_clmm_common::pool::{ExecuteMsg, FeeConfig, InstantiateMsg, TickInfo};
     use choice_clmm_common::types::AssetInfo;
-    use choice_clmm_math::tick_math::{MAX_TICK, MIN_SQRT_RATIO, MIN_TICK};
+    use choice_clmm_math::tick_math::{MAX_TICK, MIN_TICK};
     use choice_clmm_math::utils::{to_u256, U256};
     use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env, MockApi};
     use cosmwasm_std::{
@@ -237,6 +237,47 @@ mod adversarial_fuzz {
         }
         let idx = (next(st) as usize) % m.len();
         m.iter().nth(idx).map(|((o, l, u), liq)| (*o, *l, *u, *liq))
+    }
+
+    /// Classify an op result. `Some(res)` on success, `None` on an acceptable
+    /// business revert (zero amount / slippage / iteration cap / nothing owed /
+    /// stale burn target). Errors that can only mean a logic bug PANIC — so the
+    /// shrink harness narrows and reports them instead of the old `if let Ok`
+    /// which silently skipped every revert (blinding the fuzzer to spurious-revert
+    /// / DoS-by-revert regressions). The per-op invariant battery still runs after
+    /// the (possibly unchanged) state regardless.
+    ///
+    /// (Protocol-fee-carve solvency is exercised by `solvency_fuzz`; these
+    /// accounting invariants — INV-ACTL/NET/GROSS/DELTA/BMAP — are independent of
+    /// the carve, so this fuzzer leaves the carve at its default.)
+    fn classify(r: Result<Response, ContractError>, ctx: &str) -> Option<Response> {
+        match r {
+            Ok(res) => Some(res),
+            Err(e) => {
+                match &e {
+                    ContractError::Reentrancy {}
+                    | ContractError::Unauthorized {}
+                    | ContractError::FlashNotRepaid { .. }
+                    | ContractError::FlashWithoutLiquidity {}
+                    | ContractError::InvalidTokenOrder {} => {
+                        panic!("[{}] unexpected logic-bug error: {:?}", ctx, e);
+                    }
+                    ContractError::Std(s) => {
+                        // The pool's own defensive rounding/solvency guard firing is
+                        // a bug signal, not a normal revert.
+                        if format!("{:?}", s).contains("invariant violated") {
+                            panic!("[{}] rounding invariant guard tripped: {:?}", ctx, s);
+                        }
+                        None
+                    }
+                    // ZeroAmount / InsufficientOutput / ExcessiveInput /
+                    // DeadlineExceeded / PositionNotFound / InvalidFunds /
+                    // InvalidConfig / SwapIterationLimit are legitimate for random
+                    // inputs (deep crossings can hit the iteration cap, etc.).
+                    _ => None,
+                }
+            }
+        }
     }
 
     fn settle(bal0: &mut u128, bal1: &mut u128, attached: &[Coin], res: &Response, ctx: &str) {
@@ -491,11 +532,14 @@ mod adversarial_fuzz {
                     upper_tick: *upper,
                     amount: Uint128::new(*liq),
                 };
-                if let Ok(res) = execute(
-                    deps.as_mut(),
-                    env.clone(),
-                    message_info(&owners[*oi], &funds),
-                    msg,
+                if let Some(res) = classify(
+                    execute(
+                        deps.as_mut(),
+                        env.clone(),
+                        message_info(&owners[*oi], &funds),
+                        msg,
+                    ),
+                    ctx,
                 ) {
                     settle(bal0, bal1, &funds, &res, ctx);
                     *positions.entry((*oi, *lower, *upper)).or_insert(0) += *liq;
@@ -513,11 +557,14 @@ mod adversarial_fuzz {
                     recipient: None,
                     deadline: None,
                 };
-                if let Ok(res) = execute(
-                    deps.as_mut(),
-                    env.clone(),
-                    message_info(&owners[*oi], &funds),
-                    msg,
+                if let Some(res) = classify(
+                    execute(
+                        deps.as_mut(),
+                        env.clone(),
+                        message_info(&owners[*oi], &funds),
+                        msg,
+                    ),
+                    ctx,
                 ) {
                     settle(bal0, bal1, &funds, &res, ctx);
                 }
@@ -539,11 +586,14 @@ mod adversarial_fuzz {
                     amount_specified: Uint128::new(*amt),
                     sqrt_price_limit_x96: limit,
                 };
-                if let Ok(res) = execute(
-                    deps.as_mut(),
-                    env.clone(),
-                    message_info(&owners[*oi], &funds),
-                    msg,
+                if let Some(res) = classify(
+                    execute(
+                        deps.as_mut(),
+                        env.clone(),
+                        message_info(&owners[*oi], &funds),
+                        msg,
+                    ),
+                    ctx,
                 ) {
                     settle(bal0, bal1, &funds, &res, ctx);
                 }
@@ -563,11 +613,14 @@ mod adversarial_fuzz {
                     recipient: None,
                     deadline: None,
                 };
-                if let Ok(res) = execute(
-                    deps.as_mut(),
-                    env.clone(),
-                    message_info(&owners[*oi], &funds),
-                    msg,
+                if let Some(res) = classify(
+                    execute(
+                        deps.as_mut(),
+                        env.clone(),
+                        message_info(&owners[*oi], &funds),
+                        msg,
+                    ),
+                    ctx,
                 ) {
                     settle(bal0, bal1, &funds, &res, ctx);
                 }
@@ -586,11 +639,14 @@ mod adversarial_fuzz {
                             upper_tick: *upper,
                             amount: Uint128::new(burn),
                         };
-                        if let Ok(res) = execute(
-                            deps.as_mut(),
-                            env.clone(),
-                            message_info(&owners[*oi], &[]),
-                            msg,
+                        if let Some(res) = classify(
+                            execute(
+                                deps.as_mut(),
+                                env.clone(),
+                                message_info(&owners[*oi], &[]),
+                                msg,
+                            ),
+                            ctx,
                         ) {
                             settle(bal0, bal1, &[], &res, ctx);
                             *positions.get_mut(&(*oi, *lower, *upper)).unwrap() -= burn;
@@ -606,11 +662,14 @@ mod adversarial_fuzz {
                     amount0_requested: Uint128::MAX,
                     amount1_requested: Uint128::MAX,
                 };
-                if let Ok(res) = execute(
-                    deps.as_mut(),
-                    env.clone(),
-                    message_info(&owners[*oi], &[]),
-                    msg,
+                if let Some(res) = classify(
+                    execute(
+                        deps.as_mut(),
+                        env.clone(),
+                        message_info(&owners[*oi], &[]),
+                        msg,
+                    ),
+                    ctx,
                 ) {
                     settle(bal0, bal1, &[], &res, ctx);
                 }
@@ -871,13 +930,23 @@ mod adversarial_fuzz {
                         );
                     }
                 }
-                // Whatever native dust remains is pool-favored (>= 0 trivially).
-                let _ = (
+                // After every position is burned to zero and collected, the only
+                // native value the pool may still hold is pool-favored *rounding
+                // dust*: mint rounds deposits up, burn rounds withdrawals down, and
+                // fee-growth distribution truncates a sub-unit remainder per swap.
+                // That accumulates to at most O(ops) units. Asserting a tight bound
+                // (rather than the old vacuous `>= 0`) catches a refund/accounting
+                // leak that would strand a position's principal or un-distributed
+                // fees — which would be orders of magnitude larger than this cap.
+                let dust_cap: u128 = (STEPS as u128) * 10_000;
+                assert!(
+                    bal0 <= dust_cap && bal1 <= dust_cap,
+                    "seed {}: pool stranded more than rounding dust after full drain: \
+                     bal0={} bal1={} cap={}",
+                    seed,
                     bal0,
                     bal1,
-                    MIN_SQRT_RATIO,
-                    FEE_GROWTH_GLOBAL_0,
-                    FEE_GROWTH_GLOBAL_1,
+                    dust_cap,
                 );
             }
         }

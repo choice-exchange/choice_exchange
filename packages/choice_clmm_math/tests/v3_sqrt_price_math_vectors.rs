@@ -5,6 +5,8 @@
 //! *rounding direction* — off-by-one in the wrong direction leaks funds on
 //! every swap.
 
+use std::str::FromStr;
+
 use choice_clmm_math::sqrt_price_math::{
     get_amount0_delta, get_amount1_delta, get_next_sqrt_price_from_input,
     get_next_sqrt_price_from_output,
@@ -15,10 +17,86 @@ fn q96() -> Uint256 {
     Uint256::one() << 96
 }
 
+fn u(s: &str) -> Uint256 {
+    Uint256::from_str(s).unwrap()
+}
+
 fn encode(n: u128) -> Uint256 {
-    // Like V3's `encodePriceSqrt(n, 1)`: sqrt(n) * 2^96. We don't need
-    // precise sqrt here — tests only require *some* price * Q96.
+    // Returns `n * 2^96` (NOT `sqrt(n) * 2^96`). The identity/rejection tests
+    // below only need *some* valid Q96 price, and are only ever called with
+    // `n == 1` (where `n == sqrt(n)`), so the distinction is immaterial here.
     q96() * Uint256::from(n)
+}
+
+// --- V3 numeric parity vectors (exact magnitude, not just direction) ---
+//
+// Reference values computed by an independent Python implementation of V3's
+// SqrtPriceMath (exact integer arithmetic), validated against the two published
+// `getNextSqrtPriceFromInput` vectors. The property tests further below check
+// rounding *direction*; these pin the absolute magnitude so a constant-factor
+// divergence from V3 (which the arb integration assumes is impossible) is caught.
+
+#[test]
+fn v3_parity_amount0_delta_1_to_1_21() {
+    // price 1.0 -> 1.21, L = 1e18.
+    let a = q96();
+    let b = q96() * Uint256::from(121u128) / Uint256::from(100u128);
+    let l = 10u128.pow(18);
+    assert_eq!(
+        get_amount0_delta(a, b, l, true).unwrap(),
+        Uint256::from(173_553_719_008_264_463u128)
+    );
+    assert_eq!(
+        get_amount0_delta(a, b, l, false).unwrap(),
+        Uint256::from(173_553_719_008_264_462u128)
+    );
+}
+
+#[test]
+fn v3_parity_amount1_delta_1_to_1_21() {
+    let a = q96();
+    let b = q96() * Uint256::from(121u128) / Uint256::from(100u128);
+    let l = 10u128.pow(18);
+    assert_eq!(
+        get_amount1_delta(a, b, l, true).unwrap(),
+        Uint256::from(210_000_000_000_000_000u128)
+    );
+    assert_eq!(
+        get_amount1_delta(a, b, l, false).unwrap(),
+        Uint256::from(209_999_999_999_999_999u128)
+    );
+}
+
+#[test]
+fn v3_parity_next_sqrt_price_from_input() {
+    let l = 10u128.pow(18);
+    let amt = Uint256::from(10u128).pow(17); // 0.1e18
+                                             // !zero_for_one (price up), rounds down.
+    assert_eq!(
+        get_next_sqrt_price_from_input(q96(), l, amt, false).unwrap(),
+        u("87150978765690771352898345369")
+    );
+    // zero_for_one (price down), rounds up.
+    assert_eq!(
+        get_next_sqrt_price_from_input(q96(), l, amt, true).unwrap(),
+        u("72025602285694852357767227579")
+    );
+}
+
+#[test]
+fn v3_parity_next_sqrt_price_from_output() {
+    let l = 10u128.pow(18);
+    let amt = Uint256::from(10u128).pow(17); // 0.1e18
+                                             // !zero_for_one: output is token0, price up.
+    assert_eq!(
+        get_next_sqrt_price_from_output(q96(), l, amt, false).unwrap(),
+        u("88031291682515930659493278152")
+    );
+    // zero_for_one: output is token1, price down.
+    assert_eq!(
+        get_next_sqrt_price_from_output(q96(), l, amt, true).unwrap(),
+        u("71305346262837903834189555302")
+    );
 }
 
 // --- get_next_sqrt_price_from_input ---

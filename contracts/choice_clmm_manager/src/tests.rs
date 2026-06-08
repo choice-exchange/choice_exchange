@@ -2,9 +2,10 @@
 #[allow(clippy::module_inception)]
 mod tests {
     use crate::contract::{execute, instantiate, query, reply};
+    use crate::error::ContractError;
     use crate::state::{
-        PositionState, PENDING_INCREASE, PENDING_MINT, POSITIONS, REPLY_COLLECT,
-        REPLY_DECREASE_LIQUIDITY, REPLY_INCREASE_LIQUIDITY, REPLY_MINT_POSITION,
+        PENDING_INCREASE, PENDING_MINT, POSITIONS, REPLY_COLLECT, REPLY_DECREASE_LIQUIDITY,
+        REPLY_INCREASE_LIQUIDITY, REPLY_MINT_POSITION,
     };
     use choice_clmm_common::factory::QueryMsg as FactoryQueryMsg;
     use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, QueryMsg};
@@ -428,6 +429,83 @@ mod tests {
         .unwrap();
         let owner_res: OwnerOfResponse = from_json(&owner_bin).unwrap();
         assert_eq!(owner_res.owner, user.to_string());
+    }
+
+    #[test]
+    fn reply_rejects_consumed_amount_divergence() {
+        // The reply's consumed-amount guard is the manager's only defense against
+        // stranding pool-refunded native dust: if the pool reports it consumed a
+        // DIFFERENT amount than the manager forwarded, the mint must abort. The
+        // happy-path tests route through `ok_reply_consumed`, which echoes the
+        // pending amounts back verbatim and so can never exercise the failure
+        // branch — this test feeds a deliberately mismatched reply.
+        let mut deps = setup_deps();
+        instantiate_manager(&mut deps);
+        let user = deps.api.addr_make("user");
+
+        // Park a PENDING_MINT (but do NOT run the success reply).
+        let info = message_info(
+            &user,
+            &[
+                Coin::new(Uint128::new(1_000), "ATOM"),
+                Coin::new(Uint128::new(1_000), "OSMO"),
+            ],
+        );
+        let res = execute(
+            deps.as_mut(),
+            mock_env(),
+            info,
+            ExecuteMsg::MintPosition {
+                token0: native("ATOM"),
+                token1: native("OSMO"),
+                fee: 500,
+                tick_lower: -100,
+                tick_upper: 100,
+                amount0_desired: Uint128::new(1_000),
+                amount1_desired: Uint128::new(1_000),
+                amount0_min: Uint128::zero(),
+                amount1_min: Uint128::zero(),
+                recipient: None,
+                deadline: 0,
+            },
+        )
+        .unwrap();
+        let token_id = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "token_id")
+            .unwrap()
+            .value
+            .clone();
+        let key: u64 = token_id.parse().unwrap();
+        let pending = PENDING_MINT.load(&deps.storage, key).unwrap();
+
+        // Reply claims the pool consumed ONE MORE unit of token0 than the manager
+        // actually forwarded — exactly the mint-math divergence the guard catches.
+        let pool_addr = deps.api.addr_make("pool_addr").to_string();
+        let ev = Event::new("wasm")
+            .add_attribute("_contract_address", &pool_addr)
+            .add_attribute(
+                "amount0_consumed",
+                (pending.amount0_sent_to_pool + Uint128::one()).to_string(),
+            )
+            .add_attribute("amount1_consumed", pending.amount1_sent_to_pool.to_string());
+        let bad = Reply {
+            id: REPLY_MINT_POSITION,
+            payload: payload_for(&token_id),
+            gas_used: 0,
+            result: SubMsgResult::Ok(ok_submsg_response(vec![ev])),
+        };
+
+        let err = reply(deps.as_mut(), mock_env(), bad).unwrap_err();
+        match err {
+            ContractError::Std(e) => assert!(
+                format!("{:?}", e).contains("mint math diverged"),
+                "expected the mint-divergence guard, got: {:?}",
+                e
+            ),
+            other => panic!("expected a mint-divergence Std error, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1225,10 +1303,5 @@ mod tests {
         // id1's position is now persisted; id2's is not yet.
         assert!(POSITIONS.may_load(&deps.storage, &id1).unwrap().is_some());
         assert!(POSITIONS.may_load(&deps.storage, &id2).unwrap().is_none());
-    }
-
-    fn _ensure_position_default_construction_compiles() {
-        // Type sanity check: PositionState must not accidentally require Default.
-        let _ = |s: PositionState| s.liquidity;
     }
 }

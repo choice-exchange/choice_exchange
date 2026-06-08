@@ -759,11 +759,15 @@ mod regime_tests {
         )
         .unwrap();
 
-        // Swap both directions hard; must never panic and must stay solvent
-        // (mock querier can't track bank balances, so we just require no error /
-        // the swap to either fill or cleanly stop).
-        for (denom, amt) in [(T0, 5_000_000u128), (T1, 9_000_000)] {
-            let _ = execute(
+        // Swap both directions hard. Each leg must actually FILL (non-zero output)
+        // and move the price in the correct direction — not merely "not error".
+        // A bug that mis-applies full-range liquidity and silently no-ops the swap
+        // would pass a bare `let _ = execute(...)` but is caught here.
+        for (denom, amt, zero_for_one) in [(T0, 5_000_000u128, true), (T1, 9_000_000u128, false)] {
+            let before: choice_clmm_common::pool::PoolState =
+                from_json(query(deps.as_ref(), env.clone(), QueryMsg::GetSlot0 {}).unwrap())
+                    .unwrap();
+            let res = execute(
                 deps.as_mut(),
                 env.clone(),
                 message_info(&lp, &[Coin::new(Uint128::new(amt), denom)]),
@@ -772,7 +776,35 @@ mod regime_tests {
                     recipient: None,
                     deadline: None,
                 },
-            );
+            )
+            .unwrap();
+            let out = res
+                .attributes
+                .iter()
+                .find(|a| a.key == "amount_out")
+                .expect("swap must emit amount_out")
+                .value
+                .parse::<u128>()
+                .unwrap();
+            assert!(out > 0, "swap of {} {} produced no output", amt, denom);
+            let after: choice_clmm_common::pool::PoolState =
+                from_json(query(deps.as_ref(), env.clone(), QueryMsg::GetSlot0 {}).unwrap())
+                    .unwrap();
+            if zero_for_one {
+                assert!(
+                    after.sqrt_price < before.sqrt_price,
+                    "zero_for_one swap must push the price down ({} -> {})",
+                    before.sqrt_price,
+                    after.sqrt_price
+                );
+            } else {
+                assert!(
+                    after.sqrt_price > before.sqrt_price,
+                    "one_for_zero swap must push the price up ({} -> {})",
+                    before.sqrt_price,
+                    after.sqrt_price
+                );
+            }
         }
         // Burn both fully — must succeed and zero out.
         for (l, u, q) in [(lo, hi, 1_000_000u128), (0, 10, 1_000_000_000)] {
@@ -911,6 +943,9 @@ mod regime_tests {
 
     const FLASH_HELD: u128 = 1_000_000;
     const FLASH_BORROW: u128 = 400_000;
+    /// Active in-range liquidity minted by `flashed_pool` (used to derive the
+    /// exact LP fee-growth delta in `flash_exact_repay_distributes_fee_and_clears_lock`).
+    const FLASH_LIQUIDITY: u128 = 1_000_000_000_000;
 
     /// Build a pool mid-flash: mint in-range liquidity, set the pool's bank
     /// balance to `FLASH_HELD` of each token, then execute Flash (borrowing
@@ -933,7 +968,7 @@ mod regime_tests {
             ExecuteMsg::Mint {
                 lower_tick: -20000,
                 upper_tick: 20000,
-                amount: Uint128::new(1_000_000_000_000),
+                amount: Uint128::new(FLASH_LIQUIDITY),
             },
         )
         .unwrap();
@@ -1046,13 +1081,39 @@ mod regime_tests {
                 Coin::new(Uint128::new(FLASH_HELD), T1),
             ],
         );
+        let protocol_before = PROTOCOL_FEES_0
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or_default();
         reply_flash(deps.as_mut(), env, ok_reply()).expect("exact repayment must succeed");
         assert!(
             !is_locked(&deps.storage),
             "lock not released after repayment"
         );
         let fg_after = FEE_GROWTH_GLOBAL_0.load(&deps.storage).unwrap();
-        assert!(fg_after > fg_before, "flash fee not distributed to LPs");
+        // The whole fee is the LP share (no protocol carve configured here), and
+        // `accrue_flash_fee` adds `mul_div(fee0, 2^128, liquidity)` to the global
+        // accumulator. Assert that EXACT delta — a bug that distributes a wrong
+        // fraction (1 wei, or routes most to the protocol bucket) would still
+        // satisfy a bare `fg_after > fg_before` but is caught here.
+        let q128 = Uint256::one() << 128u32;
+        let expected_delta = Uint256::from(fee0) * q128 / Uint256::from(FLASH_LIQUIDITY);
+        assert_eq!(
+            fg_after.wrapping_sub(fg_before),
+            expected_delta,
+            "flash LP fee delta mismatch: fee0={} L={}",
+            fee0,
+            FLASH_LIQUIDITY,
+        );
+        // And with no carve, the protocol bucket must be untouched.
+        let protocol_after = PROTOCOL_FEES_0
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or_default();
+        assert_eq!(
+            protocol_after, protocol_before,
+            "no protocol carve configured, yet the protocol bucket changed"
+        );
     }
 
     // ---------------------------------------------------------------------

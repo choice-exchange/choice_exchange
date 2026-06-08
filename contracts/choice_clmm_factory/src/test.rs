@@ -84,6 +84,60 @@ mod tests {
 
         // Verify storage
         assert_eq!(FEE_TIERS.load(&deps.storage, 250).unwrap(), 5);
+
+        // 3. Parameter-validation REJECT side. All from the OWNER, so each failure
+        //    is attributable to the param (not auth), and each asserts the EXACT
+        //    error so it cannot pass for an unrelated reason. These guard the
+        //    `tick_spacing as i32` cast and the fee bounds the pool relies on.
+        let creator = deps.api.addr_make("creator");
+        let cases: &[(u32, u32, &str)] = &[
+            (0, 5, "Generic error: Fee must be > 0 and < 1_000_000"),
+            (
+                1_000_000,
+                5,
+                "Generic error: Fee must be > 0 and < 1_000_000",
+            ),
+            (300, 0, "Generic error: Tick spacing must be in 1..=16384"),
+            (
+                300,
+                16385,
+                "Generic error: Tick spacing must be in 1..=16384",
+            ),
+        ];
+        for (fee, tick_spacing, want) in cases {
+            let err = execute(
+                deps.as_mut(),
+                mock_env(),
+                message_info(&creator, &[]),
+                ExecuteMsg::EnableFeeAmount {
+                    fee: *fee,
+                    tick_spacing: *tick_spacing,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                *want,
+                "fee={} tick_spacing={}",
+                fee,
+                tick_spacing
+            );
+        }
+
+        // 4. Duplicate fee tier (250 was just enabled) is rejected as an overwrite,
+        //    and the original spacing is left untouched.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&creator, &[]),
+            ExecuteMsg::EnableFeeAmount {
+                fee: 250,
+                tick_spacing: 7,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Generic error: Fee tier already enabled");
+        assert_eq!(FEE_TIERS.load(&deps.storage, 250).unwrap(), 5);
     }
 
     #[test]
@@ -172,11 +226,15 @@ mod tests {
     fn test_create_pool_reply() {
         let mut deps = setup_factory();
 
-        // 1. The registry key now rides in the SubMsg payload (simulate what
-        // execute_create_pool sets). Token0: ATOM, Token1: OSMO, Fee: 500
-        let payload =
-            cosmwasm_std::to_json_binary(&("ATOM".to_string(), "OSMO".to_string(), 500u32))
-                .unwrap();
+        // 1. The registry key now rides in the SubMsg payload. Build it the SAME
+        // way `execute_create_pool` does — via `registry_key()` (the `n:` native
+        // prefix) — so this reply test stays consistent with the producer instead
+        // of hand-writing raw, un-prefixed keys the producer never emits.
+        let key0 = native("ATOM").registry_key();
+        let key1 = native("OSMO").registry_key();
+        assert_eq!(key0, "n:ATOM");
+        assert_eq!(key1, "n:OSMO");
+        let payload = cosmwasm_std::to_json_binary(&(key0.clone(), key1.clone(), 500u32)).unwrap();
 
         // 2. Mock the Reply from Instantiate2
         let pool_addr = deps.api.addr_make("osmo1pooladdress");
@@ -202,8 +260,10 @@ mod tests {
             vec![attr("pool_address", pool_addr.to_string())]
         );
 
-        // 4. Verify Registry Update
-        let stored_addr = POOLS.load(&deps.storage, ("ATOM", "OSMO", 500)).unwrap();
+        // 4. Verify Registry Update under the producer's variant-qualified key.
+        let stored_addr = POOLS
+            .load(&deps.storage, (key0.as_str(), key1.as_str(), 500))
+            .unwrap();
         assert_eq!(stored_addr, Addr::unchecked(pool_addr));
         // No temp storage to clean up — the key rode in the SubMsg payload.
     }

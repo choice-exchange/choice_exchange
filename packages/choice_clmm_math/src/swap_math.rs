@@ -346,7 +346,11 @@ mod tests {
         // Small input that won't reach target.
         let small = Uint256::from(1_000u128);
         let r = compute_swap_step(p, target, l, small, 3000, false).unwrap();
-        // Invariant: amount_in + fee == amount_remaining
+        // `amount_in + fee == remaining` is tautological on its own (the impl
+        // defines `fee = remaining - amount_in`). Pin amount_in/out to the
+        // independent V3 reference so the price math is actually constrained.
+        assert_eq!(r.amount_in, Uint256::from(997u128));
+        assert_eq!(r.amount_out, Uint256::from(996u128));
         assert_eq!(r.amount_in + r.fee_amount, small);
         assert_ne!(r.sqrt_ratio_next_x96, target);
     }
@@ -360,16 +364,12 @@ mod tests {
         let huge_out = Uint256::from(10u128).pow(30);
         let r = compute_swap_step_exact_out(p, target, l, huge_out, 3000, false).unwrap();
         assert_eq!(r.sqrt_ratio_next_x96, target);
-        assert!(r.amount_in > Uint256::zero());
-        assert!(r.amount_out > Uint256::zero());
-        // Fee is charged on the input: fee = ceil(in * f / (1 - f)).
-        let expected_fee = mul_div_round_up(
-            r.amount_in,
-            Uint256::from(3000u128),
-            Uint256::from(FEE_DENOMINATOR - 3000),
-        )
-        .unwrap();
-        assert_eq!(r.fee_amount, expected_fee);
+        // Pin all outputs to the independent V3 reference. Computing the
+        // expected fee with the same `mul_div_round_up` the impl uses would be
+        // circular (a wrong fee formula would match itself).
+        assert_eq!(r.amount_in, Uint256::from(1_000_000_000_000_000_000u128));
+        assert_eq!(r.amount_out, Uint256::from(500_000_000_000_000_000u128));
+        assert_eq!(r.fee_amount, Uint256::from(3_009_027_081_243_732u128));
     }
 
     #[test]
@@ -381,9 +381,13 @@ mod tests {
         let l = 10u128.pow(18);
         let want_out = Uint256::from(1_000u128);
         let r = compute_swap_step_exact_out(p, target, l, want_out, 3000, false).unwrap();
+        // `amount_out == want_out` is forced by the clamp in the partial branch,
+        // so it proves little on its own. Pin amount_in/fee to the independent
+        // V3 reference to constrain the actual cost math.
         assert_eq!(r.amount_out, want_out);
         assert_ne!(r.sqrt_ratio_next_x96, target);
-        assert!(r.amount_in > Uint256::zero());
+        assert_eq!(r.amount_in, Uint256::from(1_001u128));
+        assert_eq!(r.fee_amount, Uint256::from(4u128));
     }
 
     #[test]

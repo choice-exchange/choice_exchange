@@ -1887,6 +1887,28 @@ mod tests {
             "expected an address-validation Std error, got {:?}",
             err
         );
+
+        // Positive control: the SAME swap with a VALID recipient succeeds. Since
+        // the recipient is the only thing that changed, this proves the error
+        // above is attributable to recipient validation — not an unrelated Std
+        // failure (insufficient funds, price limit, …) that `matches!(Std(_))`
+        // would otherwise accept for the wrong reason.
+        let mut deps_ok = mock_dependencies();
+        let env_ok = setup_oracle_pool(&mut deps_ok, 0);
+        let good_recipient = deps_ok.api.addr_make("good_recipient").to_string();
+        let trader2 = deps_ok.api.addr_make("trader");
+        execute(
+            deps_ok.as_mut(),
+            env_ok,
+            message_info(&trader2, &[Coin::new(Uint128::new(1_000), "inj")]),
+            ExecuteMsg::Swap {
+                recipient: good_recipient,
+                zero_for_one: true,
+                amount_specified: Uint128::from(1_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128739u128 + 1),
+            },
+        )
+        .expect("swap with a valid recipient must succeed");
     }
 
     /// Runs a large whale swap then a probe swap `probe_delay_sec` later and
@@ -1944,16 +1966,18 @@ mod tests {
             .value
             .parse::<u128>()
             .unwrap();
-        let fee_in = res
+        // The actual fee charged this swap, emitted by `apply_swap`. Returning the
+        // exact `fee_ppm` lets callers assert the rate-limit cap directly instead
+        // of inferring it from output rate.
+        let fee_ppm = res
             .attributes
             .iter()
-            .find(|a| a.key == "final_price")
-            .map(|_| 0u128)
-            .unwrap_or(0);
-        let _ = fee_in;
-        // Rough fee recovery: fee = 1000 - amount_out - (amount_out's fair at 0 fee).
-        // For this regression we just return `amount_out` and let the caller compare.
-        (out, 1_000u128)
+            .find(|a| a.key == "fee_ppm")
+            .expect("swap response must carry a fee_ppm attribute")
+            .value
+            .parse::<u128>()
+            .unwrap();
+        (out, fee_ppm)
     }
 
     #[test]
@@ -2007,15 +2031,28 @@ mod tests {
             .attributes
             .iter()
             .find(|a| a.key == "fee_ppm")
-            .map(|a| a.value.parse::<u128>().unwrap())
-            .unwrap_or(0);
+            .expect("swap A must carry a fee_ppm attribute")
+            .value
+            .parse::<u128>()
+            .unwrap();
         let fee_b = res_b
             .attributes
             .iter()
             .find(|a| a.key == "fee_ppm")
-            .map(|a| a.value.parse::<u128>().unwrap())
-            .unwrap_or(0);
-        let _ = (fee_a, fee_b);
+            .expect("swap B must carry a fee_ppm attribute")
+            .value
+            .parse::<u128>()
+            .unwrap();
+        // The load-bearing invariant: the second swap in the same block pays the
+        // EXACT fee the first swap committed. Without the freeze, swap B would
+        // re-derive the fee against post-A (moved) slot0 vs. stale EMA and be
+        // slammed with a higher value — so `fee_a == fee_b` is precisely what
+        // distinguishes the fixed behavior from the vulnerable one.
+        assert_eq!(
+            fee_a, fee_b,
+            "same-block fee not frozen: swap A paid {} ppm, swap B paid {} ppm",
+            fee_a, fee_b
+        );
         let out_a = res_a
             .attributes
             .iter()
@@ -2056,25 +2093,36 @@ mod tests {
         // block following the whale must pay AT MOST base_fee + 100 ppm = 100 ppm.
         let mut deps = mock_dependencies();
         let env_start = setup_oracle_pool(&mut deps, 100);
-        let (out_with_limit, sent) = whale_then_probe(&mut deps, env_start, 1);
+        let (out_with_limit, fee_with_limit) = whale_then_probe(&mut deps, env_start, 1);
 
         // Re-run the scenario with rate limiting DISABLED for a baseline.
         let mut deps2 = mock_dependencies();
         let env_start2 = setup_oracle_pool(&mut deps2, 0);
-        let (out_no_limit, _) = whale_then_probe(&mut deps2, env_start2, 1);
+        let (out_no_limit, fee_no_limit) = whale_then_probe(&mut deps2, env_start2, 1);
 
-        // With rate limiting, the probe gets MORE output (less fee taken)
-        // than without rate limiting. This is the exact behavior that
-        // defeats the cross-block sandwich-tax attack: the victim in the
-        // block after the attacker's swap cannot be slammed with a near-max
-        // fee, because the fee can only climb by `rate * delta` per block.
+        // Direct invariant: with rate limit 100 ppm/sec and a 1-second gap, the
+        // probe's fee can rise by AT MOST base(0) + 100 = 100 ppm. The unlimited
+        // baseline pays the full (much higher) volatility fee, proving the cap is
+        // what's biting — not that the scenario simply produced a small fee.
+        assert!(
+            fee_with_limit <= 100,
+            "rate-limited probe fee {} exceeds base+100 ppm cap",
+            fee_with_limit,
+        );
+        assert!(
+            fee_no_limit > fee_with_limit,
+            "baseline (no rate limit) should pay a strictly higher fee than the \
+             capped probe: capped={} uncapped={}",
+            fee_with_limit,
+            fee_no_limit,
+        );
+        // And the lower fee means the capped probe receives strictly more output.
         assert!(
             out_with_limit > out_no_limit,
             "rate limit should reduce fee, giving the probe more output: \
-             limited={} unlimited={} sent={}",
+             limited={} unlimited={}",
             out_with_limit,
             out_no_limit,
-            sent,
         );
     }
 
@@ -2173,7 +2221,15 @@ mod tests {
             .value
             .parse::<u128>()
             .unwrap();
-        (out, 1_000u128)
+        let fee_ppm = res
+            .attributes
+            .iter()
+            .find(|a| a.key == "fee_ppm")
+            .expect("swap response must carry a fee_ppm attribute")
+            .value
+            .parse::<u128>()
+            .unwrap();
+        (out, fee_ppm)
     }
 
     #[test]
@@ -2181,18 +2237,77 @@ mod tests {
         // If the oracle hasn't been touched in > 1 hour, get_dynamic_fee
         // returns base_fee_ppm. This protects quote/simulation paths from
         // using arbitrarily-stale EMA data.
+        //
+        // The fallback is only meaningfully tested if the *fresh* reading differs
+        // from base — otherwise `assert_eq!(fee, base)` passes whether or not the
+        // staleness branch exists. So we first drive `last_fee_ppm` strictly above
+        // base (0) with a whale move + a follow-up probe whose post-move price
+        // diverges from the EMA, then assert the fresh read is elevated and the
+        // stale read collapses back to base.
         use crate::core::oracle::get_dynamic_fee;
 
         let mut deps = mock_dependencies();
-        let env_start = setup_oracle_pool(&mut deps, 100);
+        // Rate limiting OFF so the elevated volatility fee is stored verbatim.
+        let env_start = setup_oracle_pool(&mut deps, 0);
 
-        // Fast-forward 2 hours (> MAX_ORACLE_AGE_SECONDS).
-        let mut env_later = env_start.clone();
-        env_later.block.time = env_later.block.time.plus_seconds(7200);
+        // Whale moves the price (this sets EMA to the pre-move price; the fee it
+        // pays is still base, since current == EMA at that instant).
+        let mut env_whale = env_start.clone();
+        env_whale.block.time = env_whale.block.time.plus_seconds(200);
+        let whale = deps.api.addr_make("whale");
+        execute(
+            deps.as_mut(),
+            env_whale.clone(),
+            message_info(&whale, &[Coin::new(Uint128::new(500_000), "inj")]),
+            ExecuteMsg::Swap {
+                recipient: whale.to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(500_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
 
-        let fee = get_dynamic_fee(&deps.storage, &env_later, get_price_one()).unwrap();
-        // base_fee_ppm in setup_oracle_pool is 0.
-        assert_eq!(fee, 0);
+        // Probe one second later: now the (moved) price diverges from the EMA, so
+        // the swap commits an elevated `last_fee_ppm` to storage.
+        let mut env_probe = env_whale.clone();
+        env_probe.block.time = env_probe.block.time.plus_seconds(1);
+        let trader = deps.api.addr_make("trader");
+        execute(
+            deps.as_mut(),
+            env_probe.clone(),
+            message_info(&trader, &[Coin::new(Uint128::new(1_000), "inj")]),
+            ExecuteMsg::Swap {
+                recipient: trader.to_string(),
+                zero_for_one: true,
+                amount_specified: Uint128::from(1_000u128),
+                sqrt_price_limit_x96: Uint256::from(4295128740u128),
+            },
+        )
+        .unwrap();
+
+        // FRESH read (at the probe's block): not stale → returns the elevated
+        // last_fee_ppm, strictly above base (0).
+        let fee_fresh = get_dynamic_fee(&deps.storage, &env_probe, get_price_one()).unwrap();
+        assert!(
+            fee_fresh > 0,
+            "expected the probe to have stored a fee above base (0), got {}",
+            fee_fresh
+        );
+
+        // STALE read (> 1 hour after the probe): must fall back to base_fee_ppm
+        // (0). That it differs from `fee_fresh` proves the staleness branch — not
+        // the normal path — produced this value.
+        let mut env_stale = env_probe.clone();
+        env_stale.block.time = env_stale.block.time.plus_seconds(7200);
+        let fee_stale = get_dynamic_fee(&deps.storage, &env_stale, get_price_one()).unwrap();
+        assert_eq!(fee_stale, 0, "stale oracle must fall back to base_fee_ppm");
+        assert!(
+            fee_stale < fee_fresh,
+            "stale fallback ({}) must differ from the fresh fee ({})",
+            fee_stale,
+            fee_fresh
+        );
     }
 
     // ----------------------------------------------------------------------
@@ -2312,10 +2427,21 @@ mod tests {
         .unwrap();
 
         // Single-step swap (no tick cross): protocol_fee == floor(fee_amount / 4).
-        let res = do_swap_zero_for_one(&mut deps, 1000);
+        // The input is large enough (4000) that the 0.3% fee (~12) yields a
+        // NON-ZERO quarter-carve (3) — a 1000-input swap would round the carve to
+        // floor(3/4) == 0, leaving nothing to observe. It stays single-step: ~10k
+        // of token0 is needed to reach the tick -200 boundary, so 4000 stops short.
+        let fg0_before = crate::state::FEE_GROWTH_GLOBAL_0
+            .may_load(&deps.storage)
+            .unwrap()
+            .unwrap_or_default();
+        let res = do_swap_zero_for_one(&mut deps, 4000);
         let fee_amount: u128 = attr(&res, "fee_amount").parse().unwrap();
         let protocol_fee: u128 = attr(&res, "protocol_fee").parse().unwrap();
-        assert!(fee_amount > 0, "swap should charge a fee");
+        assert!(
+            protocol_fee > 0,
+            "carve must actually be non-zero to be meaningful"
+        );
         assert_eq!(protocol_fee, fee_amount / 4);
 
         // Accrued on the token0 side (zero_for_one input is token0 = inj).
@@ -2323,6 +2449,30 @@ mod tests {
         let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
         assert_eq!(fees.protocol_fees_0.u128(), protocol_fee);
         assert!(fees.protocol_fees_1.is_zero());
+
+        // "...and_reduces_lp": the LP fee-growth must reflect ONLY the LP share
+        // (fee_amount - protocol_fee), not the whole fee. The single in-range
+        // position holds L = 1_000_000, and the accumulator gains
+        // mul_div(lp_part, 2^128, L). Asserting the exact delta — and that it is
+        // strictly below what the full fee would have produced — is what actually
+        // backs the "reduces_lp" half of the test name.
+        let fg0_after = crate::state::FEE_GROWTH_GLOBAL_0
+            .load(&deps.storage)
+            .unwrap();
+        let l = Uint256::from(1_000_000u128);
+        let q128 = Uint256::one() << 128u32;
+        let lp_part = fee_amount - protocol_fee;
+        let expected_lp_delta = Uint256::from(lp_part) * q128 / l;
+        assert_eq!(
+            fg0_after.wrapping_sub(fg0_before),
+            expected_lp_delta,
+            "LP fee-growth must reflect only the LP share, not the full fee"
+        );
+        let full_fee_delta = Uint256::from(fee_amount) * q128 / l;
+        assert!(
+            expected_lp_delta < full_fee_delta,
+            "carve must reduce the LP share below the full-fee growth"
+        );
     }
 
     #[test]
