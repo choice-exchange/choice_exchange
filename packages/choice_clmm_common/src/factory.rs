@@ -62,6 +62,15 @@ pub enum ExecuteMsg {
         token_b: AssetInfo,
         fee: u32,
     },
+    /// Add `borrower` to the flash-loan allowlist (owner-only). Pools created by
+    /// this factory live-query the allowlist when their `Flash {}` is called, so
+    /// only allowlisted contracts (e.g. the dex aggregator) may flash-borrow.
+    AuthorizeFlashBorrower { borrower: String },
+    /// Remove `borrower` from the flash-loan allowlist (owner-only).
+    RevokeFlashBorrower { borrower: String },
+    /// Escape hatch (owner-only): when `open` is `true`, pools skip the
+    /// flash-borrower gate and `Flash {}` is permissionless again.
+    SetFlashUnrestricted { open: bool },
 }
 
 #[cw_serde]
@@ -100,6 +109,16 @@ pub enum QueryMsg {
         token_b: AssetInfo,
         fee: u32,
     },
+    /// Whether `borrower` may call a pool's `Flash {}` (explicitly allowlisted, or
+    /// flash is unrestricted). Pools query this during flash.
+    #[returns(IsFlashBorrowerResponse)]
+    IsFlashBorrower { borrower: String },
+    /// Lists allowlisted flash borrowers (paginated) plus the unrestricted flag.
+    #[returns(FlashBorrowersResponse)]
+    FlashBorrowers {
+        start_after: Option<String>,
+        limit: Option<u32>,
+    },
 }
 
 #[cw_serde]
@@ -120,6 +139,17 @@ pub struct CreationAuthResponse {
     pub creator: String,
     /// Unix seconds; `u64::MAX` means no expiry.
     pub expires_at: u64,
+}
+
+#[cw_serde]
+pub struct IsFlashBorrowerResponse {
+    pub authorized: bool,
+}
+
+#[cw_serde]
+pub struct FlashBorrowersResponse {
+    pub borrowers: Vec<String>,
+    pub unrestricted: bool,
 }
 
 #[cw_serde]

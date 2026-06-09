@@ -235,7 +235,8 @@ mod tests {
     fn compute_fee_same_block_is_frozen() {
         let config = cfg(3_000, 30_000, 1_000_000);
         let o = oracle(1_000_000_000_000, 100, 7_777);
-        let (fee, next) = compute_fee(&config, &o, 100, Uint256::from(2_000_000_000_000u128)).unwrap();
+        let (fee, next) =
+            compute_fee(&config, &o, 100, Uint256::from(2_000_000_000_000u128)).unwrap();
         assert_eq!(fee, 7_777, "same-block fee must be the frozen last_fee_ppm");
         assert_eq!(next, o, "same-block oracle must be unchanged");
     }
@@ -248,8 +249,13 @@ mod tests {
         let config = cfg(3_000, 30_000, 1_000_000);
         let o = oracle(1_000_000_000_000, 100, 3_000);
         // 1s later, price +0.2% vs the EMA.
-        let (fee, next) = compute_fee(&config, &o, 101, Uint256::from(1_002_000_000_000u128)).unwrap();
-        assert!(fee > 3_000, "diverged price must raise the fee above last_fee, got {}", fee);
+        let (fee, next) =
+            compute_fee(&config, &o, 101, Uint256::from(1_002_000_000_000u128)).unwrap();
+        assert!(
+            fee > 3_000,
+            "diverged price must raise the fee above last_fee, got {}",
+            fee
+        );
         assert_eq!(next.last_block_time, 101);
         assert_eq!(next.last_fee_ppm, fee);
     }
@@ -261,8 +267,12 @@ mod tests {
     fn compute_fee_returns_to_base_after_halflife() {
         let config = cfg(3_000, 30_000, 1_000_000); // halflife 600
         let o = oracle(1_000_000_000_000, 100, 25_000);
-        let (fee, _next) = compute_fee(&config, &o, 100 + 600, Uint256::from(5_000_000_000_000u128)).unwrap();
-        assert_eq!(fee, 3_000, "after >= halflife the EMA snaps to price → base fee");
+        let (fee, _next) =
+            compute_fee(&config, &o, 100 + 600, Uint256::from(5_000_000_000_000u128)).unwrap();
+        assert_eq!(
+            fee, 3_000,
+            "after >= halflife the EMA snaps to price → base fee"
+        );
     }
 
     /// The load-bearing fix: a `Quote` (simulate_fee) returns exactly what a swap landing in the
@@ -289,8 +299,12 @@ mod tests {
                 deps.as_mut().storage,
                 &PoolConfig {
                     factory: Addr::unchecked("factory"),
-                    token0: AssetInfo::NativeToken { denom: "uatom".into() },
-                    token1: AssetInfo::NativeToken { denom: "uusd".into() },
+                    token0: AssetInfo::NativeToken {
+                        denom: "uatom".into(),
+                    },
+                    token1: AssetInfo::NativeToken {
+                        denom: "uusd".into(),
+                    },
                     tick_spacing: 60,
                     fee_config,
                     hook: None,
@@ -301,7 +315,10 @@ mod tests {
 
         let start = env.block.time.seconds();
         ORACLE
-            .save(deps.as_mut().storage, &oracle(1_000_000_000_000, start, 3_000))
+            .save(
+                deps.as_mut().storage,
+                &oracle(1_000_000_000_000, start, 3_000),
+            )
             .unwrap();
 
         // Advance a block and move price away from the EMA.
@@ -311,15 +328,25 @@ mod tests {
         // Read-only quote must not touch storage.
         let before = ORACLE.load(deps.as_ref().storage).unwrap();
         let quoted = simulate_fee(deps.as_ref().storage, &env, price).unwrap();
-        assert_eq!(before, ORACLE.load(deps.as_ref().storage).unwrap(), "simulate_fee mutated the oracle");
+        assert_eq!(
+            before,
+            ORACLE.load(deps.as_ref().storage).unwrap(),
+            "simulate_fee mutated the oracle"
+        );
 
         // Execution in the same block must charge exactly the quoted fee.
         let executed = update_oracle_and_fee(deps.as_mut().storage, &env, price).unwrap();
         assert_eq!(quoted, executed, "quote != in-block execution fee");
-        assert_ne!(quoted, 3_000, "price moved, so the fee must differ from the stale last_fee");
+        assert_ne!(
+            quoted, 3_000,
+            "price moved, so the fee must differ from the stale last_fee"
+        );
 
         // Execution persisted the update; a same-block re-quote returns the committed fee.
-        assert_eq!(simulate_fee(deps.as_ref().storage, &env, price).unwrap(), executed);
+        assert_eq!(
+            simulate_fee(deps.as_ref().storage, &env, price).unwrap(),
+            executed
+        );
     }
 
     /// The load-bearing security invariant: for the most adversarial in-range

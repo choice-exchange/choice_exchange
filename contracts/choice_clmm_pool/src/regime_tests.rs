@@ -961,6 +961,26 @@ mod regime_tests {
     ) {
         let (mut deps, env, lp) = setup(10, 3000, 0);
         let pool = env.contract.address.clone();
+        // `execute_flash` live-queries the factory's flash-borrower allowlist;
+        // answer authorized so this test exercises the loan path.
+        deps.querier.update_wasm(|q| {
+            use cosmwasm_std::{ContractResult as CR, SystemResult as SR};
+            match q {
+                cosmwasm_std::WasmQuery::Smart { msg, .. } => {
+                    use choice_clmm_common::factory::QueryMsg as FQ;
+                    match cosmwasm_std::from_json::<FQ>(msg) {
+                        Ok(FQ::IsFlashBorrower { .. }) => {
+                            let resp = choice_clmm_common::factory::IsFlashBorrowerResponse {
+                                authorized: true,
+                            };
+                            SR::Ok(CR::Ok(cosmwasm_std::to_json_binary(&resp).unwrap()))
+                        }
+                        _ => SR::Ok(CR::Ok(Default::default())),
+                    }
+                }
+                _ => SR::Ok(CR::Ok(Default::default())),
+            }
+        });
         execute(
             deps.as_mut(),
             env.clone(),

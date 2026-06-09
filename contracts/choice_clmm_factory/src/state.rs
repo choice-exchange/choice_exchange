@@ -59,3 +59,15 @@ pub struct PoolCreationAuth {
 // Key: (Token0, Token1, FeeTier) -> reservation
 pub const POOL_CREATION_AUTH: Map<(&str, &str, u32), PoolCreationAuth> =
     Map::new("pool_creation_auth");
+
+/// Allowlist of contracts permitted to call a pool's `Flash {}`. Pools live-query
+/// this map during flash (see `choice_clmm_pool::actions::flash`), so it is the
+/// single source of truth across every pool the factory created. Presence ==
+/// authorized. Mutated by the factory `owner` via `AuthorizeFlashBorrower` /
+/// `RevokeFlashBorrower`. Empty == deny-all unless `FLASH_UNRESTRICTED` is set.
+pub const FLASH_BORROWERS: Map<&Addr, ()> = Map::new("flash_borrowers");
+
+/// Escape hatch: when `true`, pools skip the `FLASH_BORROWERS` gate and `Flash {}`
+/// is permissionless again. Set by the factory `owner` via `SetFlashUnrestricted`.
+/// Absent == `false` (gate enforced).
+pub const FLASH_UNRESTRICTED: Item<bool> = Item::new("flash_unrestricted");

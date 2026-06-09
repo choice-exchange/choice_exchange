@@ -1101,6 +1101,18 @@ fn test_flash_loan_borrower_roundtrip_and_underpay_revert() {
     let amount0 = Uint128::new(2_000_000); // ATOM (token0)
     let amount1 = Uint128::new(1_000_000); // USDT (token1)
 
+    // `Flash {}` is gated on the factory's flash-borrower allowlist; authorize the
+    // caller (the factory owner = env.admin here).
+    wasm.execute(
+        &env.factory_addr,
+        &FactoryExecuteMsg::AuthorizeFlashBorrower {
+            borrower: env.admin.address(),
+        },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+
     let honest_plan = flash_borrower_mock::RepayPlan {
         denom0: ATOM.to_string(),
         denom1: USDT.to_string(),
@@ -1239,6 +1251,18 @@ fn test_flash_native_repay_via_submessage() {
 
     let amount0 = Uint128::new(2_000_000); // ATOM (token0)
     let amount1 = Uint128::new(1_000_000); // USDT (token1)
+
+    // `Flash {}` is gated on the factory's flash-borrower allowlist; authorize the
+    // caller (the factory owner = env.admin here).
+    wasm.execute(
+        &env.factory_addr,
+        &FactoryExecuteMsg::AuthorizeFlashBorrower {
+            borrower: env.admin.address(),
+        },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
 
     let plan = flash_borrower_mock::RepayPlan {
         denom0: ATOM.to_string(),

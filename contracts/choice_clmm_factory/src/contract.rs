@@ -7,11 +7,14 @@ use cosmwasm_std::{
 use cw_storage_plus::Bound;
 use sha2::{Digest, Sha256};
 
-use crate::state::{Config, PoolCreationAuth, CONFIG, FEE_TIERS, POOLS, POOL_CREATION_AUTH};
+use crate::state::{
+    Config, PoolCreationAuth, CONFIG, FEE_TIERS, FLASH_BORROWERS, FLASH_UNRESTRICTED, POOLS,
+    POOL_CREATION_AUTH,
+};
 
 use choice_clmm_common::factory::{
-    ConfigResponse, CreationAuthResponse, ExecuteMsg, FeeTierEntry, InstantiateMsg, MigrateMsg,
-    PoolInfo, QueryMsg,
+    ConfigResponse, CreationAuthResponse, ExecuteMsg, FeeTierEntry, FlashBorrowersResponse,
+    InstantiateMsg, IsFlashBorrowerResponse, MigrateMsg, PoolInfo, QueryMsg,
 };
 use choice_clmm_common::pool::{FeeConfig, InstantiateMsg as PoolInstantiateMsg};
 use choice_clmm_common::types::AssetInfo;
@@ -137,7 +140,71 @@ pub fn execute(
             execute_propose_pool_code_id(deps, info, code_id)
         }
         ExecuteMsg::AcceptPoolCodeId {} => execute_accept_pool_code_id(deps, info),
+        ExecuteMsg::AuthorizeFlashBorrower { borrower } => {
+            execute_authorize_flash_borrower(deps, info, borrower)
+        }
+        ExecuteMsg::RevokeFlashBorrower { borrower } => {
+            execute_revoke_flash_borrower(deps, info, borrower)
+        }
+        ExecuteMsg::SetFlashUnrestricted { open } => {
+            execute_set_flash_unrestricted(deps, info, open)
+        }
     }
+}
+
+/// Owner-only: add `borrower` to the flash-loan allowlist that every pool created
+/// by this factory live-queries during `Flash {}`.
+fn execute_authorize_flash_borrower(
+    deps: DepsMut,
+    info: MessageInfo,
+    borrower: String,
+) -> Result<Response, StdError> {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+    let borrower_addr = deps.api.addr_validate(&borrower)?;
+    FLASH_BORROWERS.save(deps.storage, &borrower_addr, &())?;
+
+    Ok(Response::new()
+        .add_attribute("action", "authorize_flash_borrower")
+        .add_attribute("borrower", borrower_addr.to_string()))
+}
+
+/// Owner-only: remove `borrower` from the flash-loan allowlist.
+fn execute_revoke_flash_borrower(
+    deps: DepsMut,
+    info: MessageInfo,
+    borrower: String,
+) -> Result<Response, StdError> {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+    let borrower_addr = deps.api.addr_validate(&borrower)?;
+    FLASH_BORROWERS.remove(deps.storage, &borrower_addr);
+
+    Ok(Response::new()
+        .add_attribute("action", "revoke_flash_borrower")
+        .add_attribute("borrower", borrower_addr.to_string()))
+}
+
+/// Owner-only: toggle the pool flash-borrower gate. When `open` is true, every
+/// pool's `Flash {}` is permissionless.
+fn execute_set_flash_unrestricted(
+    deps: DepsMut,
+    info: MessageInfo,
+    open: bool,
+) -> Result<Response, StdError> {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
+        return Err(StdError::generic_err("Unauthorized"));
+    }
+    FLASH_UNRESTRICTED.save(deps.storage, &open)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "set_flash_unrestricted")
+        .add_attribute("open", open.to_string()))
 }
 
 /// `inj1qqqq…e2hm49` — the 20-zero-byte burn address. Proposing it as the new
@@ -633,6 +700,36 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                     expires_at: a.expires_at,
                 });
             to_json_binary(&auth)
+        }
+        QueryMsg::IsFlashBorrower { borrower } => {
+            let borrower_addr = deps.api.addr_validate(&borrower)?;
+            let unrestricted = FLASH_UNRESTRICTED.may_load(deps.storage)?.unwrap_or(false);
+            let authorized = unrestricted || FLASH_BORROWERS.has(deps.storage, &borrower_addr);
+            to_json_binary(&IsFlashBorrowerResponse { authorized })
+        }
+        QueryMsg::FlashBorrowers { start_after, limit } => {
+            let limit = limit.unwrap_or(30).min(100) as usize;
+            let start = start_after
+                .map(|addr| deps.api.addr_validate(&addr))
+                .transpose()?;
+            let borrowers: Vec<String> = FLASH_BORROWERS
+                .range(
+                    deps.storage,
+                    start.as_ref().map(Bound::exclusive),
+                    None,
+                    Order::Ascending,
+                )
+                .take(limit)
+                .map(|item| {
+                    let (borrower_addr, _) = item?;
+                    Ok(borrower_addr.to_string())
+                })
+                .collect::<StdResult<_>>()?;
+            let unrestricted = FLASH_UNRESTRICTED.may_load(deps.storage)?.unwrap_or(false);
+            to_json_binary(&FlashBorrowersResponse {
+                borrowers,
+                unrestricted,
+            })
         }
     }
 }

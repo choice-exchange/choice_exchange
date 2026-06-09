@@ -620,6 +620,7 @@ dependencies = [
  "cw-storage-plus 2.0.0",
  "cw2 2.0.0",
  "cw20",
+ "ed25519-zebra 4.1.0",
  "schemars 0.8.22",
  "serde",
  "sha2 0.10.9",

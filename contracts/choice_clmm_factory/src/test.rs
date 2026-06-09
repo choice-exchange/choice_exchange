@@ -2,7 +2,10 @@
 mod tests {
     use crate::contract::{execute, instantiate, query, reply};
     use crate::state::{CONFIG, FEE_TIERS, POOLS, POOL_CREATION_AUTH};
-    use choice_clmm_common::factory::{CreationAuthResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+    use choice_clmm_common::factory::{
+        CreationAuthResponse, ExecuteMsg, FlashBorrowersResponse, InstantiateMsg,
+        IsFlashBorrowerResponse, QueryMsg,
+    };
     use choice_clmm_common::pool::InstantiateMsg as PoolInstantiateMsg;
     use choice_clmm_common::types::AssetInfo;
     use cosmwasm_std::testing::{
@@ -905,5 +908,123 @@ mod tests {
         };
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
         assert_eq!(res.messages.len(), 1);
+    }
+
+    fn is_flash_borrower(
+        deps: &OwnedDeps<MockStorage, MockApi, MockQuerier>,
+        borrower: &Addr,
+    ) -> bool {
+        let bin = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::IsFlashBorrower {
+                borrower: borrower.to_string(),
+            },
+        )
+        .unwrap();
+        from_json::<IsFlashBorrowerResponse>(&bin)
+            .unwrap()
+            .authorized
+    }
+
+    #[test]
+    fn test_flash_borrower_allowlist_owner_gated() {
+        let mut deps = setup_factory();
+        let owner = deps.api.addr_make("creator");
+        let borrower = deps.api.addr_make("aggregator");
+        let stranger = deps.api.addr_make("stranger");
+
+        // Default: deny-all.
+        assert!(!is_flash_borrower(&deps, &borrower));
+
+        // Non-owner cannot authorize.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&stranger, &[]),
+            ExecuteMsg::AuthorizeFlashBorrower {
+                borrower: borrower.to_string(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"), "{}", err);
+
+        // Owner authorizes → allowlisted.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::AuthorizeFlashBorrower {
+                borrower: borrower.to_string(),
+            },
+        )
+        .unwrap();
+        assert!(is_flash_borrower(&deps, &borrower));
+        assert!(!is_flash_borrower(&deps, &stranger));
+
+        // Owner revokes → denied again.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::RevokeFlashBorrower {
+                borrower: borrower.to_string(),
+            },
+        )
+        .unwrap();
+        assert!(!is_flash_borrower(&deps, &borrower));
+    }
+
+    #[test]
+    fn test_flash_unrestricted_opens_gate_for_all() {
+        let mut deps = setup_factory();
+        let owner = deps.api.addr_make("creator");
+        let anyone = deps.api.addr_make("anyone");
+
+        assert!(!is_flash_borrower(&deps, &anyone));
+
+        // Non-owner cannot toggle.
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&anyone, &[]),
+            ExecuteMsg::SetFlashUnrestricted { open: true },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"), "{}", err);
+
+        // Owner opens flash globally → anyone is authorized without being listed.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::SetFlashUnrestricted { open: true },
+        )
+        .unwrap();
+        assert!(is_flash_borrower(&deps, &anyone));
+
+        // The listing query reports the flag and (still-empty) explicit set.
+        let bin = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::FlashBorrowers {
+                start_after: None,
+                limit: None,
+            },
+        )
+        .unwrap();
+        let resp = from_json::<FlashBorrowersResponse>(&bin).unwrap();
+        assert!(resp.unrestricted);
+        assert!(resp.borrowers.is_empty());
+
+        // Closing it again restores deny-all.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&owner, &[]),
+            ExecuteMsg::SetFlashUnrestricted { open: false },
+        )
+        .unwrap();
+        assert!(!is_flash_borrower(&deps, &anyone));
     }
 }

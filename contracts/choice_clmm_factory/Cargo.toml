@@ -32,3 +32,12 @@ sha2 = "0.10.9"
 
 choice-clmm-common = { workspace = true }
 choice-clmm-math   = { workspace = true }
+
+[dev-dependencies]
+# Native (host-target) test builds only. ed25519-zebra 4.1.0 gates its `batch`
+# module behind the `alloc` feature, which `default`/`std` no longer imply;
+# cosmwasm-crypto 2.2.2 needs it, and workspace feature-unification otherwise
+# resolves it without `alloc` -> `cargo test -p choice_clmm_factory` fails to
+# compile. Dev-dep only -> the wasm cdylib build is untouched. Same workaround
+# family as choice_clmm_pool / choice_clmm_math. Do NOT remove.
+ed25519-zebra = { version = "4.1.0", features = ["alloc"] }

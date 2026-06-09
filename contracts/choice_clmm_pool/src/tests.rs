@@ -2324,17 +2324,29 @@ mod tests {
         let factory = deps.api.addr_make("factory");
         let owner = deps.api.addr_make("factory_owner").to_string();
 
-        // Wire the querier so `assert_factory_owner` resolves the owner.
+        // Wire the querier so `assert_factory_owner` resolves the owner and
+        // `assert_flash_borrower` sees every caller as authorized (the default
+        // for these tests; the gate itself is exercised separately).
         let owner_for_querier = owner.clone();
         deps.querier.update_wasm(move |q| match q {
             WasmQuery::Smart { msg, .. } => {
-                // Only the factory GetConfig query is expected here.
-                let _ = msg;
-                let resp = choice_clmm_common::factory::ConfigResponse {
-                    owner: owner_for_querier.clone(),
-                    pool_code_id: 1,
-                };
-                SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                use choice_clmm_common::factory::QueryMsg as FQ;
+                match cosmwasm_std::from_json::<FQ>(msg) {
+                    Ok(FQ::IsFlashBorrower { .. }) => {
+                        let resp = choice_clmm_common::factory::IsFlashBorrowerResponse {
+                            authorized: true,
+                        };
+                        SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                    }
+                    // GetConfig (and any other factory query) → resolve the owner.
+                    _ => {
+                        let resp = choice_clmm_common::factory::ConfigResponse {
+                            owner: owner_for_querier.clone(),
+                            pool_code_id: 1,
+                        };
+                        SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                    }
+                }
             }
             _ => SystemResult::Ok(ContractResult::Ok(Default::default())),
         });
@@ -2707,6 +2719,47 @@ mod tests {
     }
 
     #[test]
+    fn flash_rejects_unauthorized_borrower() {
+        // Same pool, but the factory reports the caller is NOT an allowlisted
+        // flash borrower → the pool must reject before lending or locking.
+        let (mut deps, _owner) = setup_protocol_pool();
+        set_pool_balance(&mut deps, 5_000_000, 5_000_000);
+        // Repoint the querier so `IsFlashBorrower` answers `false`.
+        deps.querier.update_wasm(|q| match q {
+            WasmQuery::Smart { msg, .. } => {
+                use choice_clmm_common::factory::QueryMsg as FQ;
+                match cosmwasm_std::from_json::<FQ>(msg) {
+                    Ok(FQ::IsFlashBorrower { .. }) => {
+                        let resp = choice_clmm_common::factory::IsFlashBorrowerResponse {
+                            authorized: false,
+                        };
+                        SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                    }
+                    _ => SystemResult::Ok(ContractResult::Ok(Default::default())),
+                }
+            }
+            _ => SystemResult::Ok(ContractResult::Ok(Default::default())),
+        });
+
+        let borrower = deps.api.addr_make("borrower");
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&borrower, &[]),
+            ExecuteMsg::Flash {
+                recipient: borrower.to_string(),
+                amount0: Uint128::new(1_000_000),
+                amount1: Uint128::zero(),
+                data: Binary::default(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::Unauthorized {}));
+        // No lock was taken — the gate runs before any state change.
+        assert!(!is_locked(&deps.storage));
+    }
+
+    #[test]
     fn flash_blocks_reentrant_mutator() {
         let (mut deps, _owner) = setup_protocol_pool();
         set_pool_balance(&mut deps, 5_000_000, 5_000_000);
@@ -2921,6 +2974,24 @@ mod tests {
             initial_sqrt_price: get_price_one(),
         };
         instantiate(deps.as_mut(), mock_env(), message_info(&factory, &[]), msg).unwrap();
+
+        // Authorize the borrower so the flash gate passes and we actually reach
+        // the no-liquidity check this test targets.
+        deps.querier.update_wasm(|q| match q {
+            WasmQuery::Smart { msg, .. } => {
+                use choice_clmm_common::factory::QueryMsg as FQ;
+                match cosmwasm_std::from_json::<FQ>(msg) {
+                    Ok(FQ::IsFlashBorrower { .. }) => {
+                        let resp = choice_clmm_common::factory::IsFlashBorrowerResponse {
+                            authorized: true,
+                        };
+                        SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                    }
+                    _ => SystemResult::Ok(ContractResult::Ok(Default::default())),
+                }
+            }
+            _ => SystemResult::Ok(ContractResult::Ok(Default::default())),
+        });
 
         set_pool_balance(&mut deps, 5_000_000, 5_000_000);
         let borrower = deps.api.addr_make("borrower");

@@ -13,6 +13,7 @@ use crate::state::{
     PROTOCOL_FEES_0, PROTOCOL_FEES_1, PROTOCOL_FEE_CONFIG, REENTRANCY_LOCK,
 };
 
+use choice_clmm_common::factory::{IsFlashBorrowerResponse, QueryMsg as FactoryQueryMsg};
 use choice_clmm_common::pool::FlashCallbackMsg;
 use choice_clmm_common::types::AssetInfo;
 use choice_clmm_math::full_math::{mul_div, mul_div_round_up};
@@ -20,6 +21,29 @@ use choice_clmm_math::swap_math::FEE_DENOMINATOR;
 
 /// Reply id for the flash-loan borrower callback.
 pub const REPLY_FLASH: u64 = 100;
+
+/// Assert the flash caller is on the factory's flash-borrower allowlist. The
+/// allowlist lives centrally on the factory (single source of truth across all
+/// pools) and is queried live — exactly like `assert_factory_owner` — so an
+/// authorize/revoke on the factory takes effect immediately here. The factory
+/// answers `true` when `info.sender` is allowlisted OR when flash is globally
+/// unrestricted (its escape-hatch toggle).
+fn assert_flash_borrower(
+    deps: &DepsMut,
+    config: &crate::state::PoolConfig,
+    info: &MessageInfo,
+) -> Result<(), ContractError> {
+    let resp: IsFlashBorrowerResponse = deps.querier.query_wasm_smart(
+        config.factory.clone(),
+        &FactoryQueryMsg::IsFlashBorrower {
+            borrower: info.sender.to_string(),
+        },
+    )?;
+    if !resp.authorized {
+        return Err(ContractError::Unauthorized {});
+    }
+    Ok(())
+}
 
 /// Flash fee for `amount` at `fee_pips`, rounded UP (in the pool's favor).
 fn flash_fee(amount: Uint128, fee_pips: u32) -> Result<Uint128, ContractError> {
@@ -59,7 +83,7 @@ fn query_pool_balance(
 pub fn execute_flash(
     deps: DepsMut,
     env: Env,
-    _info: MessageInfo,
+    info: MessageInfo,
     recipient: String,
     amount0: Uint128,
     amount1: Uint128,
@@ -71,6 +95,12 @@ pub fn execute_flash(
 
     let recipient = deps.api.addr_validate(&recipient)?;
     let config = POOL_CONFIG.load(deps.storage)?;
+
+    // Only allowlisted borrowers (per the factory's central allowlist) may
+    // flash-borrow. Gates the direct-pool path so the aggregator is the sole
+    // authorized entry unless the owner opens flash globally.
+    assert_flash_borrower(&deps, &config, &info)?;
+
     let slot0 = POOL_STATE.load(deps.storage)?;
 
     // Require active in-range liquidity, matching Uniswap v3's `require(L > 0)`.
