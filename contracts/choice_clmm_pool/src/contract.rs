@@ -19,7 +19,7 @@ use crate::actions::swap::{
     execute_swap, execute_swap_exact_input, execute_swap_exact_input_cw20,
     execute_swap_exact_output, query_quote, query_quote_exact_output,
 };
-use crate::core::oracle::initialize_oracle;
+use crate::core::oracle::{initialize_oracle, simulate_fee};
 use crate::core::ticks::get_fee_growth_inside as compute_fee_growth_inside;
 use crate::error::ContractError;
 use crate::state::{
@@ -522,6 +522,11 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::GetProtocolFeeConfig {} => {
             to_json_binary(&PROTOCOL_FEE_CONFIG.load(deps.storage)?)
+        }
+        QueryMsg::GetDynamicFee {} => {
+            let state = POOL_STATE.load(deps.storage)?;
+            let fee_ppm = simulate_fee(deps.storage, &env, state.sqrt_price)?;
+            to_json_binary(&choice_clmm_common::pool::DynamicFeeResponse { fee_ppm })
         }
     }
 }

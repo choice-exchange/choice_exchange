@@ -20,6 +20,80 @@ pub fn initialize_oracle(storage: &mut dyn Storage, time: u64, price: Uint256) -
     ORACLE.save(storage, &data)
 }
 
+/// Pure fee computation shared by the write path (`update_oracle_and_fee`) and the read-only
+/// quote path (`simulate_fee`). Given the current oracle state, config, block time, and price,
+/// returns `(fee_ppm, next_oracle)` where `next_oracle` is the state the write path persists.
+///
+/// Both paths going through one function is the load-bearing property: it guarantees a `Quote`
+/// returns exactly what a swap landing in the same block will charge. `get_dynamic_fee` (the old
+/// read path) only returned the stored `last_fee_ppm` and ignored `current_price` entirely, so
+/// quotes systematically diverged from execution whenever price had moved since the last swap.
+fn compute_fee(
+    fee_config: &choice_clmm_common::pool::FeeConfig,
+    oracle: &OracleData,
+    now: u64,
+    current_price: Uint256,
+) -> StdResult<(u32, OracleData)> {
+    let delta = now.saturating_sub(oracle.last_block_time);
+
+    // Within the same block, the oracle state (ema + last_fee) is treated as
+    // immutable — multiple swaps within one block all pay the SAME fee that
+    // was committed by whichever swap ran first. This prevents attacker
+    // swaps from re-deriving the fee mid-block to dodge the rate limit.
+    if delta == 0 {
+        return Ok((oracle.last_fee_ppm, oracle.clone()));
+    }
+
+    let mut next = oracle.clone();
+
+    // --- EMA update ---
+    //
+    //   EMA_new = (EMA_old * (halflife - delta) + price * delta) / halflife,
+    //   collapsing to `price` when `delta >= halflife`.
+    let halflife = fee_config.ema_halflife_seconds.max(1);
+    if delta >= halflife {
+        next.price_ema_x96 = current_price;
+    } else {
+        let weight_old = Uint256::from(halflife - delta);
+        let weight_new = Uint256::from(delta);
+        let total_weight = Uint256::from(halflife);
+        let term1 = next
+            .price_ema_x96
+            .checked_mul(weight_old)
+            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle EMA overflow"))?;
+        let term2 = current_price
+            .checked_mul(weight_new)
+            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle price overflow"))?;
+        next.price_ema_x96 = term1
+            .checked_add(term2)
+            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle EMA blend overflow"))?
+            .checked_div(total_weight)
+            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle div zero"))?;
+    }
+
+    // --- Raw dynamic fee from (updated) EMA ---
+    let raw_fee = compute_raw_dynamic_fee(fee_config, next.price_ema_x96, current_price)?;
+
+    // --- Rate-limit the fee change per elapsed second ---
+    let prev_fee = oracle.last_fee_ppm;
+    let max_change_ppm = fee_config
+        .max_fee_change_per_second_ppm
+        .saturating_mul(delta.min(u32::MAX as u64) as u32);
+    let clamped = if max_change_ppm == 0 {
+        // Rate-limiting disabled — legacy behavior.
+        raw_fee
+    } else if raw_fee > prev_fee {
+        prev_fee.saturating_add(max_change_ppm).min(raw_fee)
+    } else {
+        prev_fee.saturating_sub(max_change_ppm).max(raw_fee)
+    };
+
+    next.last_fee_ppm = clamped;
+    next.last_block_time = now;
+
+    Ok((clamped, next))
+}
+
 /// Blend the stored EMA toward the latest price, compute the raw volatility-
 /// driven fee, clamp it to the per-block rate limit, and persist both.
 ///
@@ -34,67 +108,31 @@ pub fn update_oracle_and_fee(
     current_price: Uint256,
 ) -> StdResult<u32> {
     let config = POOL_CONFIG.load(storage)?;
-    let mut oracle = ORACLE.load(storage)?;
-
+    let oracle = ORACLE.load(storage)?;
     let now = env.block.time.seconds();
-    let delta = now.saturating_sub(oracle.last_block_time);
 
-    // Within the same block, the oracle state (ema + last_fee) is treated as
-    // immutable — multiple swaps within one block all pay the SAME fee that
-    // was committed by whichever swap ran first. This prevents attacker
-    // swaps from re-deriving the fee mid-block to dodge the rate limit.
-    if delta == 0 {
-        return Ok(oracle.last_fee_ppm);
+    let (fee, next) = compute_fee(&config.fee_config, &oracle, now, current_price)?;
+
+    // delta == 0 leaves the oracle untouched (next == oracle); skip the redundant write to
+    // preserve the prior same-block no-op behavior.
+    if next.last_block_time != oracle.last_block_time {
+        ORACLE.save(storage, &next)?;
     }
 
-    // --- EMA update ---
-    //
-    //   EMA_new = (EMA_old * (halflife - delta) + price * delta) / halflife,
-    //   collapsing to `price` when `delta >= halflife`.
-    let halflife = config.fee_config.ema_halflife_seconds.max(1);
-    if delta >= halflife {
-        oracle.price_ema_x96 = current_price;
-    } else {
-        let weight_old = Uint256::from(halflife - delta);
-        let weight_new = Uint256::from(delta);
-        let total_weight = Uint256::from(halflife);
-        let term1 = oracle
-            .price_ema_x96
-            .checked_mul(weight_old)
-            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle EMA overflow"))?;
-        let term2 = current_price
-            .checked_mul(weight_new)
-            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle price overflow"))?;
-        oracle.price_ema_x96 = term1
-            .checked_add(term2)
-            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle EMA blend overflow"))?
-            .checked_div(total_weight)
-            .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle div zero"))?;
-    }
+    Ok(fee)
+}
 
-    // --- Raw dynamic fee from (updated) EMA ---
-    let raw_fee = compute_raw_dynamic_fee(&config.fee_config, oracle.price_ema_x96, current_price)?;
+/// Read-only twin of `update_oracle_and_fee`: returns the fee a swap landing in THIS block
+/// would be charged, WITHOUT persisting the oracle update. `Quote` / `QuoteExactOutput` use this
+/// so a quote matches what the swap will actually charge in the same block (same `env.block.time`
+/// and starting price). Cross-block drift is irreducible — it depends on when the swap lands.
+pub fn simulate_fee(storage: &dyn Storage, env: &Env, current_price: Uint256) -> StdResult<u32> {
+    let config = POOL_CONFIG.load(storage)?;
+    let oracle = ORACLE.load(storage)?;
+    let now = env.block.time.seconds();
 
-    // --- Rate-limit the fee change per elapsed second ---
-    let prev_fee = oracle.last_fee_ppm;
-    let max_change_ppm = config
-        .fee_config
-        .max_fee_change_per_second_ppm
-        .saturating_mul(delta.min(u32::MAX as u64) as u32);
-    let clamped = if max_change_ppm == 0 {
-        // Rate-limiting disabled — legacy behavior.
-        raw_fee
-    } else if raw_fee > prev_fee {
-        prev_fee.saturating_add(max_change_ppm).min(raw_fee)
-    } else {
-        prev_fee.saturating_sub(max_change_ppm).max(raw_fee)
-    };
-
-    oracle.last_fee_ppm = clamped;
-    oracle.last_block_time = now;
-    ORACLE.save(storage, &oracle)?;
-
-    Ok(clamped)
+    let (fee, _next) = compute_fee(&config.fee_config, &oracle, now, current_price)?;
+    Ok(fee)
 }
 
 /// Read-only fee accessor for queries / quotes.
@@ -181,6 +219,107 @@ mod tests {
             ema_halflife_seconds: 600,
             max_fee_change_per_second_ppm: 0,
         }
+    }
+
+    fn oracle(ema: u128, last_time: u64, last_fee: u32) -> OracleData {
+        OracleData {
+            price_ema_x96: Uint256::from(ema),
+            last_block_time: last_time,
+            last_fee_ppm: last_fee,
+        }
+    }
+
+    /// Within the same block (delta == 0) the fee is frozen at the committed value and the
+    /// oracle is returned unchanged — multiple swaps in one block pay the same fee.
+    #[test]
+    fn compute_fee_same_block_is_frozen() {
+        let config = cfg(3_000, 30_000, 1_000_000);
+        let o = oracle(1_000_000_000_000, 100, 7_777);
+        let (fee, next) = compute_fee(&config, &o, 100, Uint256::from(2_000_000_000_000u128)).unwrap();
+        assert_eq!(fee, 7_777, "same-block fee must be the frozen last_fee_ppm");
+        assert_eq!(next, o, "same-block oracle must be unchanged");
+    }
+
+    /// After a gap with price diverged from the EMA, the recomputed fee rises above the stale
+    /// `last_fee_ppm` — this is exactly what the old `get_dynamic_fee` quote path missed.
+    #[test]
+    fn compute_fee_reacts_to_price_divergence() {
+        // No rate limit, so the raw volatility fee comes through directly.
+        let config = cfg(3_000, 30_000, 1_000_000);
+        let o = oracle(1_000_000_000_000, 100, 3_000);
+        // 1s later, price +0.2% vs the EMA.
+        let (fee, next) = compute_fee(&config, &o, 101, Uint256::from(1_002_000_000_000u128)).unwrap();
+        assert!(fee > 3_000, "diverged price must raise the fee above last_fee, got {}", fee);
+        assert_eq!(next.last_block_time, 101);
+        assert_eq!(next.last_fee_ppm, fee);
+    }
+
+    /// After a gap >= halflife the EMA snaps to the current price, so the fee naturally returns
+    /// to base — proving the quote (simulate) and execution agree on the decay, with no need for
+    /// the old quote-only 1-hour reset.
+    #[test]
+    fn compute_fee_returns_to_base_after_halflife() {
+        let config = cfg(3_000, 30_000, 1_000_000); // halflife 600
+        let o = oracle(1_000_000_000_000, 100, 25_000);
+        let (fee, _next) = compute_fee(&config, &o, 100 + 600, Uint256::from(5_000_000_000_000u128)).unwrap();
+        assert_eq!(fee, 3_000, "after >= halflife the EMA snaps to price → base fee");
+    }
+
+    /// The load-bearing fix: a `Quote` (simulate_fee) returns exactly what a swap landing in the
+    /// same block charges (update_oracle_and_fee), and the quote does NOT mutate the oracle.
+    #[test]
+    fn quote_matches_in_block_execution() {
+        use crate::state::PoolConfig;
+        use choice_clmm_common::types::AssetInfo;
+        use cosmwasm_std::testing::{mock_dependencies, mock_env};
+        use cosmwasm_std::Addr;
+
+        let mut deps = mock_dependencies();
+        let mut env = mock_env();
+
+        let fee_config = FeeConfig {
+            base_fee_ppm: 3_000,
+            max_fee_ppm: 30_000,
+            volatility_multiplier: 1_000_000,
+            ema_halflife_seconds: 600,
+            max_fee_change_per_second_ppm: 100,
+        };
+        POOL_CONFIG
+            .save(
+                deps.as_mut().storage,
+                &PoolConfig {
+                    factory: Addr::unchecked("factory"),
+                    token0: AssetInfo::NativeToken { denom: "uatom".into() },
+                    token1: AssetInfo::NativeToken { denom: "uusd".into() },
+                    tick_spacing: 60,
+                    fee_config,
+                    hook: None,
+                    hook_permissions: 0,
+                },
+            )
+            .unwrap();
+
+        let start = env.block.time.seconds();
+        ORACLE
+            .save(deps.as_mut().storage, &oracle(1_000_000_000_000, start, 3_000))
+            .unwrap();
+
+        // Advance a block and move price away from the EMA.
+        env.block.time = env.block.time.plus_seconds(60);
+        let price = Uint256::from(1_002_000_000_000u128);
+
+        // Read-only quote must not touch storage.
+        let before = ORACLE.load(deps.as_ref().storage).unwrap();
+        let quoted = simulate_fee(deps.as_ref().storage, &env, price).unwrap();
+        assert_eq!(before, ORACLE.load(deps.as_ref().storage).unwrap(), "simulate_fee mutated the oracle");
+
+        // Execution in the same block must charge exactly the quoted fee.
+        let executed = update_oracle_and_fee(deps.as_mut().storage, &env, price).unwrap();
+        assert_eq!(quoted, executed, "quote != in-block execution fee");
+        assert_ne!(quoted, 3_000, "price moved, so the fee must differ from the stale last_fee");
+
+        // Execution persisted the update; a same-block re-quote returns the committed fee.
+        assert_eq!(simulate_fee(deps.as_ref().storage, &env, price).unwrap(), executed);
     }
 
     /// The load-bearing security invariant: for the most adversarial in-range

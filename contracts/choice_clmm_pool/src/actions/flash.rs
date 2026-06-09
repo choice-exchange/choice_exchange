@@ -6,7 +6,7 @@ use cosmwasm_std::{
 };
 use cw20::{BalanceResponse, Cw20QueryMsg};
 
-use crate::core::oracle::get_dynamic_fee;
+use crate::core::oracle::simulate_fee;
 use crate::error::ContractError;
 use crate::state::{
     PendingFlash, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, PENDING_FLASH, POOL_CONFIG, POOL_STATE,
@@ -84,8 +84,13 @@ pub fn execute_flash(
         return Err(ContractError::FlashWithoutLiquidity {});
     }
 
-    // Flash does not move the price, so the read-only current fee is correct.
-    let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Charge the same dynamic fee a swap landing in THIS block would pay, via the
+    // read-only twin `simulate_fee` (the previous `get_dynamic_fee` returned the
+    // frozen last-swap `last_fee_ppm` — or `base_fee_ppm` once the oracle went
+    // stale — diverging from the swap fee whenever price moved since the last
+    // swap). Flash does not move the price, so we must NOT persist the oracle
+    // (`update_oracle_and_fee`); the read-only twin is exactly right.
+    let fee_pips = simulate_fee(deps.storage, &env, slot0.sqrt_price)?;
     let fee0 = flash_fee(amount0, fee_pips)?;
     let fee1 = flash_fee(amount1, fee_pips)?;
 

@@ -258,6 +258,13 @@ pub enum QueryMsg {
     GetProtocolFees {},
     /// Current protocol-fee carve rates and routing.
     GetProtocolFeeConfig {},
+    /// The live dynamic fee (ppm) a swap landing in THIS block would be charged,
+    /// computed from the current oracle state, current price, and block time —
+    /// the read-only twin of what `swap` charges. Unlike `GetSlot0` (which omits
+    /// the fee), this lets off-chain consumers (the router edge) refresh the fee
+    /// between swaps, since the on-chain fee keeps evolving with time/volatility
+    /// even when no swap emits a new `fee_ppm`.
+    GetDynamicFee {},
 }
 
 #[cw_serde]
@@ -297,4 +304,10 @@ pub struct QuoteResponse {
 pub struct FeeGrowthInsideResponse {
     pub fee_growth_inside_0_x128: Uint256,
     pub fee_growth_inside_1_x128: Uint256,
+}
+
+#[cw_serde]
+pub struct DynamicFeeResponse {
+    /// Live dynamic fee in parts-per-million (e.g. 3000 = 0.3%).
+    pub fee_ppm: u32,
 }

@@ -6,7 +6,7 @@ use cosmwasm_std::{
 };
 
 use crate::core::bitmap::next_initialized_tick_in_chunk;
-use crate::core::oracle::{get_dynamic_fee, update_oracle_and_fee};
+use crate::core::oracle::{simulate_fee, update_oracle_and_fee};
 use crate::error::ContractError;
 use crate::state::{
     PoolConfig, FEE_GROWTH_GLOBAL_0, FEE_GROWTH_GLOBAL_1, POOL_CONFIG, POOL_STATE, PROTOCOL_FEES_0,
@@ -826,8 +826,10 @@ pub fn query_quote(
         max_sqrt_ratio() - Uint256::one()
     };
 
-    // Use current oracle state without updating (read-only)
-    let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Quote the fee the SAME way a swap would compute it (read-only `simulate_fee`), so the
+    // quote matches what the swap will charge in this block instead of returning a frozen
+    // `last_fee_ppm` that ignores price movement since the prior swap.
+    let fee_pips = simulate_fee(deps.storage, &env, slot0.sqrt_price)?;
 
     // The protocol carve only redistributes the fee between LPs and the
     // protocol; it does not change `amount_out`/`amount_in`/`fee_amount`, so the
@@ -987,7 +989,8 @@ pub fn query_quote_exact_output(
         max_sqrt_ratio() - Uint256::one()
     };
 
-    let fee_pips = get_dynamic_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // See `query_quote`: use the read-only swap-fee simulation so quote == in-block execution.
+    let fee_pips = simulate_fee(deps.storage, &env, slot0.sqrt_price)?;
 
     let result = compute_swap(
         deps.storage,
