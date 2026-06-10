@@ -251,6 +251,7 @@ fn create_pool(
             token_b: b.asset(),
             fee: FEE,
             init_sqrt_price: Uint256::from(PRICE_ONE),
+            max_fee_multiple: None,
         },
         &[],
         admin,

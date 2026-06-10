@@ -70,6 +70,16 @@ pub fn instantiate(
             reason: "tick_spacing must be > 0".to_string(),
         });
     }
+    // Mirror the factory's MAX_TICK_SPACING guard rather than trusting it (the
+    // pool code id is public and this contract already re-validates
+    // `initial_sqrt_price` on the same defense-in-depth principle): above
+    // 16384 — Uniswap v3's maximum — `tick_spacing as i32` casts in the swap
+    // and mint paths can wrap negative and corrupt tick traversal.
+    if msg.tick_spacing > 16384 {
+        return Err(ContractError::InvalidConfig {
+            reason: "tick_spacing must be <= 16384".to_string(),
+        });
+    }
     if msg.fee_config.base_fee_ppm >= 1_000_000 {
         return Err(ContractError::InvalidConfig {
             reason: "base_fee_ppm must be < 1_000_000".to_string(),
@@ -85,9 +95,15 @@ pub fn instantiate(
             reason: "base_fee_ppm must be <= max_fee_ppm".to_string(),
         });
     }
-    if msg.fee_config.ema_halflife_seconds == 0 {
+    // A window, not just non-zero: a tiny halflife makes the EMA snap to the
+    // current price on (almost) every update, so measured volatility is ~0 and
+    // the dynamic fee silently degenerates to a constant base fee; a huge one
+    // freezes the EMA near the pool's initial price, charging `max_fee_ppm`
+    // forever once price drifts. One minute to one day brackets every sensible
+    // configuration (the factory uses 600).
+    if !(60..=86_400).contains(&msg.fee_config.ema_halflife_seconds) {
         return Err(ContractError::InvalidConfig {
-            reason: "ema_halflife_seconds must be > 0".to_string(),
+            reason: "ema_halflife_seconds must be in 60..=86400".to_string(),
         });
     }
     // `volatility_multiplier` is bounded above by 1_000_000: the raw dynamic fee
@@ -140,7 +156,7 @@ pub fn instantiate(
         token0: msg.token0,
         token1: msg.token1,
         tick_spacing: msg.tick_spacing,
-        fee_config: msg.fee_config,
+        fee_config: msg.fee_config.clone(),
         // Hook seam reserved but inert (no engine, no setter yet). See PoolConfig.
         hook: None,
         hook_permissions: 0,
@@ -170,12 +186,21 @@ pub fn instantiate(
         msg.initial_sqrt_price,
     )?;
 
-    // Protocol fees default to OFF. Treasury defaults to the factory owner (so a
-    // later `CollectProtocol` never strands funds at the factory contract); the
-    // owner can repoint it via `UpdateProtocolFeeConfig`. The factory's CONFIG
-    // is already committed at this point (instantiate runs inside the factory's
-    // CreatePool submessage), so the query is safe; fall back to the factory
-    // address if it is somehow unavailable.
+    // Protocol fees default ON, matching the Uniswap v3 deployment table:
+    // 1/4 of swap fees (25%) on the 0.01%/0.05% tiers, 1/6 (~16.7%) on the
+    // 0.30%/1.00% tiers. The factory owner can retune or disable per pool via
+    // `SetFeeProtocol` (valid divisors 0 | 4..=10). Treasury defaults to the
+    // factory owner (so a later `CollectProtocol` never strands funds at the
+    // factory contract); the owner can repoint it via
+    // `UpdateProtocolFeeConfig`. The factory's CONFIG is already committed at
+    // this point (instantiate runs inside the factory's CreatePool
+    // submessage), so the query is safe; fall back to the factory address if
+    // it is somehow unavailable.
+    let default_divisor: u8 = if msg.fee_config.base_fee_ppm <= 500 {
+        4
+    } else {
+        6
+    };
     let treasury = deps
         .querier
         .query_wasm_smart::<FactoryConfigResponse>(
@@ -189,8 +214,8 @@ pub fn instantiate(
     PROTOCOL_FEE_CONFIG.save(
         deps.storage,
         &ProtocolFeeConfig {
-            fee_protocol_0: 0,
-            fee_protocol_1: 0,
+            fee_protocol_0: default_divisor,
+            fee_protocol_1: default_divisor,
             treasury,
             burn_auction: None,
             burn_share_bps: 0,

@@ -47,13 +47,13 @@ pub struct PositionInfo {
 pub struct OracleData {
     /// Exponential Moving Average of sqrt_price, Q64.96.
     pub price_ema_x96: Uint256,
-    /// Wall-clock seconds of the last `update_oracle` call.
+    /// Wall-clock seconds of the last `update_oracle_and_fee` call.
     pub last_block_time: u64,
     /// Most recent dynamic fee (ppm), rate-limited across blocks. This is
-    /// the authoritative value `get_dynamic_fee` returns — the raw computed
-    /// fee is clamped to ±`max_fee_change_ppm * seconds_elapsed` from the
-    /// previous value, so a single manipulated-price swap cannot jerk the
-    /// fee to `max_fee_ppm` for the next block's victim.
+    /// the value same-block callers (swaps, quotes, flash) get back — the
+    /// raw computed fee is clamped to ±`max_fee_change_ppm * seconds_elapsed`
+    /// from the previous value, so a single manipulated-price swap cannot
+    /// jerk the fee to `max_fee_ppm` for the next block's victim.
     pub last_fee_ppm: u32,
 }
 

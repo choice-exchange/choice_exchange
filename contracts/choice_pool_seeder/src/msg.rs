@@ -151,6 +151,12 @@ pub enum PoolKind {
         /// the launch derived deterministically; any address that can later
         /// call `manager.Collect` works.
         position_recipient: String,
+        /// Dynamic-fee ceiling as a multiple of `fee_tier`, forwarded
+        /// verbatim to the CLMM factory's `CreatePool` (valid 2..=10 there).
+        /// `None` = factory default (2x). Graduation pools typically want a
+        /// high multiple (e.g. 10x) so the locked position's volatility fee
+        /// can actually price a post-graduation frenzy.
+        max_fee_multiple: Option<u32>,
     },
 }
 

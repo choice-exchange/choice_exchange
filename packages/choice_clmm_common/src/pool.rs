@@ -50,7 +50,15 @@ pub struct PoolState {
 pub struct FeeConfig {
     pub base_fee_ppm: u32, // e.g., 3000 = 0.3%
     pub max_fee_ppm: u32,  // e.g., 10000 = 1%
+    /// Scales the volatility component: `(|sqrt_p - ema| / ema) * multiplier`
+    /// ppm. NB the oracle works in SQRT-price space, so a P% price move is
+    /// only ~P/2% of relative deviation — calibrate accordingly (the factory
+    /// uses 100_000: a ~6% price deviation adds ~3000 ppm).
     pub volatility_multiplier: u32,
+    /// EMA blend window in seconds. Misnomer kept for compatibility: the
+    /// blend is LINEAR in the time since the last update, fully forgetting
+    /// the old EMA at `delta >= halflife` — i.e. a full-forget window, ~2x
+    /// faster than a true exponential half-life at mid deltas.
     pub ema_halflife_seconds: u64,
     /// Maximum fee change per second in ppm. The dynamic fee returned to the
     /// swap loop is clamped to `|new_fee - prev_fee| <= value * seconds_elapsed`
@@ -58,10 +66,10 @@ pub struct FeeConfig {
     /// `max_fee_ppm` for the next block's victim. A value of 0 disables the
     /// cap (legacy behavior).
     ///
-    /// Example: 100 ppm/sec = 600 ppm per 6-second block. To reach the 1%
-    /// max_fee from 0.3% base takes (10000 - 3000) / 100 = 70 seconds of
-    /// sustained volatility. Short enough to react to genuine volatility,
-    /// long enough to make single-block griefing unprofitable.
+    /// Example: 100 ppm/sec ≈ 65-90 ppm per ~0.65-0.9s Injective block. To
+    /// reach the 1% max_fee from 0.3% base takes (10000 - 3000) / 100 = 70
+    /// seconds of sustained volatility. Short enough to react to genuine
+    /// volatility, long enough to make single-block griefing unprofitable.
     pub max_fee_change_per_second_ppm: u32,
 }
 

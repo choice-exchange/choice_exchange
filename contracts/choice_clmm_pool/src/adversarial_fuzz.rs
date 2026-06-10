@@ -482,12 +482,16 @@ mod adversarial_fuzz {
                 token0: native(T0),
                 token1: native(T1),
                 tick_spacing: spacing as u32,
+                // Factory mainnet defaults for the 0.30% tier (multiplier
+                // 100_000, 100 ppm/s rate limit) — combined with the per-op
+                // time cadence in the runners, the fee genuinely swings
+                // 3000..6000 during fuzzing instead of sitting frozen at base.
                 fee_config: FeeConfig {
                     base_fee_ppm: 3000,
                     max_fee_ppm: 6000,
-                    volatility_multiplier: 100,
+                    volatility_multiplier: 100_000,
                     ema_halflife_seconds: 600,
-                    max_fee_change_per_second_ppm: 0,
+                    max_fee_change_per_second_ppm: 100,
                 },
                 initial_sqrt_price: price_one(),
             },
@@ -689,11 +693,16 @@ mod adversarial_fuzz {
         let owners: Vec<Addr> = (0..4)
             .map(|i| deps.api.addr_make(&format!("lp{i}")))
             .collect();
-        let env = mock_env();
+        let mut env = mock_env();
         let mut bal0 = 0u128;
         let mut bal1 = 0u128;
         let mut positions: BTreeMap<(usize, i32, i32), u128> = BTreeMap::new();
         for (i, op) in ops.iter().enumerate() {
+            // Same-second / next-second / mid-gap / past-halflife cadence. A
+            // pure function of the op index keeps prefix-shrink replay exact:
+            // op #i always runs at the same timestamp regardless of prefix
+            // length (the live runner below uses the identical cadence).
+            env.block.time = env.block.time.plus_seconds([0, 1, 30, 700][i % 4]);
             let ctx = format!("spacing{spacing}:op#{i}:{op:?}");
             apply_op(
                 &mut deps,
@@ -829,12 +838,15 @@ mod adversarial_fuzz {
                 let owners: Vec<Addr> = (0..4)
                     .map(|i| deps.api.addr_make(&format!("lp{i}")))
                     .collect();
-                let env = mock_env();
+                let mut env = mock_env();
                 let mut bal0 = 0u128;
                 let mut bal1 = 0u128;
                 let mut positions: BTreeMap<(usize, i32, i32), u128> = BTreeMap::new();
                 let mut st = seed;
                 for i in 0..STEPS {
+                    // MUST match the cadence in `replay` so shrunk repros run
+                    // each op at the same timestamp as the live run.
+                    env.block.time = env.block.time.plus_seconds([0, 1, 30, 700][i % 4]);
                     let op = gen_op(&mut st, &positions, spacing);
                     let ctx = format!("spacing{spacing}:seed{seed}:op#{i}");
                     apply_op(
@@ -938,14 +950,41 @@ mod adversarial_fuzz {
                 // (rather than the old vacuous `>= 0`) catches a refund/accounting
                 // leak that would strand a position's principal or un-distributed
                 // fees — which would be orders of magnitude larger than this cap.
+                // Protocol fees default ON (v3 table), so after the LP drain
+                // the pool legitimately still holds the treasury's carve —
+                // that bucket is owed, not stranded. It must be fully BACKED
+                // by the remaining balance, and only the excess above it is
+                // held to the dust cap.
+                let protocol_0 = PROTOCOL_FEES_0
+                    .may_load(&deps.storage)
+                    .unwrap()
+                    .unwrap_or_default()
+                    .u128();
+                let protocol_1 = PROTOCOL_FEES_1
+                    .may_load(&deps.storage)
+                    .unwrap()
+                    .unwrap_or_default()
+                    .u128();
+                assert!(
+                    bal0 >= protocol_0 && bal1 >= protocol_1,
+                    "seed {}: protocol fee bucket not backed after drain: \
+                     bal0={} owed0={} bal1={} owed1={}",
+                    seed,
+                    bal0,
+                    protocol_0,
+                    bal1,
+                    protocol_1,
+                );
                 let dust_cap: u128 = (STEPS as u128) * 10_000;
                 assert!(
-                    bal0 <= dust_cap && bal1 <= dust_cap,
+                    bal0 - protocol_0 <= dust_cap && bal1 - protocol_1 <= dust_cap,
                     "seed {}: pool stranded more than rounding dust after full drain: \
-                     bal0={} bal1={} cap={}",
+                     bal0={} bal1={} protocol=({},{}) cap={}",
                     seed,
                     bal0,
                     bal1,
+                    protocol_0,
+                    protocol_1,
                     dust_cap,
                 );
             }

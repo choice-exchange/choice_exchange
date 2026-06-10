@@ -69,7 +69,17 @@ pub fn execute(
             token_b,
             fee,
             init_sqrt_price,
-        } => execute_create_pool(deps, env, info, token_a, token_b, fee, init_sqrt_price),
+            max_fee_multiple,
+        } => execute_create_pool(
+            deps,
+            env,
+            info,
+            token_a,
+            token_b,
+            fee,
+            init_sqrt_price,
+            max_fee_multiple,
+        ),
         ExecuteMsg::AuthorizeCreation {
             token_a,
             token_b,
@@ -299,6 +309,7 @@ fn execute_accept_pool_code_id(deps: DepsMut, info: MessageInfo) -> Result<Respo
         .add_attribute("new_pool_code_id", new_code_id.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_create_pool(
     deps: DepsMut,
     env: Env,
@@ -307,10 +318,21 @@ fn execute_create_pool(
     token_b: AssetInfo,
     fee: u32,
     init_sqrt_price: Uint256,
+    max_fee_multiple: Option<u32>,
 ) -> Result<Response, StdError> {
     // 1. Sort Tokens
     if token_a == token_b {
         return Err(StdError::generic_err("Same tokens"));
+    }
+
+    // Dynamic-fee ceiling = `fee * multiple`. Default 2x; launchpad
+    // graduations pass up to 10x so the volatility fee can price a
+    // post-graduation frenzy. Lower bound 2 keeps the dynamic mechanism
+    // meaningful (1x would pin the fee at base); upper bound 10 bounds the
+    // worst-case trader fee at 10x the advertised tier.
+    let max_fee_multiple = max_fee_multiple.unwrap_or(2);
+    if !(2..=10).contains(&max_fee_multiple) {
+        return Err(StdError::generic_err("max_fee_multiple must be in 2..=10"));
     }
 
     // C-L7: validate the caller-supplied opening price BEFORE instantiating the
@@ -368,19 +390,29 @@ fn execute_create_pool(
 
     // 4. Create FeeConfig. `max_fee_change_per_second_ppm` rate-limits how
     // fast the dynamic fee can move across blocks, dampening single-block
-    // price-manipulation attacks (see audit MED-14). 100 ppm/sec = 600 ppm
-    // per 6-second block, so reaching the max fee from base takes roughly a
-    // minute of sustained volatility — short enough to react to real
-    // volatility, long enough to make griefing unprofitable.
+    // price-manipulation attacks (see audit MED-14). 100 ppm/sec ≈ 65-90 ppm
+    // per ~0.65-0.9s Injective block, so ramping base -> 2x-base cap takes
+    // `base/100` seconds of sustained volatility (30s for the 0.30% tier) —
+    // short enough to react to real volatility, long enough to make
+    // single-block griefing unprofitable.
     let fee_config = FeeConfig {
         base_fee_ppm: fee,
         // Clamp below 1_000_000: the pool's instantiate validation rejects
-        // `max_fee_ppm >= 1_000_000`, so an un-clamped `fee * 2` would make
-        // `create_pool` revert (with a confusing nested error) for any fee tier
-        // >= 500_000. `min(999_999)` keeps `base <= max` (they meet at the cap)
+        // `max_fee_ppm >= 1_000_000`, so an un-clamped `fee * multiple` would
+        // make `create_pool` revert (with a confusing nested error) for large
+        // fee tiers. `min(999_999)` keeps `base <= max` (they meet at the cap)
         // and guarantees the pool accepts the config for every valid tier.
-        max_fee_ppm: fee.saturating_mul(2).min(999_999),
-        volatility_multiplier: 100,
+        max_fee_ppm: fee.saturating_mul(max_fee_multiple).min(999_999),
+        // The pool oracle works in SQRT-price space: it adds
+        // `(|sqrt_p - ema| / ema) * multiplier` ppm, and a P% price move is
+        // only ~P/2% in sqrt terms. At 100_000, a ~6% price deviation from
+        // the 10-minute EMA (~3% sqrt deviation) adds ~3000 ppm — doubling
+        // the 0.30% tier to its 2x cap; smaller tiers saturate at
+        // proportionally smaller deviations, larger at larger. (The old
+        // value of 100 needed a ~960x price move to reach the cap, making
+        // the dynamic fee a no-op.) Must stay <= the pool's 1_000_000
+        // instantiate bound.
+        volatility_multiplier: 100_000,
         ema_halflife_seconds: 600,
         max_fee_change_per_second_ppm: 100,
     };

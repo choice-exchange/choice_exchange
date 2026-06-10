@@ -89,6 +89,7 @@ fn clmm_pool_kind(api: &MockApi) -> PoolKind {
         clmm_manager: api.addr_make("clmm_manager").to_string(),
         fee_tier: 3000,
         position_recipient: api.addr_make("locker").to_string(),
+        max_fee_multiple: None,
     }
 }
 
@@ -1294,11 +1295,15 @@ fn clmm_settle_emits_create_pool_mint_and_sweep() {
                     token_b,
                     fee,
                     init_sqrt_price,
+                    max_fee_multiple,
                 } => {
                     assert_eq!(fee, 3000);
                     // token_a < token_b by the CLMM ordering.
                     assert!(token_a < token_b);
                     assert!(!init_sqrt_price.is_zero());
+                    // Sink config didn't set a multiple -> forwarded as None
+                    // (factory default 2x).
+                    assert_eq!(max_fee_multiple, None);
                 }
                 other => panic!("expected CreatePool, got {:?}", other),
             }
@@ -1496,6 +1501,7 @@ fn create_sink_rejects_clmm_address_mismatch() {
         clmm_manager: deps.api.addr_make("clmm_manager").to_string(),
         fee_tier: 3000,
         position_recipient: deps.api.addr_make("locker").to_string(),
+        max_fee_multiple: None,
     };
     let caller = deps.api.addr_make("issuer_keeper");
     let err = execute(

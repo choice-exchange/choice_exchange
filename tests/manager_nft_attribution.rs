@@ -140,6 +140,7 @@ fn setup() -> Env {
             token_b: native(USDT),
             fee: FEE,
             init_sqrt_price: Uint256::from(PRICE_ONE),
+            max_fee_multiple: None,
         },
         &[],
         &admin,

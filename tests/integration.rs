@@ -160,6 +160,7 @@ fn setup_pool_with_liquidity(env: &TestEnv, wasm: &Wasm<InjectiveTestApp>) -> (S
         token_b: native(USDT),
         fee: 500,
         init_sqrt_price: init_price,
+        max_fee_multiple: None,
     };
     wasm.execute(&env.factory_addr, &create_pool_msg, &[], &env.admin)
         .unwrap();
@@ -224,6 +225,7 @@ fn test_e2e_create_pool_and_mint_position() {
         token_b: native(USDT),
         fee: 500, // 0.05%
         init_sqrt_price: init_price,
+        max_fee_multiple: None,
     };
 
     wasm.execute(&env.factory_addr, &create_pool_msg, &[], &env.admin)

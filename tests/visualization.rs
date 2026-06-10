@@ -139,6 +139,7 @@ fn create_pool(env: &VizEnv, fee: u32) -> String {
             token_b: native(USDT),
             fee,
             init_sqrt_price: init_price,
+            max_fee_multiple: None,
         },
         &[],
         &env.admin,

@@ -155,6 +155,7 @@ mod tests {
             token_b: native("ATOM"),
             fee: 500,
             init_sqrt_price: init_price,
+            max_fee_multiple: None,
         };
         let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
         assert_eq!(err.to_string(), "Generic error: Same tokens");
@@ -165,9 +166,55 @@ mod tests {
             token_b: native("OSMO"),
             fee: 999999, // Doesn't exist
             init_sqrt_price: init_price,
+            max_fee_multiple: None,
         };
         let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
         assert_eq!(err.to_string(), "Generic error: Fee tier not supported");
+
+        // 3. max_fee_multiple outside 2..=10 (both sides of the window).
+        for bad in [0u32, 1, 11] {
+            let msg = ExecuteMsg::CreatePool {
+                token_a: native("ATOM"),
+                token_b: native("OSMO"),
+                fee: 500,
+                init_sqrt_price: init_price,
+                max_fee_multiple: Some(bad),
+            };
+            let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "Generic error: max_fee_multiple must be in 2..=10",
+                "multiple={bad}"
+            );
+        }
+    }
+
+    /// A launchpad-graduation pool can raise the dynamic-fee ceiling to 10x
+    /// base via `max_fee_multiple`; the rest of the FeeConfig stays at the
+    /// factory defaults.
+    #[test]
+    fn test_create_pool_max_fee_multiple_10x() {
+        let mut deps = setup_factory();
+        let info = message_info(&deps.api.addr_make("user"), &[]);
+
+        let msg = ExecuteMsg::CreatePool {
+            token_a: native("ATOM"),
+            token_b: native("OSMO"),
+            fee: 3000,
+            init_sqrt_price: init_price(),
+            max_fee_multiple: Some(10),
+        };
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+        match &res.messages[0].msg {
+            CosmosMsg::Wasm(WasmMsg::Instantiate2 { msg, .. }) => {
+                let pool_msg: PoolInstantiateMsg = from_json(msg).unwrap();
+                assert_eq!(pool_msg.fee_config.base_fee_ppm, 3000);
+                assert_eq!(pool_msg.fee_config.max_fee_ppm, 30_000, "10x the tier");
+                assert_eq!(pool_msg.fee_config.volatility_multiplier, 100_000);
+                assert_eq!(pool_msg.fee_config.max_fee_change_per_second_ppm, 100);
+            }
+            other => panic!("unexpected message: {:?}", other),
+        }
     }
 
     #[test]
@@ -183,6 +230,7 @@ mod tests {
             token_b: native("ATOM"),
             fee: 500,
             init_sqrt_price: init_price,
+            max_fee_multiple: None,
         };
 
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
@@ -209,6 +257,13 @@ mod tests {
                 assert_eq!(pool_msg.token0, native("ATOM"));
                 assert_eq!(pool_msg.token1, native("OSMO"));
                 assert_eq!(pool_msg.fee_config.base_fee_ppm, 500);
+                // Pin the full default dynamic-fee calibration: max = 2x base,
+                // multiplier 100_000 (sqrt-space — ~6% price deviation from the
+                // 10-min EMA saturates a tier to its cap), 100 ppm/s rate limit.
+                assert_eq!(pool_msg.fee_config.max_fee_ppm, 1000);
+                assert_eq!(pool_msg.fee_config.volatility_multiplier, 100_000);
+                assert_eq!(pool_msg.fee_config.ema_halflife_seconds, 600);
+                assert_eq!(pool_msg.fee_config.max_fee_change_per_second_ppm, 100);
                 assert_eq!(pool_msg.tick_spacing, 10);
 
                 // Salt is derived from the variant-qualified registry keys
@@ -291,6 +346,7 @@ mod tests {
             token_b: native("OSMO"),
             fee: 500,
             init_sqrt_price: init_price(),
+            max_fee_multiple: None,
         };
 
         let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
@@ -333,6 +389,7 @@ mod tests {
             token_b,
             fee,
             init_sqrt_price: init_price(),
+            max_fee_multiple: None,
         };
         execute(deps.as_mut(), env, message_info(sender, &[]), msg)
     }
@@ -861,6 +918,7 @@ mod tests {
             token_b: native("OSMO"),
             fee: 500,
             init_sqrt_price: Uint256::zero(),
+            max_fee_multiple: None,
         };
         let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
         assert!(
@@ -875,6 +933,7 @@ mod tests {
             token_b: native("OSMO"),
             fee: 500,
             init_sqrt_price: Uint256::from(4295128738u128),
+            max_fee_multiple: None,
         };
         let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
         assert!(
@@ -890,6 +949,7 @@ mod tests {
             token_b: native("OSMO"),
             fee: 500,
             init_sqrt_price: max,
+            max_fee_multiple: None,
         };
         let err = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap_err();
         assert!(
@@ -905,6 +965,7 @@ mod tests {
             token_b: native("OSMO"),
             fee: 500,
             init_sqrt_price: Uint256::from(4295128739u128),
+            max_fee_multiple: None,
         };
         let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
         assert_eq!(res.messages.len(), 1);

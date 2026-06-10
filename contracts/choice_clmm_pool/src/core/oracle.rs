@@ -4,11 +4,6 @@ use crate::state::{OracleData, ORACLE, POOL_CONFIG};
 use choice_clmm_math::full_math::mul_div;
 use cosmwasm_std::{Env, StdResult, Storage, Uint128, Uint256};
 
-/// If the oracle hasn't been touched in this long, `get_dynamic_fee` falls back
-/// to `base_fee_ppm` — long gaps mean we have no recent price reference, so
-/// charging volatility-based fees would be guessing.
-const MAX_ORACLE_AGE_SECONDS: u64 = 3600; // 1 hour
-
 /// Initialize the oracle during pool creation.
 pub fn initialize_oracle(storage: &mut dyn Storage, time: u64, price: Uint256) -> StdResult<()> {
     let config = POOL_CONFIG.load(storage)?;
@@ -71,8 +66,17 @@ fn compute_fee(
             .map_err(|_| cosmwasm_std::StdError::generic_err("Oracle div zero"))?;
     }
 
-    // --- Raw dynamic fee from (updated) EMA ---
-    let raw_fee = compute_raw_dynamic_fee(fee_config, next.price_ema_x96, current_price)?;
+    // --- Raw dynamic fee, measured against the PRE-blend EMA ---
+    //
+    // The deviation must be taken against the EMA as of the LAST update, not
+    // the freshly blended one: `p - blend(ema, p)` shrinks by a factor of
+    // (halflife - delta)/halflife, so measuring post-blend silently scaled
+    // the volatility signal down with the time since the last swap — half
+    // lost at delta = halflife/2 and exactly zero at delta >= halflife,
+    // letting the followers of a price move trade at base fee on any
+    // infrequently-traded pool. The blended EMA is still persisted below, so
+    // an elevated fee lasts only until the reference catches up with price.
+    let raw_fee = compute_raw_dynamic_fee(fee_config, oracle.price_ema_x96, current_price)?;
 
     // --- Rate-limit the fee change per elapsed second ---
     let prev_fee = oracle.last_fee_ppm;
@@ -135,26 +139,6 @@ pub fn simulate_fee(storage: &dyn Storage, env: &Env, current_price: Uint256) ->
     Ok(fee)
 }
 
-/// Read-only fee accessor for queries / quotes.
-///
-/// Returns the most recent rate-limited fee. If the oracle is stale
-/// (> `MAX_ORACLE_AGE_SECONDS` since the last update), falls back to
-/// `base_fee_ppm` — stale state means we have no recent price reference.
-pub fn get_dynamic_fee(
-    storage: &dyn Storage,
-    env: &Env,
-    _current_price: Uint256,
-) -> StdResult<u32> {
-    let oracle = ORACLE.load(storage)?;
-    let config = POOL_CONFIG.load(storage)?;
-
-    let now = env.block.time.seconds();
-    if now > oracle.last_block_time + MAX_ORACLE_AGE_SECONDS {
-        return Ok(config.fee_config.base_fee_ppm);
-    }
-    Ok(oracle.last_fee_ppm)
-}
-
 /// `base_fee + |current - EMA| / EMA * multiplier`, capped at `max_fee_ppm`.
 /// Never panics.
 fn compute_raw_dynamic_fee(
@@ -184,16 +168,6 @@ fn compute_raw_dynamic_fee(
         .map_err(|_| cosmwasm_std::StdError::generic_err("Fee conversion overflow"))?;
     // max_fee_ppm was constructor-validated to be < 1_000_000, so the cast is safe.
     Ok(fee_u128.u128() as u32)
-}
-
-/// Legacy shim — kept for call sites that still split update + read.
-/// Prefer `update_oracle_and_fee` going forward.
-pub fn update_oracle(
-    storage: &mut dyn Storage,
-    env: &Env,
-    current_price: Uint256,
-) -> StdResult<()> {
-    update_oracle_and_fee(storage, env, current_price).map(|_| ())
 }
 
 #[cfg(test)]
@@ -260,18 +234,72 @@ mod tests {
         assert_eq!(next.last_fee_ppm, fee);
     }
 
-    /// After a gap >= halflife the EMA snaps to the current price, so the fee naturally returns
-    /// to base — proving the quote (simulate) and execution agree on the decay, with no need for
-    /// the old quote-only 1-hour reset.
+    /// Pins the FACTORY default calibration (multiplier 100_000, max = 2x base) against
+    /// real-world price moves, remembering the oracle works in sqrt-price space (a P% price
+    /// move is ~P/2% of sqrt deviation). A ~6% price deviation from the EMA must saturate
+    /// the 0.30% tier to its 0.60% cap, while a 1% deviation lands meaningfully between
+    /// base and cap. The old multiplier of 100 produced 0.5 ppm for a 1% move — a no-op.
     #[test]
-    fn compute_fee_returns_to_base_after_halflife() {
-        let config = cfg(3_000, 30_000, 1_000_000); // halflife 600
-        let o = oracle(1_000_000_000_000, 100, 25_000);
-        let (fee, _next) =
-            compute_fee(&config, &o, 100 + 600, Uint256::from(5_000_000_000_000u128)).unwrap();
+    fn factory_default_calibration_responds_to_real_moves() {
+        let config = cfg(3_000, 6_000, 100_000);
+        let ema = 1_000_000_000_000u128;
+
+        // +6.2% price => sqrt factor ~1.03054 => dynamic ~3054 ppm => capped at 6000.
+        let fee = compute_raw_dynamic_fee(
+            &config,
+            Uint256::from(ema),
+            Uint256::from(1_030_540_000_000u128),
+        )
+        .unwrap();
+        assert_eq!(fee, 6_000, "~6% price deviation must saturate the 2x cap");
+
+        // +1% price => sqrt factor ~1.004987 => dynamic ~498 ppm => 3498.
+        let fee = compute_raw_dynamic_fee(
+            &config,
+            Uint256::from(ema),
+            Uint256::from(1_004_987_000_000u128),
+        )
+        .unwrap();
+        assert_eq!(fee, 3_498, "1% price deviation must add ~500 ppm");
+    }
+
+    /// A price move discovered after a gap >= halflife is still charged: the deviation is
+    /// measured against the PRE-blend EMA, so the snap-to-price (which is persisted) cannot
+    /// zero the volatility signal for the swap that observes the move. Once the snapped EMA
+    /// matches a now-stable price, the next update returns to base. (Before the pre-blend
+    /// fix, the first call here charged exactly base — the followers of any move older than
+    /// one halflife traded free.)
+    #[test]
+    fn gap_move_is_charged_then_fee_returns_to_base() {
+        let config = cfg(3_000, 30_000, 1_000_000); // halflife 600, no rate limit
+        let o = oracle(1_000_000_000_000, 100, 3_000);
+
+        // 600s later the price sits 5x away from the last-known EMA: the raw fee
+        // saturates to the cap, and the EMA snaps to the new price for storage.
+        let price = Uint256::from(5_000_000_000_000u128);
+        let (fee, next) = compute_fee(&config, &o, 100 + 600, price).unwrap();
+        assert_eq!(fee, 30_000, "a gap-discovered move must be charged");
+        assert_eq!(next.price_ema_x96, price, "EMA must snap after >= halflife");
+
+        // Price holds: with the reference caught up, the fee returns to base.
+        let (fee, _) = compute_fee(&config, &next, 100 + 601, price).unwrap();
+        assert_eq!(fee, 3_000, "stable price after the snap → base fee");
+    }
+
+    /// Regression for the EMA self-dilution bug: at delta = halflife/2 the post-blend EMA
+    /// sits halfway to the current price, so measuring against it halved the volatility
+    /// signal. With factory-default calibration, a ~6.2% price move after 300 quiet seconds
+    /// must still saturate the 2x cap (pre-blend reference), not land at ~4500 ppm.
+    #[test]
+    fn mid_gap_deviation_is_not_diluted() {
+        let mut config = cfg(3_000, 6_000, 100_000); // factory defaults, halflife 600
+        config.max_fee_change_per_second_ppm = 100;
+        let o = oracle(1_000_000_000_000, 0, 3_000);
+
+        let (fee, _) = compute_fee(&config, &o, 300, Uint256::from(1_030_540_000_000u128)).unwrap();
         assert_eq!(
-            fee, 3_000,
-            "after >= halflife the EMA snaps to price → base fee"
+            fee, 6_000,
+            "half-halflife gap must not dilute the volatility signal"
         );
     }
 

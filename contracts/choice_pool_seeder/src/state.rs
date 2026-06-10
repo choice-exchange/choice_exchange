@@ -66,6 +66,9 @@ pub enum PoolKindStored {
         clmm_manager: Addr,
         fee_tier: u32,
         position_recipient: Addr,
+        /// Forwarded to the CLMM factory's `CreatePool`; `None` = factory
+        /// default (2x). Pre-existing stored sinks deserialize as `None`.
+        max_fee_multiple: Option<u32>,
     },
 }
 
@@ -84,11 +87,13 @@ impl From<&PoolKindStored> for crate::msg::PoolKind {
                 clmm_manager,
                 fee_tier,
                 position_recipient,
+                max_fee_multiple,
             } => crate::msg::PoolKind::Clmm {
                 clmm_factory: clmm_factory.to_string(),
                 clmm_manager: clmm_manager.to_string(),
                 fee_tier: *fee_tier,
                 position_recipient: position_recipient.to_string(),
+                max_fee_multiple: *max_fee_multiple,
             },
         }
     }

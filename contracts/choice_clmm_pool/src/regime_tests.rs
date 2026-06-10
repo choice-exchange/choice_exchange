@@ -92,8 +92,20 @@ mod regime_tests {
     /// in-range position holding all liquidity, optionally offsets the fee-growth
     /// origin by `offset`, runs one token0->token1 swap, then `Burn(0)` to roll
     /// fees into `tokens_owed_0`.
+    /// Zero the protocol-fee divisors (default-ON since the v3-table change)
+    /// for tests that assert EXACT LP fee math with no carve.
+    fn disable_protocol_carve(storage: &mut dyn cosmwasm_std::Storage) {
+        let mut cfg = PROTOCOL_FEE_CONFIG.load(storage).unwrap();
+        cfg.fee_protocol_0 = 0;
+        cfg.fee_protocol_1 = 0;
+        PROTOCOL_FEE_CONFIG.save(storage, &cfg).unwrap();
+    }
+
     fn accrue_with_offset(offset: Uint256) -> (u128, u128, bool) {
         let (mut deps, env, lp) = setup(10, 3000, 0);
+        // This test asserts byte-identical LP fee attribution across the U256
+        // wrap; a protocol carve would just scale the fee, so pin it off.
+        disable_protocol_carve(&mut deps.storage);
         let lower = -10000;
         let upper = 10000;
         let liq: u128 = 1_000_000_000_000; // 1e12
@@ -960,6 +972,8 @@ mod regime_tests {
         u128,
     ) {
         let (mut deps, env, lp) = setup(10, 3000, 0);
+        // This helper's callers assert the WHOLE flash fee goes to LPs.
+        disable_protocol_carve(&mut deps.storage);
         let pool = env.contract.address.clone();
         // `execute_flash` live-queries the factory's flash-borrower allowlist;
         // answer authorized so this test exercises the loan path.

@@ -157,6 +157,7 @@ fn clmm_sink_payload(
             clmm_manager: deps.api.addr_make("clmm_manager").to_string(),
             fee_tier,
             position_recipient: deps.api.addr_make("locker").to_string(),
+            max_fee_multiple: None,
         },
     )
 }
@@ -1243,6 +1244,7 @@ fn register_full(
             clmm_manager: deps.api.addr_make("clmm_manager").to_string(),
             fee_tier: a.fee,
             position_recipient: deps.api.addr_make("locker").to_string(),
+            max_fee_multiple: None,
         },
         None => PoolKind::Xyk {
             choice_factory: deps.api.addr_make("choice_factory").to_string(),

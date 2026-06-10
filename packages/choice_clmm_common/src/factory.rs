@@ -16,6 +16,15 @@ pub enum ExecuteMsg {
         token_b: AssetInfo,
         fee: u32,
         init_sqrt_price: Uint256,
+        /// Dynamic-fee ceiling as a multiple of the tier's base fee:
+        /// `max_fee_ppm = fee * multiple` (capped just below 100%). `None`
+        /// defaults to 2 — the conservative setting for ordinary pools.
+        /// Launchpad graduations pass a higher multiple (up to 10) so the
+        /// volatility fee can actually price post-graduation frenzies.
+        /// Valid range 2..=10; immutable after creation (it is baked into the
+        /// pool's `FeeConfig` and does not change the pool's address, which
+        /// stays keyed on `(token0, token1, fee)`).
+        max_fee_multiple: Option<u32>,
     },
     /// Updates mutable factory config. NOTE: `owner` and `pool_code_id` are
     /// deliberately NOT settable here — they are the system's root of trust and

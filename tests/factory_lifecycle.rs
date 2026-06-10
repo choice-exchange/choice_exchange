@@ -130,6 +130,7 @@ fn create_pool(env: &Env, who: &SigningAccount, fee: u32) -> Result<ExecResp, St
                 token_b: native(USDT),
                 fee,
                 init_sqrt_price: Uint256::from(PRICE_ONE),
+                max_fee_multiple: None,
             },
             &[],
             who,

@@ -648,6 +648,7 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
                         clmm_manager: clmm_manager.clone(),
                         fee_tier: CLMM_FEE_TIER,
                         position_recipient: locker.clone(),
+                        max_fee_multiple: None,
                     },
                     refund_receiver: refund_receiver.address(),
                     deadline_seconds: 3600,

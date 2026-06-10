@@ -229,11 +229,13 @@ fn validate_pool_kind(
             clmm_manager,
             fee_tier,
             position_recipient,
+            max_fee_multiple,
         } => PoolKindStored::Clmm {
             clmm_factory: deps.api.addr_validate(clmm_factory)?,
             clmm_manager: deps.api.addr_validate(clmm_manager)?,
             fee_tier: *fee_tier,
             position_recipient: deps.api.addr_validate(position_recipient)?,
+            max_fee_multiple: *max_fee_multiple,
         },
     })
 }
@@ -488,6 +490,7 @@ fn exec_settle(
             clmm_manager,
             fee_tier,
             position_recipient,
+            max_fee_multiple,
         } => settle_clmm(
             deps,
             env,
@@ -498,6 +501,7 @@ fn exec_settle(
                 clmm_manager,
                 fee_tier,
                 position_recipient,
+                max_fee_multiple,
             },
             token_bal,
             pair_bal,
@@ -625,6 +629,8 @@ struct ClmmSettleParams {
     clmm_manager: cosmwasm_std::Addr,
     fee_tier: u32,
     position_recipient: cosmwasm_std::Addr,
+    /// `None` = CLMM factory default (2x base).
+    max_fee_multiple: Option<u32>,
 }
 
 fn settle_clmm(
@@ -648,6 +654,7 @@ fn settle_clmm(
         clmm_manager,
         fee_tier,
         position_recipient,
+        max_fee_multiple,
     } = params;
 
     // Whole token side seeds the pool; tip comes off the pair side.
@@ -701,6 +708,7 @@ fn settle_clmm(
             token_b: token1.clone(),
             fee: fee_tier,
             init_sqrt_price,
+            max_fee_multiple,
         })?,
         funds: vec![],
     }));

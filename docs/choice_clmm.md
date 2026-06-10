@@ -107,14 +107,33 @@ All fee growth uses wrapping U256 arithmetic (intentional overflow at MAX).
 **Dynamic fees (`core/oracle.rs`)** — EMA-based volatility pricing
 
 ```text
+# volatility is measured against the EMA as of the LAST update (pre-blend),
+# so the signal does not dilute with the time since the last swap:
+volatility = |current_price - ema_old|
+fee = clamp(base_fee + volatility * multiplier / ema_old, 0, max_fee)
+
+# then the reference is rolled forward and persisted:
 if delta >= halflife:
     ema = current_price
 else:
     ema = (ema_old * (halflife - delta) + current_price * delta) / halflife
-
-volatility = |current_price - ema|
-fee = clamp(base_fee + volatility * multiplier / ema, 0, max_fee)
 ```
+
+Note `current_price` is the Q64.96 **sqrt** price, so a P% price move registers
+as only ~P/2% of `volatility/ema`. The factory's default calibration
+(`multiplier = 100_000`, `max_fee = base * max_fee_multiple` (default 2x, up
+to 10x for launchpad graduations), halflife 600s, rate limit 100 ppm/s) means
+a ~6% price deviation from the EMA adds ~3000 ppm — enough to saturate the
+0.30% tier to its default 0.60% cap; smaller tiers saturate at proportionally
+smaller deviations. `ema_halflife_seconds` is really a *full-forget window*
+(the blend is linear, reaching 100% at `delta == halflife`, ~2x faster than a
+true exponential half-life at mid deltas).
+
+Protocol fees default **ON** per the Uniswap v3 deployment table — divisor 4
+(25% of swap fees) for tiers <= 0.05%, divisor 6 (~16.7%) above — with the
+treasury defaulting to the factory owner and the burn-auction split off. The
+factory owner retunes per pool via `SetFeeProtocol` (0 | 4..=10) and
+`UpdateProtocolFeeConfig`.
 
 **Messages (`packages/choice_clmm_common/src/pool.rs`):**
 
@@ -154,7 +173,7 @@ TMP_INSTANTIATE_INFO: Item<TmpInstantiateInfo> // transient state for reply hand
 
 **Messages (`packages/choice_clmm_common/src/factory.rs`):**
 
-- `CreatePool { token_a: AssetInfo, token_b: AssetInfo, fee, init_sqrt_price }` — create a new pool (tokens auto-sorted; CW20 addresses validated)
+- `CreatePool { token_a: AssetInfo, token_b: AssetInfo, fee, init_sqrt_price, max_fee_multiple }` — create a new pool (tokens auto-sorted; CW20 addresses validated). `max_fee_multiple` (`Option`, 2..=10, default 2) sets the dynamic-fee ceiling to `fee * multiple`; launchpad graduations pass up to 10.
 - `EnableFeeAmount { fee, tick_spacing }` — add new fee tier (owner only)
 - `UpdateConfig { owner, pool_code_id }` — update factory config (owner only)
 - Query `GetPool { token_a: AssetInfo, token_b: AssetInfo, fee }` — returns pool address

@@ -2233,25 +2233,20 @@ mod tests {
     }
 
     #[test]
-    fn phase4_stale_oracle_falls_back_to_base_fee() {
-        // If the oracle hasn't been touched in > 1 hour, get_dynamic_fee
-        // returns base_fee_ppm. This protects quote/simulation paths from
-        // using arbitrarily-stale EMA data.
-        //
-        // The fallback is only meaningfully tested if the *fresh* reading differs
-        // from base — otherwise `assert_eq!(fee, base)` passes whether or not the
-        // staleness branch exists. So we first drive `last_fee_ppm` strictly above
-        // base (0) with a whale move + a follow-up probe whose post-move price
-        // diverges from the EMA, then assert the fresh read is elevated and the
-        // stale read collapses back to base.
-        use crate::core::oracle::get_dynamic_fee;
-
+    fn phase4_gap_move_still_charged_after_quiet_period() {
+        // Regression for the EMA self-dilution/snap bug: the volatility fee is
+        // measured against the PRE-blend EMA, so a price move observed after a
+        // gap >= ema_halflife_seconds (here 100s) must still be charged. Before
+        // the fix, the blend snapped the EMA to the current price BEFORE the
+        // deviation was measured, so any swap following a move by more than one
+        // halflife of quiet paid exactly base fee — the mechanism silently
+        // never fired on infrequently-traded pools.
         let mut deps = mock_dependencies();
         // Rate limiting OFF so the elevated volatility fee is stored verbatim.
         let env_start = setup_oracle_pool(&mut deps, 0);
 
-        // Whale moves the price (this sets EMA to the pre-move price; the fee it
-        // pays is still base, since current == EMA at that instant).
+        // Whale moves the price (it pays base itself: its pre-swap price still
+        // equals the EMA — the oracle can only ever charge the followers).
         let mut env_whale = env_start.clone();
         env_whale.block.time = env_whale.block.time.plus_seconds(200);
         let whale = deps.api.addr_make("whale");
@@ -2268,10 +2263,12 @@ mod tests {
         )
         .unwrap();
 
-        // Probe one second later: now the (moved) price diverges from the EMA, so
-        // the swap commits an elevated `last_fee_ppm` to storage.
+        // Probe AFTER a quiet gap of 1.5x the halflife: its pre-swap price (the
+        // whale's post-move price) diverges from the stored EMA, and the snap
+        // must not erase that. The fee the probe paid is the value it committed
+        // to the oracle.
         let mut env_probe = env_whale.clone();
-        env_probe.block.time = env_probe.block.time.plus_seconds(1);
+        env_probe.block.time = env_probe.block.time.plus_seconds(150);
         let trader = deps.api.addr_make("trader");
         execute(
             deps.as_mut(),
@@ -2286,27 +2283,14 @@ mod tests {
         )
         .unwrap();
 
-        // FRESH read (at the probe's block): not stale → returns the elevated
-        // last_fee_ppm, strictly above base (0).
-        let fee_fresh = get_dynamic_fee(&deps.storage, &env_probe, get_price_one()).unwrap();
+        let committed = crate::state::ORACLE
+            .load(&deps.storage)
+            .unwrap()
+            .last_fee_ppm;
         assert!(
-            fee_fresh > 0,
-            "expected the probe to have stored a fee above base (0), got {}",
-            fee_fresh
-        );
-
-        // STALE read (> 1 hour after the probe): must fall back to base_fee_ppm
-        // (0). That it differs from `fee_fresh` proves the staleness branch — not
-        // the normal path — produced this value.
-        let mut env_stale = env_probe.clone();
-        env_stale.block.time = env_stale.block.time.plus_seconds(7200);
-        let fee_stale = get_dynamic_fee(&deps.storage, &env_stale, get_price_one()).unwrap();
-        assert_eq!(fee_stale, 0, "stale oracle must fall back to base_fee_ppm");
-        assert!(
-            fee_stale < fee_fresh,
-            "stale fallback ({}) must differ from the fresh fee ({})",
-            fee_stale,
-            fee_fresh
+            committed > 0,
+            "a move observed after a quiet gap >= halflife must charge above base (0), got {}",
+            committed
         );
     }
 
@@ -2410,15 +2394,56 @@ mod tests {
     }
 
     #[test]
-    fn protocol_fee_off_by_default() {
+    fn protocol_fee_on_by_default_per_v3_table() {
+        // Defaults follow the Uniswap v3 deployment table: divisor 6 (~16.7%
+        // of fees) for tiers above 0.05%, divisor 4 (25%) at or below it.
+        // setup_protocol_pool uses base 3000 -> 6.
         let (mut deps, _owner) = setup_protocol_pool();
-        let res = do_swap_zero_for_one(&mut deps, 1000);
-        assert_eq!(attr(&res, "protocol_fee"), "0");
+        let cfg = crate::state::PROTOCOL_FEE_CONFIG
+            .load(&deps.storage)
+            .unwrap();
+        assert_eq!(cfg.fee_protocol_0, 6, "0.30% tier defaults to 1/6 carve");
+        assert_eq!(cfg.fee_protocol_1, 6);
+
+        // A swap big enough that floor(fee/6) is non-zero accrues protocol
+        // fees with NO SetFeeProtocol call: 12_000 in -> fee 36 -> carve 6.
+        let res = do_swap_zero_for_one(&mut deps, 12_000);
+        assert_ne!(
+            attr(&res, "protocol_fee"),
+            "0",
+            "carve must be on by default"
+        );
 
         let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
         let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
-        assert!(fees.protocol_fees_0.is_zero());
-        assert!(fees.protocol_fees_1.is_zero());
+        assert!(!fees.protocol_fees_0.is_zero());
+
+        // Tier rule, low side: a base <= 500 ppm pool defaults to 1/4.
+        let mut deps2 = mock_dependencies();
+        let factory = deps2.api.addr_make("factory");
+        instantiate(
+            deps2.as_mut(),
+            mock_env(),
+            message_info(&factory, &[]),
+            InstantiateMsg {
+                token0: native("inj"),
+                token1: native("usdt"),
+                tick_spacing: 10,
+                fee_config: FeeConfig {
+                    base_fee_ppm: 500,
+                    max_fee_ppm: 1000,
+                    volatility_multiplier: 100_000,
+                    ema_halflife_seconds: 600,
+                    max_fee_change_per_second_ppm: 100,
+                },
+                initial_sqrt_price: get_price_one(),
+            },
+        )
+        .unwrap();
+        let cfg2 = crate::state::PROTOCOL_FEE_CONFIG
+            .load(&deps2.storage)
+            .unwrap();
+        assert_eq!(cfg2.fee_protocol_0, 4, "0.05% tier defaults to 1/4 carve");
     }
 
     #[test]
@@ -2841,7 +2866,20 @@ mod tests {
 
     #[test]
     fn flash_reply_accrues_lp_fee_and_unlocks() {
-        let (mut deps, _owner) = setup_protocol_pool();
+        let (mut deps, owner) = setup_protocol_pool();
+        // This test asserts the WHOLE flash fee lands in LP fee growth, so
+        // switch the (default-on) protocol carve off through the real
+        // owner-gated path first.
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&cosmwasm_std::Addr::unchecked(&owner), &[]),
+            ExecuteMsg::SetFeeProtocol {
+                fee_protocol_0: 0,
+                fee_protocol_1: 0,
+            },
+        )
+        .unwrap();
         set_pool_balance(&mut deps, 5_000_000, 5_000_000);
         let borrower = deps.api.addr_make("borrower");
 

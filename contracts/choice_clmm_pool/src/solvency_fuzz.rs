@@ -222,12 +222,17 @@ mod solvency_fuzz {
                 token0: native(T0),
                 token1: native(T1),
                 tick_spacing: 10,
+                // Factory mainnet defaults for the 0.30% tier. The fuzzer used
+                // to pin `volatility_multiplier: 100` / rate limit 0, which
+                // (with the time cadence below) froze the fee at base — so
+                // solvency was never exercised while fee_pips actually swings
+                // 3000..6000 under rate limiting, exactly how mainnet runs.
                 fee_config: FeeConfig {
                     base_fee_ppm: 3000,
                     max_fee_ppm: 6000,
-                    volatility_multiplier: 100,
+                    volatility_multiplier: 100_000,
                     ema_halflife_seconds: 600,
-                    max_fee_change_per_second_ppm: 0,
+                    max_fee_change_per_second_ppm: 100,
                 },
                 initial_sqrt_price: price_one(),
             },
@@ -238,7 +243,7 @@ mod solvency_fuzz {
             .map(|i| deps.api.addr_make(&format!("lp{i}")))
             .collect();
         let treasury = deps.api.addr_make("protocol_treasury");
-        let env = mock_env();
+        let mut env = mock_env();
 
         // Route protocol fees entirely to the treasury via BankMsg::Send (no burn
         // auction) so the off-chain ledger stays exact.
@@ -266,7 +271,12 @@ mod solvency_fuzz {
 
         let mut st = seed;
 
-        for _ in 0..steps {
+        for step in 0..steps {
+            // Advance block time on a fixed cadence so the dynamic fee actually
+            // moves: same-second (frozen fee), next-second, mid-gap, and
+            // past-halflife (EMA snap) steps. A pure function of the step index
+            // keeps seed-replay reproducible.
+            env.block.time = env.block.time.plus_seconds([0, 1, 30, 700][step % 4]);
             // Periodically toggle the protocol-fee carve on/off so the carve path
             // (separate PROTOCOL_FEES bucket, excluded from fee_growth) is fuzzed,
             // not just the divisor==0 configuration.
