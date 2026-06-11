@@ -49,6 +49,14 @@ if [ "$ROTATE_OWNER" = "1" ] && [ -z "$DEV_MULTISIG" ]; then
     echo "ERROR: ROTATE_OWNER=1 requires DEV_MULTISIG" >&2; exit 1
 fi
 
+# The CLMM wasms are large (~640KB pool) — storing one needs ~4.2M gas, well
+# above the lib.sh env defaults (3.5-3.7M, tuned for the lighter legacy
+# contracts). Override GAS/FEES here so the stores don't hit `out of gas`
+# (code=11). Instantiate/exec/admin txs are cheaper but run fine at this limit
+# (you pay the fixed FEES, not gasUsed). Override via CLMM_GAS / CLMM_FEES.
+GAS="${CLMM_GAS:-8000000}"
+FEES="${CLMM_FEES:-4000000000000000inj}"
+
 # ─── Phase gating (same convention as lazy_full) ─────────────────────────────
 count_set() { local n=0; for v in "$@"; do [ -n "$v" ] && n=$((n+1)); done; echo "$n"; }
 p1_set=$(count_set "$POOL_CODE_ID" "$FACTORY_CODE_ID" "$MANAGER_CODE_ID")
