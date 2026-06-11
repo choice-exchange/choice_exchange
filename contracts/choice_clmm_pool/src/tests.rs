@@ -2473,7 +2473,10 @@ mod tests {
         let cfg2 = crate::state::PROTOCOL_FEE_CONFIG
             .load(&deps2.storage)
             .unwrap();
-        assert_eq!(cfg2.fee_protocol_0, 0, "low tier also launches with no carve");
+        assert_eq!(
+            cfg2.fee_protocol_0, 0,
+            "low tier also launches with no carve"
+        );
     }
 
     #[test]
