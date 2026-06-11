@@ -255,6 +255,9 @@ query_config_field() {
 # ─── Banner ────────────────────────────────────────────────────────────────
 banner "🚀 FULL LAZY DEPLOY"
 echo "  Signer (EOA):                            $SIGNER_ADDRESS ($FROM)"
+if [ "$STORE_FROM" != "$FROM" ]; then
+    echo "  Phase 1 store signer (separate key):     $STORE_FROM"
+fi
 echo "  Dev multisig (rotation target):          $DEV_MULTISIG"
 echo "  Treasury (fee_collector):                $TREASURY"
 echo "  Timelock seconds:                        $TIMELOCK_SECONDS"

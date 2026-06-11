@@ -25,13 +25,27 @@ fi
 # shellcheck source=/dev/null
 source "$NET_ENV"
 
-# Sanity — bail if a required field is missing or empty.
+# Sanity — bail if a required field is missing or empty. PASSWORD is special:
+# it is intentionally NOT stored in the env files (public repo) — export the
+# keyring passphrase in your shell before running any deploy script.
 for var in NODE CHAIN_ID GAS FEES FROM PASSWORD SIGNER_ADDRESS; do
     if [ -z "${!var:-}" ]; then
-        echo "ERROR: $var not set in $NET_ENV" >&2
+        if [ "$var" = "PASSWORD" ]; then
+            echo "ERROR: PASSWORD not set — export the keyring passphrase in your shell" >&2
+        else
+            echo "ERROR: $var not set in $NET_ENV" >&2
+        fi
         exit 1
     fi
 done
+
+# Optional split-signer for Phase 1 stores. If the env file sets STORE_FROM /
+# STORE_PASSWORD, `store_contract` uses those instead of FROM / PASSWORD. All
+# other helpers (instantiate_contract, exec_contract, set_admin) continue to
+# use FROM / PASSWORD. Useful on mainnet to attribute wasm uploads to a
+# dedicated dev key while keeping governance txs on the EOA.
+STORE_FROM="${STORE_FROM:-$FROM}"
+STORE_PASSWORD="${STORE_PASSWORD:-$PASSWORD}"
 
 # Polls injectived for the tx's indexed record. Exits non-zero on tx code != 0
 # (i.e. on-chain failure) or if not indexed after $max_attempts. Echoes the
@@ -67,8 +81,8 @@ store_contract() {
         return 1
     fi
     local tx_output txhash query_output code_id
-    tx_output=$(printf '%s\n' "$PASSWORD" | injectived tx wasm store "$wasm_path" \
-        --from="$FROM" \
+    tx_output=$(printf '%s\n' "$STORE_PASSWORD" | injectived tx wasm store "$wasm_path" \
+        --from="$STORE_FROM" \
         --chain-id="$CHAIN_ID" \
         --yes --fees="$FEES" --gas="$GAS" \
         --node="$NODE" 2>&1)

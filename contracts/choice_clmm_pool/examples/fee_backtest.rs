@@ -638,7 +638,21 @@ fn main() {
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(50.0);
     let v1c = v1_default();
-    let v2c = v2_default();
+    let mut v2c = v2_default();
+    // Calibration overrides (v2 only): sweep decay/control/base/cap against a
+    // real --csv series without recompiling.
+    if let Some(v) = arg_value(&args, "--decay").and_then(|s| s.parse().ok()) {
+        v2c.volatility_decay_seconds = v;
+    }
+    if let Some(v) = arg_value(&args, "--control").and_then(|s| s.parse().ok()) {
+        v2c.variable_fee_control = v;
+    }
+    if let Some(v) = arg_value(&args, "--base").and_then(|s| s.parse().ok()) {
+        v2c.base_fee_ppm = v;
+    }
+    if let Some(v) = arg_value(&args, "--cap").and_then(|s| s.parse().ok()) {
+        v2c.max_fee_ppm = v;
+    }
 
     if sweep {
         let (series, src) = match &csv {

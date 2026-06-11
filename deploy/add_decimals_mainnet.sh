@@ -8,7 +8,7 @@ CHAIN_ID="injective-1"
 FEES="1500000000000000inj"
 GAS="3000000"
 FROM="testnet"
-PASSWORD="12345678"
+PASSWORD="${PASSWORD:?export PASSWORD (keyring passphrase) — never commit it}"
 
 # Factory contract address (update this to your deployed factory contract address)
 FACTORY_CONTRACT="inj1k9lcqtn3y92h4t3tdsu7z8qx292mhxhgsssmxg"

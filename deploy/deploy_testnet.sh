@@ -7,7 +7,7 @@ CHAIN_ID="injective-888"
 FEES="1500000000000000inj"
 GAS="3500000"
 FROM="testnet"
-PASSWORD="12345678"
+PASSWORD="${PASSWORD:?export PASSWORD (keyring passphrase) — never commit it}"
 
 # Admin address variable. Address of FROM
 ADMIN_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"

@@ -137,4 +137,4 @@ contract would hit the same hook).
   @`farm_add_schedules`; keeper README ops section on `zap_keeper_bot`@`main`.
 - Owner of `inj1srnm…` = Dev Multisig (config.owner, after EOA→multisig rotation);
   wasm-admin = Dev Multisig. EOA signer for store/test = `inj1q2m26a…` (keyring name
-  `testnet`, file backend, password in `deploy/network/mainnet.env`).
+  `testnet`, file backend, passphrase exported in the shell, never committed).

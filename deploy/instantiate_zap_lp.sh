@@ -55,7 +55,14 @@ OWNER="${OWNER:-$SIGNER_ADDRESS}"
 DEFAULT_RECIPIENT="${DEFAULT_RECIPIENT:-}"
 TIP_BPS="${TIP_BPS:-0}"
 MIN_ZAP_AMOUNT="${MIN_ZAP_AMOUNT:-0}"
-LABEL="${LABEL:-Choice Zap LP v1.1.2}"
+# v2 royalty route, pinned at instantiate. Provide BOTH to wire the
+# `ZapBalance` path immediately, or leave BOTH empty for a lazy deploy
+# (wire later via `UpdateConfig { input, pair }`). `INPUT_CW20` takes
+# precedence over `INPUT_DENOM` when both are set.
+INPUT_DENOM="${INPUT_DENOM:-}"
+INPUT_CW20="${INPUT_CW20:-}"
+PAIR="${PAIR:-}"
+LABEL="${LABEL:-Choice Zap LP v2.0.0}"
 ADMIN="${ADMIN:-$SIGNER_ADDRESS}"
 
 if [ -z "$ZAP_LP_CODE_ID" ]; then
@@ -79,12 +86,34 @@ if ! [[ "$MIN_ZAP_AMOUNT" =~ ^[0-9]+$ ]]; then
     echo "ERROR: MIN_ZAP_AMOUNT '$MIN_ZAP_AMOUNT' is not a non-negative integer."; exit 1
 fi
 
+# The royalty route is `(input, pair)`. The contract accepts either set or both
+# unset (lazy). Reject a half-set route — it can't drive `ZapBalance` and almost
+# always signals a typo.
+INPUT_SET=""
+[ -n "$INPUT_CW20" ] || [ -n "$INPUT_DENOM" ] && INPUT_SET="1"
+if { [ -n "$INPUT_SET" ] && [ -z "$PAIR" ]; } || { [ -z "$INPUT_SET" ] && [ -n "$PAIR" ]; }; then
+    echo "ERROR: the royalty route is half-set. Provide BOTH the input"
+    echo "       (INPUT_DENOM or INPUT_CW20) AND PAIR, or neither (lazy deploy)."
+    exit 1
+fi
+
+# Render the input AssetInfo and pair for the deploy banner.
+if [ -n "$INPUT_CW20" ]; then
+    ROUTE_INPUT_DESC="cw20:$INPUT_CW20"
+elif [ -n "$INPUT_DENOM" ]; then
+    ROUTE_INPUT_DESC="native:$INPUT_DENOM"
+else
+    ROUTE_INPUT_DESC="(unset — lazy)"
+fi
+
 banner "⚡ INSTANTIATE CHOICE ZAP LP"
 echo "  Code id:            $ZAP_LP_CODE_ID"
 echo "  Owner:              $OWNER"
 echo "  Default recipient:  ${DEFAULT_RECIPIENT:-(unset — user-zap only)}"
 echo "  Tip (bps):          $TIP_BPS"
 echo "  Min zap (base):     $MIN_ZAP_AMOUNT"
+echo "  Royalty input:      $ROUTE_INPUT_DESC"
+echo "  Royalty pair:       ${PAIR:-(unset — lazy)}"
 echo "  Wasm admin:         $ADMIN"
 echo " "
 
@@ -98,11 +127,27 @@ if [ -n "$DEFAULT_RECIPIENT" ]; then
     DEFAULT_RECIPIENT_JSON=$(printf '  "default_recipient": "%s",\n' "$DEFAULT_RECIPIENT")
 fi
 
+# input is Option<AssetInfo>; serde maps the choice AssetInfo enum to
+# {"native_token":{"denom":..}} or {"token":{"contract_addr":..}}. pair is
+# Option<String>. Omit both fields when unset (lazy deploy) so the contract
+# leaves the route unwired and `ZapBalance` errors with RoyaltyRouteUnset
+# until `UpdateConfig` sets it.
+INPUT_JSON=""
+if [ -n "$INPUT_CW20" ]; then
+    INPUT_JSON=$(printf '  "input": {"token": {"contract_addr": "%s"}},\n' "$INPUT_CW20")
+elif [ -n "$INPUT_DENOM" ]; then
+    INPUT_JSON=$(printf '  "input": {"native_token": {"denom": "%s"}},\n' "$INPUT_DENOM")
+fi
+PAIR_JSON=""
+if [ -n "$PAIR" ]; then
+    PAIR_JSON=$(printf '  "pair": "%s",\n' "$PAIR")
+fi
+
 # tip_bps is u16 → JSON number. min_zap_amount is Uint128 → JSON string.
 INIT_MSG=$(cat <<EOF
 {
   "owner": "$OWNER",
-${DEFAULT_RECIPIENT_JSON}  "tip_bps": $TIP_BPS,
+${DEFAULT_RECIPIENT_JSON}${INPUT_JSON}${PAIR_JSON}  "tip_bps": $TIP_BPS,
   "min_zap_amount": "$MIN_ZAP_AMOUNT"
 }
 EOF
@@ -128,6 +173,8 @@ echo "  Owner:              $OWNER"
 echo "  Default recipient:  ${DEFAULT_RECIPIENT:-(unset)}"
 echo "  Tip (bps):          $TIP_BPS"
 echo "  Min zap (base):     $MIN_ZAP_AMOUNT"
+echo "  Royalty input:      $ROUTE_INPUT_DESC"
+echo "  Royalty pair:       ${PAIR:-(unset — lazy)}"
 echo "  Wasm admin:         $ADMIN"
 echo " "
 
@@ -144,19 +191,27 @@ fi
 echo " "
 
 if [ -n "$DEFAULT_RECIPIENT" ]; then
-    echo "  Royalty pipeline next steps (owner-only, per royalty asset):"
-    echo "      # Native input:"
-    echo "      injectived tx wasm execute $ZAP_LP_ADDR \\"
-    echo "          '{\"register_route\":{\"input\":{\"native_token\":{\"denom\":\"<denom>\"}},\"pair\":\"inj1<pair>\"}}' \\"
-    echo "          --from=$FROM --chain-id=$CHAIN_ID --fees=$FEES --gas=$GAS --node=$NODE"
-    echo " "
-    echo "      # CW20 input:"
-    echo "      injectived tx wasm execute $ZAP_LP_ADDR \\"
-    echo "          '{\"register_route\":{\"input\":{\"token\":{\"contract_addr\":\"inj1<cw20>\"}},\"pair\":\"inj1<pair>\"}}' \\"
-    echo "          --from=$FROM --chain-id=$CHAIN_ID --fees=$FEES --gas=$GAS --node=$NODE"
-    echo " "
+    echo "  Royalty pipeline next steps (owner-only):"
+    if [ -z "$INPUT_SET" ]; then
+        echo "      # Route is unset (lazy). Wire it (input + pair together):"
+        echo "      #   native: '{\"update_config\":{\"input\":{\"native_token\":{\"denom\":\"<denom>\"}},\"pair\":\"inj1<pair>\"}}'"
+        echo "      #   cw20:   '{\"update_config\":{\"input\":{\"token\":{\"contract_addr\":\"inj1<cw20>\"}},\"pair\":\"inj1<pair>\"}}'"
+        echo "      injectived tx wasm execute $ZAP_LP_ADDR \\"
+        echo "          '{\"update_config\":{ ...input+pair... }}' \\"
+        echo "          --from=$FROM --chain-id=$CHAIN_ID --fees=$FEES --gas=$GAS --node=$NODE"
+        echo " "
+    else
+        echo "      # Route already pinned: input=$ROUTE_INPUT_DESC pair=$PAIR"
+        echo " "
+    fi
+    echo "      # Allowlist the keeper hot key (must be signed by the current owner):"
     echo "      injectived tx wasm execute $ZAP_LP_ADDR \\"
     echo "          '{\"add_keeper\":{\"address\":\"inj1<keeper>\"}}' \\"
+    echo "          --from=$FROM --chain-id=$CHAIN_ID --fees=$FEES --gas=$GAS --node=$NODE"
+    echo " "
+    echo "      # Optional: hand owner to a multisig AFTER AddKeeper (AddKeeper is owner-only):"
+    echo "      injectived tx wasm execute $ZAP_LP_ADDR \\"
+    echo "          '{\"update_config\":{\"owner\":\"inj1<multisig>\"}}' \\"
     echo "          --from=$FROM --chain-id=$CHAIN_ID --fees=$FEES --gas=$GAS --node=$NODE"
     echo " "
     echo "  Then point royalties at $ZAP_LP_ADDR (MsgSend for native, cw20::Transfer"

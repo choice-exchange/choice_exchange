@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# Configuration variables
-NODE="https://testnet.sentry.tm.injective.network:443"
-CHAIN_ID="injective-888"
-GAS="8000000"
-FEES="4000000000000000inj"
-FROM="testnet"
-PASSWORD="12345678"
+# Configuration variables (env-overridable)
+NODE="${NODE:-https://testnet.sentry.tm.injective.network:443}"
+CHAIN_ID="${CHAIN_ID:-injective-888}"
+GAS="${GAS:-8000000}"
+FEES="${FEES:-4000000000000000inj}"
+FROM="${FROM:-testnet}"
+PASSWORD="${PASSWORD:?export PASSWORD (keyring passphrase) — never commit it}"
 
 # Admin address (same as FROM)
 ADMIN_ADDRESS="inj1q2m26a7jdzjyfdn545vqsude3zwwtfrdap5jgz"
