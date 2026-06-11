@@ -403,17 +403,27 @@ fn execute_create_pool(
         // fee tiers. `min(999_999)` keeps `base <= max` (they meet at the cap)
         // and guarantees the pool accepts the config for every valid tier.
         max_fee_ppm: fee.saturating_mul(max_fee_multiple).min(999_999),
-        // The pool oracle works in SQRT-price space: it adds
-        // `(|sqrt_p - ema| / ema) * multiplier` ppm, and a P% price move is
-        // only ~P/2% in sqrt terms. At 100_000, a ~6% price deviation from
-        // the 10-minute EMA (~3% sqrt deviation) adds ~3000 ppm — doubling
-        // the 0.30% tier to its 2x cap; smaller tiers saturate at
-        // proportionally smaller deviations, larger at larger. (The old
-        // value of 100 needed a ~960x price move to reach the cap, making
-        // the dynamic fee a no-op.) Must stay <= the pool's 1_000_000
-        // instantiate bound.
-        volatility_multiplier: 100_000,
-        ema_halflife_seconds: 600,
+        // v2 dynamic fee: a decaying accumulator of realized tick-movement fed
+        // through a convex (squared) fee — `variable_ppm = control * v_a^2 / 1e6`,
+        // where `v_a` (in ticks) decays linearly to 0 over `volatility_decay_seconds`.
+        // The signal is raw ticks (1 tick ≈ 1 bp of price), so these constants are
+        // tier-independent (unlike v1's sqrt-space multiplier).
+        //
+        // - `variable_fee_control = 8800`: a single ~6% move (~583 ticks) adds
+        //   ~2990 ppm, doubling the 0.30% tier to its 2x cap; smaller moves add
+        //   convexly less, sustained/larger moves saturate the cap. Validated on
+        //   real NONJA candle data (plan §3).
+        // - `max_volatility_accumulator = 2000` ticks (~22% move): bounds v_a^2
+        //   well inside the u128 intermediate, far past where the fee saturates.
+        // - `volatility_decay_seconds = 600`: a 10-minute full-forget window — an
+        //   elevated fee persists across a move then relaxes to base as trading
+        //   calms, regardless of the new price level (the v1 gap-then-calm fix).
+        //
+        // Must stay <= the pool's 1_000_000 instantiate bound (control) and
+        // <= 2*MAX_TICK (accumulator); decay in 60..=86400.
+        variable_fee_control: 8_800,
+        max_volatility_accumulator: 2_000,
+        volatility_decay_seconds: 600,
         max_fee_change_per_second_ppm: 100,
     };
 

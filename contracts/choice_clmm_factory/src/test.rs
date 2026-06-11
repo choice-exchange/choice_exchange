@@ -210,7 +210,9 @@ mod tests {
                 let pool_msg: PoolInstantiateMsg = from_json(msg).unwrap();
                 assert_eq!(pool_msg.fee_config.base_fee_ppm, 3000);
                 assert_eq!(pool_msg.fee_config.max_fee_ppm, 30_000, "10x the tier");
-                assert_eq!(pool_msg.fee_config.volatility_multiplier, 100_000);
+                assert_eq!(pool_msg.fee_config.variable_fee_control, 8_800);
+                assert_eq!(pool_msg.fee_config.max_volatility_accumulator, 2_000);
+                assert_eq!(pool_msg.fee_config.volatility_decay_seconds, 600);
                 assert_eq!(pool_msg.fee_config.max_fee_change_per_second_ppm, 100);
             }
             other => panic!("unexpected message: {:?}", other),
@@ -257,12 +259,14 @@ mod tests {
                 assert_eq!(pool_msg.token0, native("ATOM"));
                 assert_eq!(pool_msg.token1, native("OSMO"));
                 assert_eq!(pool_msg.fee_config.base_fee_ppm, 500);
-                // Pin the full default dynamic-fee calibration: max = 2x base,
-                // multiplier 100_000 (sqrt-space — ~6% price deviation from the
-                // 10-min EMA saturates a tier to its cap), 100 ppm/s rate limit.
+                // Pin the full default v2 dynamic-fee calibration: max = 2x base,
+                // variable_fee_control 8800 (tick-space — a single ~6% move adds
+                // ~2990 ppm), max_volatility_accumulator 2000 ticks, 600s decay
+                // window, 100 ppm/s rate limit.
                 assert_eq!(pool_msg.fee_config.max_fee_ppm, 1000);
-                assert_eq!(pool_msg.fee_config.volatility_multiplier, 100_000);
-                assert_eq!(pool_msg.fee_config.ema_halflife_seconds, 600);
+                assert_eq!(pool_msg.fee_config.variable_fee_control, 8_800);
+                assert_eq!(pool_msg.fee_config.max_volatility_accumulator, 2_000);
+                assert_eq!(pool_msg.fee_config.volatility_decay_seconds, 600);
                 assert_eq!(pool_msg.fee_config.max_fee_change_per_second_ppm, 100);
                 assert_eq!(pool_msg.tick_spacing, 10);
 

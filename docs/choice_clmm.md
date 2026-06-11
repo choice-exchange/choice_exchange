@@ -20,7 +20,7 @@ POSITIONS: Map<(&str, i32, i32), PositionInfo>  // (owner, lower, upper) -> liqu
 TICK_BITMAP: Map<i16, Uint256>         // word_pos -> 256-bit bitmap of initialized ticks
 FEE_GROWTH_GLOBAL_0: Item<Uint256>     // cumulative fees per unit liquidity for token0
 FEE_GROWTH_GLOBAL_1: Item<Uint256>     // same for token1
-ORACLE: Item<OracleData>              // price_ema_x96, last_block_time
+ORACLE: Item<OracleData>              // last_update_time, last_tick, volatility_accumulator, last_fee_ppm
 ```
 
 **Key types (from `packages/choice_clmm_common/`):**
@@ -29,7 +29,7 @@ ORACLE: Item<OracleData>              // price_ema_x96, last_block_time
 AssetInfo::NativeToken { denom: String } | AssetInfo::Token { contract_addr: String }  // unified token type
 PoolState { sqrt_price: Uint256, tick: i32, liquidity: Uint128 }
 PoolConfig { factory: Addr, token0: AssetInfo, token1: AssetInfo, tick_spacing: u32, fee_config: FeeConfig }
-FeeConfig { base_fee_ppm: u32, max_fee_ppm: u32, volatility_multiplier: u32, ema_halflife_seconds: u64 }
+FeeConfig { base_fee_ppm: u32, max_fee_ppm: u32, variable_fee_control: u32, max_volatility_accumulator: u32, volatility_decay_seconds: u32, max_fee_change_per_second_ppm: u32 }
 PositionInfo { liquidity: u128, fee_growth_inside_0_last: Uint256, fee_growth_inside_1_last: Uint256, tokens_owed_0: Uint128, tokens_owed_1: Uint128 }
 TickInfo { active_positions_count: u128, liquidity_delta: i128, fee_growth_outside_0: Uint256, fee_growth_outside_1: Uint256, initialized: bool }
 ```
@@ -54,8 +54,8 @@ TickInfo { active_positions_count: u128, liquidity_delta: i128, fee_growth_outsi
 
 **Swap (`actions/swap.rs`)** — Token exchange through tick ranges
 
-1. Update oracle EMA
-2. Compute dynamic fee from price deviation: `fee = base + (|price - ema| / ema) * multiplier`, capped at max
+1. Update oracle volatility accumulator (decay by idle time, add realized tick-move)
+2. Compute dynamic fee (convex in realized volatility): `fee = base + control * v_a^2 / 1e6`, capped at max
 3. Loop through initialized ticks:
    - Find next initialized tick via bitmap (`next_initialized_tick_in_chunk`)
    - Compute swap step with `compute_swap_step()` (input consumed, output, fees)
@@ -104,30 +104,58 @@ All fee growth uses wrapping U256 arithmetic (intentional overflow at MAX).
 - `flip_tick()` toggles bit, removes word if zeroed
 - `next_initialized_tick_in_chunk()` finds next set bit (MSB for zero_for_one, LSB for one_for_zero)
 
-**Dynamic fees (`core/oracle.rs`)** — EMA-based volatility pricing
+**Dynamic fees (`core/oracle.rs`)** — convex realized-volatility pricing (v2)
+
+The fee tracks a **decaying accumulator of realized tick-movement** fed through a
+**convex (squared)** fee. The single pure `compute_fee` is shared by the write
+path (`update_oracle_and_fee`) and the read-only quote twin (`simulate_fee`), so
+a `Quote` returns exactly what a same-block swap charges:
 
 ```text
-# volatility is measured against the EMA as of the LAST update (pre-blend),
-# so the signal does not dilute with the time since the last swap:
-volatility = |current_price - ema_old|
-fee = clamp(base_fee + volatility * multiplier / ema_old, 0, max_fee)
+delta = now - last_update_time
+if delta == 0: return last_fee_ppm                         # same-block freeze (anti-manipulation)
 
-# then the reference is rolled forward and persisted:
-if delta >= halflife:
-    ema = current_price
-else:
-    ema = (ema_old * (halflife - delta) + current_price * delta) / halflife
+# 1. decay the accumulator by idle time (linear full-forget window), then add
+#    the realized move observed since the last update:
+window  = max(volatility_decay_seconds, 1)
+decayed = (delta >= window) ? 0 : v_a * (window - delta) / window
+v_a     = min(decayed + |current_tick - last_tick|, max_volatility_accumulator)
+
+# 2. convex variable fee (u128 intermediate for the square; VFEE_SCALE = 1e6):
+variable = control * v_a^2 / VFEE_SCALE
+raw_fee  = min(base_fee + variable, max_fee)
+
+# 3. rate-limit the change per elapsed second, then persist:
+fee = clamp(raw_fee, prev_fee +/- max_fee_change_per_second_ppm * delta)
+persist { last_update_time = now, last_tick = current_tick, v_a, last_fee = fee }
 ```
 
-Note `current_price` is the Q64.96 **sqrt** price, so a P% price move registers
-as only ~P/2% of `volatility/ema`. The factory's default calibration
-(`multiplier = 100_000`, `max_fee = base * max_fee_multiple` (default 2x, up
-to 10x for launchpad graduations), halflife 600s, rate limit 100 ppm/s) means
-a ~6% price deviation from the EMA adds ~3000 ppm — enough to saturate the
-0.30% tier to its default 0.60% cap; smaller tiers saturate at proportionally
-smaller deviations. `ema_halflife_seconds` is really a *full-forget window*
-(the blend is linear, reaching 100% at `delta == halflife`, ~2x faster than a
-true exponential half-life at mid deltas).
+The signal is raw **ticks** (1 tick ≈ 1 bp of price), so the calibration is
+**tier-independent** — no sqrt-space halving and no per-tier recalibration. The
+factory's default calibration (`variable_fee_control = 8800`,
+`max_volatility_accumulator = 2000` ticks, `volatility_decay_seconds = 600`,
+`max_fee = base * max_fee_multiple` (default 2x, up to 10x for launchpad
+graduations), rate limit 100 ppm/s) means a single ~6% move (~583 ticks) adds
+~2990 ppm — enough to saturate the 0.30% tier to its default 0.60% cap; sustained
+chop accumulates *above* a single step and saturates faster, while a slow trend
+reads as small per-step increments and stays near base.
+
+Why this shape (vs the v1 sqrt-EMA-displacement fee it replaces): the accumulator
+measures a *rate* of realized movement, not displacement from a lagging anchor, so
+the fee decays to base once trading calms **regardless of the new price level**
+(v1 kept charging while the EMA crawled up after a gap); the convex square charges
+proportionally more on large/sustained moves; and the instantaneous `last_tick`
+reference means `volatility_decay_seconds` is the *only* time constant (it tunes
+fee persistence alone). A fast round-trip is charged on both legs — deliberate
+LVR recapture, bounded by `max_fee` and self-policing against wash-griefing.
+Design-of-record: [`docs/clmm_dynamic_fee_v2_plan.md`](clmm_dynamic_fee_v2_plan.md);
+executable spec / backtest: `contracts/choice_clmm_pool/examples/fee_backtest.rs`.
+
+Safety: every step is checked/saturating arithmetic, the square uses a `u128`
+intermediate, the used `v_a` is capped before squaring, and `raw_fee` is provably
+`< 1_000_000` (it is `min(_, max_fee)` with `max_fee` constructor-bounded
+`< 1_000_000`) — which keeps the downstream `as u32` cast and `compute_swap_step`'s
+fee-denominator check safe.
 
 Protocol fees default **ON** per the Uniswap v3 deployment table — divisor 4
 (25% of swap fees) for tiers <= 0.05%, divisor 6 (~16.7%) above — with the

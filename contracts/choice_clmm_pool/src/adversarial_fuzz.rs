@@ -489,8 +489,9 @@ mod adversarial_fuzz {
                 fee_config: FeeConfig {
                     base_fee_ppm: 3000,
                     max_fee_ppm: 6000,
-                    volatility_multiplier: 100_000,
-                    ema_halflife_seconds: 600,
+                    variable_fee_control: 8_800,
+                    max_volatility_accumulator: 2_000,
+                    volatility_decay_seconds: 600,
                     max_fee_change_per_second_ppm: 100,
                 },
                 initial_sqrt_price: price_one(),

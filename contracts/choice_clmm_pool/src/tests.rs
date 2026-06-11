@@ -34,8 +34,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -69,8 +70,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 5000,
-                volatility_multiplier: 0,
-                ema_halflife_seconds: 0,
+                variable_fee_control: 0,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -97,8 +99,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -155,8 +158,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -241,8 +245,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -350,8 +355,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -418,8 +424,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -477,8 +484,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000, // 0.3%
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -585,8 +593,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -664,8 +673,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -727,8 +737,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -810,8 +821,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -942,8 +954,9 @@ mod tests {
                 fee_config: FeeConfig {
                     base_fee_ppm: 0, // 0% Base fee to isolate dynamic effects
                     max_fee_ppm: 100000,
-                    volatility_multiplier: multiplier, // Variable
-                    ema_halflife_seconds: 100,
+                    variable_fee_control: multiplier, // Variable
+                    max_volatility_accumulator: 2_000,
+                    volatility_decay_seconds: 100,
                     max_fee_change_per_second_ppm: 0,
                 },
                 initial_sqrt_price: get_price_one(),
@@ -1072,8 +1085,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 0,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 0,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(), // Tick 0
@@ -1160,8 +1174,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -1216,8 +1231,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 0,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 0,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -1329,8 +1345,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -1752,8 +1769,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -1828,8 +1846,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 0,
                 max_fee_ppm: 100_000, // 10%
-                volatility_multiplier: 500_000,
-                ema_halflife_seconds: 100,
+                variable_fee_control: 500_000,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 100,
                 max_fee_change_per_second_ppm: max_change_per_sec,
             },
             initial_sqrt_price: get_price_one(),
@@ -2234,13 +2253,17 @@ mod tests {
 
     #[test]
     fn phase4_gap_move_still_charged_after_quiet_period() {
-        // Regression for the EMA self-dilution/snap bug: the volatility fee is
-        // measured against the PRE-blend EMA, so a price move observed after a
-        // gap >= ema_halflife_seconds (here 100s) must still be charged. Before
-        // the fix, the blend snapped the EMA to the current price BEFORE the
-        // deviation was measured, so any swap following a move by more than one
-        // halflife of quiet paid exactly base fee — the mechanism silently
-        // never fired on infrequently-traded pools.
+        // v2 accumulator analogue of the old EMA self-dilution regression: a
+        // price move observed after a quiet gap >= volatility_decay_seconds
+        // (here 100s, so the accumulator has fully decayed to 0) must STILL be
+        // charged, because the fee at the probe's entry accumulates the realized
+        // move `|current_tick - last_tick|` from the last-observed tick — and the
+        // last tick stored was the whale's PRE-move entry tick, not the moved
+        // price. The full excursion therefore registers regardless of how much
+        // idle time elapsed, so the followers of any move pay even on an
+        // infrequently-traded pool (the v1 EMA snapped the reference to price
+        // before the deviation was measured, zeroing the signal for these
+        // followers).
         let mut deps = mock_dependencies();
         // Rate limiting OFF so the elevated volatility fee is stored verbatim.
         let env_start = setup_oracle_pool(&mut deps, 0);
@@ -2263,10 +2286,10 @@ mod tests {
         )
         .unwrap();
 
-        // Probe AFTER a quiet gap of 1.5x the halflife: its pre-swap price (the
-        // whale's post-move price) diverges from the stored EMA, and the snap
-        // must not erase that. The fee the probe paid is the value it committed
-        // to the oracle.
+        // Probe AFTER a quiet gap of 1.5x the decay window: its entry tick (the
+        // whale's post-move price) diverges from the stored last_tick, and full
+        // accumulator decay must not erase that realized move. The fee the probe
+        // paid is the value it committed to the oracle.
         let mut env_probe = env_whale.clone();
         env_probe.block.time = env_probe.block.time.plus_seconds(150);
         let trader = deps.api.addr_make("trader");
@@ -2289,7 +2312,7 @@ mod tests {
             .last_fee_ppm;
         assert!(
             committed > 0,
-            "a move observed after a quiet gap >= halflife must charge above base (0), got {}",
+            "a move observed after a quiet gap >= decay window must charge above base (0), got {}",
             committed
         );
     }
@@ -2342,8 +2365,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 0,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 0,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -2432,8 +2456,9 @@ mod tests {
                 fee_config: FeeConfig {
                     base_fee_ppm: 500,
                     max_fee_ppm: 1000,
-                    volatility_multiplier: 100_000,
-                    ema_halflife_seconds: 600,
+                    variable_fee_control: 8_800,
+                    max_volatility_accumulator: 2_000,
+                    volatility_decay_seconds: 600,
                     max_fee_change_per_second_ppm: 100,
                 },
                 initial_sqrt_price: get_price_one(),
@@ -3005,8 +3030,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 0,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 0,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -3250,8 +3276,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: get_price_one(),
@@ -3332,8 +3359,9 @@ mod tests {
             fee_config: FeeConfig {
                 base_fee_ppm: 3000,
                 max_fee_ppm: 10000,
-                volatility_multiplier: 100,
-                ema_halflife_seconds: 600,
+                variable_fee_control: 8_800,
+                max_volatility_accumulator: 2_000,
+                volatility_decay_seconds: 600,
                 max_fee_change_per_second_ppm: 0,
             },
             initial_sqrt_price: sqrt_price,

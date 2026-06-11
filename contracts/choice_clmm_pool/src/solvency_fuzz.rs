@@ -222,16 +222,17 @@ mod solvency_fuzz {
                 token0: native(T0),
                 token1: native(T1),
                 tick_spacing: 10,
-                // Factory mainnet defaults for the 0.30% tier. The fuzzer used
-                // to pin `volatility_multiplier: 100` / rate limit 0, which
-                // (with the time cadence below) froze the fee at base — so
-                // solvency was never exercised while fee_pips actually swings
-                // 3000..6000 under rate limiting, exactly how mainnet runs.
+                // Factory mainnet defaults for the 0.30% tier (v2 accumulator).
+                // The fuzzer used to pin a near-noop volatility config / rate
+                // limit 0, which (with the time cadence below) froze the fee at
+                // base — so solvency was never exercised while fee_pips actually
+                // swings 3000..6000 under rate limiting, exactly how mainnet runs.
                 fee_config: FeeConfig {
                     base_fee_ppm: 3000,
                     max_fee_ppm: 6000,
-                    volatility_multiplier: 100_000,
-                    ema_halflife_seconds: 600,
+                    variable_fee_control: 8_800,
+                    max_volatility_accumulator: 2_000,
+                    volatility_decay_seconds: 600,
                     max_fee_change_per_second_ppm: 100,
                 },
                 initial_sqrt_price: price_one(),

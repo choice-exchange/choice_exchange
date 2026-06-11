@@ -576,9 +576,10 @@ pub fn execute_swap(
     }
 
     // Oracle & Dynamic Fee
-    // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
-    // change, and persists. Returns the rate-limited ppm to use for this swap.
-    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Single-call oracle update: decays the volatility accumulator, folds in the
+    // realized tick-move, computes the convex fee, clamps the per-second change,
+    // and persists. Returns the rate-limited ppm to use for this swap.
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.tick)?;
     let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
 
     let result = compute_swap(
@@ -659,9 +660,10 @@ pub fn execute_swap_exact_input(
     let fg1 = FEE_GROWTH_GLOBAL_1.load(deps.storage).unwrap_or_default();
 
     // Oracle & Dynamic Fee
-    // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
-    // change, and persists. Returns the rate-limited ppm to use for this swap.
-    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Single-call oracle update: decays the volatility accumulator, folds in the
+    // realized tick-move, computes the convex fee, clamps the per-second change,
+    // and persists. Returns the rate-limited ppm to use for this swap.
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.tick)?;
     let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
 
     let result = compute_swap(
@@ -747,9 +749,10 @@ pub fn execute_swap_exact_input_cw20(
     };
 
     // Oracle & Dynamic Fee
-    // Single-call oracle update: blends EMA, computes raw fee, clamps per-block
-    // change, and persists. Returns the rate-limited ppm to use for this swap.
-    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    // Single-call oracle update: decays the volatility accumulator, folds in the
+    // realized tick-move, computes the convex fee, clamps the per-second change,
+    // and persists. Returns the rate-limited ppm to use for this swap.
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.tick)?;
     let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
 
     let result = compute_swap(
@@ -829,7 +832,7 @@ pub fn query_quote(
     // Quote the fee the SAME way a swap would compute it (read-only `simulate_fee`), so the
     // quote matches what the swap will charge in this block instead of returning a frozen
     // `last_fee_ppm` that ignores price movement since the prior swap.
-    let fee_pips = simulate_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let fee_pips = simulate_fee(deps.storage, &env, slot0.tick)?;
 
     // The protocol carve only redistributes the fee between LPs and the
     // protocol; it does not change `amount_out`/`amount_in`/`fee_amount`, so the
@@ -892,7 +895,7 @@ pub fn execute_swap_exact_output(
         max_sqrt_ratio() - Uint256::one()
     };
 
-    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let fee_pips = update_oracle_and_fee(deps.storage, &env, slot0.tick)?;
     let (fee_protocol_0, fee_protocol_1) = load_protocol_fee_rates(deps.storage);
 
     let result = compute_swap(
@@ -990,7 +993,7 @@ pub fn query_quote_exact_output(
     };
 
     // See `query_quote`: use the read-only swap-fee simulation so quote == in-block execution.
-    let fee_pips = simulate_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let fee_pips = simulate_fee(deps.storage, &env, slot0.tick)?;
 
     let result = compute_swap(
         deps.storage,

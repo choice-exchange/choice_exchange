@@ -56,8 +56,9 @@ mod regime_tests {
                 fee_config: FeeConfig {
                     base_fee_ppm: base_fee,
                     max_fee_ppm: base_fee.max(6000),
-                    volatility_multiplier: vol_mult,
-                    ema_halflife_seconds: 600,
+                    variable_fee_control: vol_mult,
+                    max_volatility_accumulator: 2_000,
+                    volatility_decay_seconds: 600,
                     max_fee_change_per_second_ppm: 0,
                 },
                 initial_sqrt_price: price_one(),
@@ -1282,7 +1283,7 @@ mod regime_tests {
         base_fee: u32,
         max_fee: u32,
         vol_mult: u32,
-        halflife: u64,
+        halflife: u32,
         rate_ppm: u32,
     ) -> (OwnedDeps<MemoryStorage, MockApi, MockQuerier>, Env, Addr) {
         let mut deps = mock_dependencies();
@@ -1298,8 +1299,9 @@ mod regime_tests {
                 fee_config: FeeConfig {
                     base_fee_ppm: base_fee,
                     max_fee_ppm: max_fee,
-                    volatility_multiplier: vol_mult,
-                    ema_halflife_seconds: halflife,
+                    variable_fee_control: vol_mult,
+                    max_volatility_accumulator: 2_000,
+                    volatility_decay_seconds: halflife,
                     max_fee_change_per_second_ppm: rate_ppm,
                 },
                 initial_sqrt_price: price_one(),
@@ -1341,8 +1343,8 @@ mod regime_tests {
     fn dynamic_fee_rate_limit_fuzz() {
         const BASE: u32 = 3_000;
         const MAX: u32 = 30_000;
-        const VOL: u32 = 1_000_000; // high volatility amplification
-        const HALFLIFE: u64 = 600;
+        const VOL: u32 = 1_000_000; // high volatility amplification (variable_fee_control)
+        const HALFLIFE: u32 = 600; // volatility_decay_seconds
         const RATE: u32 = 50; // ppm per second
         const SEEDS: u64 = 40;
         const STEPS: usize = 120;
@@ -1574,8 +1576,9 @@ mod regime_tests {
                 fee_config: FeeConfig {
                     base_fee_ppm: 3000,
                     max_fee_ppm: 6000,
-                    volatility_multiplier: 0,
-                    ema_halflife_seconds: 600,
+                    variable_fee_control: 0,
+                    max_volatility_accumulator: 2_000,
+                    volatility_decay_seconds: 600,
                     max_fee_change_per_second_ppm: 0,
                 },
                 initial_sqrt_price: price_one(),

@@ -95,28 +95,40 @@ pub fn instantiate(
             reason: "base_fee_ppm must be <= max_fee_ppm".to_string(),
         });
     }
-    // A window, not just non-zero: a tiny halflife makes the EMA snap to the
-    // current price on (almost) every update, so measured volatility is ~0 and
-    // the dynamic fee silently degenerates to a constant base fee; a huge one
-    // freezes the EMA near the pool's initial price, charging `max_fee_ppm`
-    // forever once price drifts. One minute to one day brackets every sensible
-    // configuration (the factory uses 600).
-    if !(60..=86_400).contains(&msg.fee_config.ema_halflife_seconds) {
+    // `volatility_decay_seconds` is the only time constant in the v2 fee math (it
+    // tunes how long an elevated fee persists before the accumulator forgets a
+    // move). A window, not just non-zero: a tiny window forgets a move almost
+    // immediately so the dynamic fee degenerates toward constant base; a huge one
+    // lets the accumulator persist for days. One minute to one day brackets every
+    // sensible configuration (the factory uses 600). It is also a divisor in the
+    // decay math, so it must be > 0 — the lower bound of 60 guarantees that.
+    if !(60..=86_400).contains(&msg.fee_config.volatility_decay_seconds) {
         return Err(ContractError::InvalidConfig {
-            reason: "ema_halflife_seconds must be in 60..=86400".to_string(),
+            reason: "volatility_decay_seconds must be in 60..=86400".to_string(),
         });
     }
-    // `volatility_multiplier` is bounded above by 1_000_000: the raw dynamic fee
-    // is `base + |Δprice|/ema * multiplier` and is then clamped to `max_fee_ppm`
-    // (< 1_000_000), so a larger multiplier only makes the fee saturate to the
-    // cap sooner — it can never produce a fee >= 1_000_000 nor overflow (mul_div
-    // is 512-bit, the add is checked). The bound is defense-in-depth so a pool
-    // can't be instantiated with a nonsensical multiplier, and documents that
-    // anything past the ppm scale is meaningless. `0` is allowed (disables the
-    // volatility component → constant `base_fee_ppm`).
-    if msg.fee_config.volatility_multiplier > 1_000_000 {
+    // `max_volatility_accumulator` caps `v_a` (in ticks). Bound it at `2 * MAX_TICK`
+    // — the largest realized move physically possible in one step (MIN_TICK to
+    // MAX_TICK) — so `v_a` can never be configured past what the swap math can
+    // actually produce, and the `control * v_a^2` product (u128 intermediate)
+    // stays far inside u128 for any in-range `variable_fee_control`. `0` is
+    // allowed (pins `v_a` to 0 → constant `base_fee_ppm`).
+    if msg.fee_config.max_volatility_accumulator > (2 * MAX_TICK) as u32 {
         return Err(ContractError::InvalidConfig {
-            reason: "volatility_multiplier must be <= 1_000_000".to_string(),
+            reason: "max_volatility_accumulator must be <= 2 * MAX_TICK".to_string(),
+        });
+    }
+    // `variable_fee_control` is bounded above by 1_000_000 (= VFEE_SCALE): the
+    // variable fee is `control * v_a^2 / VFEE_SCALE` and is then clamped to
+    // `max_fee_ppm` (< 1_000_000), so a larger control only makes the fee saturate
+    // to the cap sooner — it can never produce a fee >= 1_000_000 nor overflow
+    // (the square is a checked u128 multiply, the add is checked). The bound is
+    // defense-in-depth so a pool can't be instantiated with a nonsensical control,
+    // and documents that anything past the ppm scale is meaningless. `0` is allowed
+    // (disables the volatility component → constant `base_fee_ppm`).
+    if msg.fee_config.variable_fee_control > 1_000_000 {
+        return Err(ContractError::InvalidConfig {
+            reason: "variable_fee_control must be <= 1_000_000".to_string(),
         });
     }
     // `max_fee_change_per_second_ppm == 0` is allowed — disables rate limiting.
@@ -180,11 +192,10 @@ pub fn instantiate(
     };
     POOL_STATE.save(deps.storage, &slot0)?;
 
-    initialize_oracle(
-        deps.storage,
-        env.block.time.seconds(),
-        msg.initial_sqrt_price,
-    )?;
+    // Seed the oracle's volatility reference from the opening tick (already
+    // derived from `initial_sqrt_price` above), so the first swap measures its
+    // realized move relative to the price the pool was created at.
+    initialize_oracle(deps.storage, env.block.time.seconds(), current_tick)?;
 
     // Protocol fees default ON, matching the Uniswap v3 deployment table:
     // 1/4 of swap fees (25%) on the 0.01%/0.05% tiers, 1/6 (~16.7%) on the
@@ -550,7 +561,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::GetDynamicFee {} => {
             let state = POOL_STATE.load(deps.storage)?;
-            let fee_ppm = simulate_fee(deps.storage, &env, state.sqrt_price)?;
+            let fee_ppm = simulate_fee(deps.storage, &env, state.tick)?;
             to_json_binary(&choice_clmm_common::pool::DynamicFeeResponse { fee_ppm })
         }
     }

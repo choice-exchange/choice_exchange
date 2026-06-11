@@ -68,7 +68,7 @@ artifacts/                # Built WASM binaries
 - CLMM supports both native tokens and CW20 tokens via `AssetInfo` enum (`NativeToken { denom }` | `Token { contract_addr }`). Pools can be any combination (native/native, native/CW20, CW20/CW20). CW20 swaps work via `Receive` hook (CW20 Send) or `TransferFrom` (requires allowance)
 - Prices stored as Q64.96 fixed-point sqrt prices (`Uint256`). Ticks are `log_1.0001(price)` integers in range `[-887272, 887272]`
 - Fee growth accumulators use wrapping U256 arithmetic (intentional overflow at `U256::MAX`)
-- Dynamic fees: EMA price oracle adjusts fee between `base_fee_ppm` and `max_fee_ppm` based on volatility
+- Dynamic fees: a decaying realized-tick-movement accumulator drives a convex (squared) fee between `base_fee_ppm` and `max_fee_ppm`; one pure `compute_fee` is shared by the swap (write) and quote (read-only) paths, with a same-block freeze + per-second rate-limit. See `docs/choice_clmm.md` and `docs/clmm_dynamic_fee_v2_plan.md`
 - CLMM positions are NFTs minted by choice_clmm_manager (cw721)
 - Legacy LP tokens are native Injective denoms: `factory/{pair_address}/lp`
 

@@ -35,7 +35,8 @@ use choice_clmm_common::factory::{
     QueryMsg as FactoryQueryMsg,
 };
 use choice_clmm_common::pool::{
-    AllPositionsEntry, Cw20HookMsg, ExecuteMsg as PoolExecuteMsg, QueryMsg as PoolQueryMsg,
+    AllPositionsEntry, Cw20HookMsg, ExecuteMsg as PoolExecuteMsg, ProtocolFeesResponse,
+    QueryMsg as PoolQueryMsg,
 };
 use choice_clmm_common::types::AssetInfo;
 use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg};
@@ -600,22 +601,34 @@ fn run_pool_fuzz(
         "seed{seed}: owed not fully drained: {:?}",
         (o0, o1)
     );
-    let resid0 = tok_balance(wasm, bank, t0, &pool);
-    let resid1 = tok_balance(wasm, bank, t1, &pool);
+    // Accrued protocol fees are pool-HELD but protocol-OWNED (defaulted ON at
+    // instantiate, swept separately via `CollectProtocol`, never withdrawable by
+    // LPs), so they legitimately remain in the pool balance after LPs fully exit.
+    // Exclude them from the LP-residual invariant — otherwise the dynamic fee's
+    // protocol carve (larger under the v2 convex fee on big-move fuzz swaps)
+    // shows up as a false "stranded LP funds" failure. The carve is exercised by
+    // the protocol-fee tests; here we assert the LP-attributable residual is dust.
+    let pf: ProtocolFeesResponse = wasm
+        .query(&pool, &PoolQueryMsg::GetProtocolFees {})
+        .unwrap();
+    let resid0 = tok_balance(wasm, bank, t0, &pool).saturating_sub(pf.protocol_fees_0.u128());
+    let resid1 = tok_balance(wasm, bank, t1, &pool).saturating_sub(pf.protocol_fees_1.u128());
     // Dust is bounded: pool keeps a few base units per mint/swap rounding. The
     // deposits/volumes here are ≥1e6..1e9, so any non-dust residual (a stranded
     // position or mis-credited fee) is caught by this tight bound.
     let dust_bound = 5_000u128;
     assert!(
         resid0 <= dust_bound,
-        "seed{seed}: token0 stranded {} > dust {}",
+        "seed{seed}: token0 stranded {} (excl. {} protocol fees) > dust {}",
         resid0,
+        pf.protocol_fees_0.u128(),
         dust_bound
     );
     assert!(
         resid1 <= dust_bound,
-        "seed{seed}: token1 stranded {} > dust {}",
+        "seed{seed}: token1 stranded {} (excl. {} protocol fees) > dust {}",
         resid1,
+        pf.protocol_fees_1.u128(),
         dust_bound
     );
 }

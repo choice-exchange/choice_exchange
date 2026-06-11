@@ -45,10 +45,19 @@ pub struct PositionInfo {
 
 #[cw_serde]
 pub struct OracleData {
-    /// Exponential Moving Average of sqrt_price, Q64.96.
-    pub price_ema_x96: Uint256,
     /// Wall-clock seconds of the last `update_oracle_and_fee` call.
-    pub last_block_time: u64,
+    pub last_update_time: u64,
+    /// Tick observed at the last update. The price reference for the next
+    /// volatility measurement: `|current_tick - last_tick|` is the realized
+    /// move added to the accumulator. Instantaneous (no smoothing lag), so the
+    /// decay window is the only time constant in the fee math.
+    pub last_tick: i32,
+    /// Decaying accumulator of realized tick-movement (`v_a`), in ticks. Each
+    /// update decays it linearly by the idle time (full-forget over
+    /// `volatility_decay_seconds`) then adds the realized move; it is capped at
+    /// `max_volatility_accumulator` and feeds the convex variable fee
+    /// `control * v_a^2 / VFEE_SCALE`.
+    pub volatility_accumulator: u64,
     /// Most recent dynamic fee (ppm), rate-limited across blocks. This is
     /// the value same-block callers (swaps, quotes, flash) get back — the
     /// raw computed fee is clamped to ±`max_fee_change_ppm * seconds_elapsed`

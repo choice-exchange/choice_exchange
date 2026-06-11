@@ -120,7 +120,7 @@ pub fn execute_flash(
     // stale — diverging from the swap fee whenever price moved since the last
     // swap). Flash does not move the price, so we must NOT persist the oracle
     // (`update_oracle_and_fee`); the read-only twin is exactly right.
-    let fee_pips = simulate_fee(deps.storage, &env, slot0.sqrt_price)?;
+    let fee_pips = simulate_fee(deps.storage, &env, slot0.tick)?;
     let fee0 = flash_fee(amount0, fee_pips)?;
     let fee1 = flash_fee(amount1, fee_pips)?;
 

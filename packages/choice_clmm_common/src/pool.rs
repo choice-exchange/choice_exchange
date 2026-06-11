@@ -48,18 +48,28 @@ pub struct PoolState {
 
 #[cw_serde]
 pub struct FeeConfig {
-    pub base_fee_ppm: u32, // e.g., 3000 = 0.3%
-    pub max_fee_ppm: u32,  // e.g., 10000 = 1%
-    /// Scales the volatility component: `(|sqrt_p - ema| / ema) * multiplier`
-    /// ppm. NB the oracle works in SQRT-price space, so a P% price move is
-    /// only ~P/2% of relative deviation — calibrate accordingly (the factory
-    /// uses 100_000: a ~6% price deviation adds ~3000 ppm).
-    pub volatility_multiplier: u32,
-    /// EMA blend window in seconds. Misnomer kept for compatibility: the
-    /// blend is LINEAR in the time since the last update, fully forgetting
-    /// the old EMA at `delta >= halflife` — i.e. a full-forget window, ~2x
-    /// faster than a true exponential half-life at mid deltas.
-    pub ema_halflife_seconds: u64,
+    pub base_fee_ppm: u32, // e.g., 3000 = 0.3% — fee floor
+    pub max_fee_ppm: u32,  // e.g., 10000 = 1% — hard cap
+    /// Scales the convex volatility component: the variable fee is
+    /// `variable_fee_control * v_a^2 / VFEE_SCALE` ppm, where `v_a` is the
+    /// decaying volatility accumulator (in ticks) maintained by the oracle and
+    /// `VFEE_SCALE = 1_000_000` (see `core::oracle`). The signal is raw ticks
+    /// (1 tick ≈ 1 bp of price), so this constant is tier-independent — the
+    /// factory uses 8800: a single ~6% move (~583 ticks) adds ~2990 ppm.
+    /// `0` disables the volatility component → constant `base_fee_ppm`.
+    pub variable_fee_control: u32,
+    /// Cap on the volatility accumulator `v_a`, in ticks. Bounds `v_a^2` so the
+    /// `control * v_a^2` product stays well inside the u128 intermediate and
+    /// the fee saturates predictably. The factory uses 2000 (≈ a 22% move),
+    /// well past the point where the variable fee saturates `max_fee_ppm`.
+    pub max_volatility_accumulator: u32,
+    /// Full-forget decay window in seconds: the accumulator linearly decays to
+    /// 0 over this much idle time. Tunes ONLY fee persistence (the price
+    /// reference is always the last observed tick, so there is no coupled
+    /// anchor-adaptation constant). The factory uses 600 (a 10-minute window):
+    /// an elevated fee persists across a move then relaxes to base as trading
+    /// calms, regardless of the new price level.
+    pub volatility_decay_seconds: u32,
     /// Maximum fee change per second in ppm. The dynamic fee returned to the
     /// swap loop is clamped to `|new_fee - prev_fee| <= value * seconds_elapsed`
     /// — so a single-block manipulated price cannot jerk the fee to
