@@ -169,88 +169,9 @@ for wasm in "${REQUIRED_WASMS[@]}"; do
     fi
 done
 
-# ─── Helpers (local to this script — not promoted to lib.sh yet) ───────────
-# Broadcast a plain `wasm execute` and wait for indexing. Aborts on chain-level
-# tx failure. Echoes the txhash on success.
-#
-# Note: `injectived` may exit non-zero before producing a txhash (e.g. account
-# sequence mismatch surfaced locally). With `set -e`, a bare `tx_output=$(...)`
-# whose subshell fails would kill the script silently before we can read
-# `tx_output`. Capture rc explicitly so we always surface the underlying
-# stderr.
-exec_contract() {
-    local addr="$1"; local msg="$2"; local desc="$3"
-    echo "  > exec [$desc] on $addr" >&2
-    local tx_output rc=0 txhash
-    tx_output=$(printf '%s\n' "$PASSWORD" | injectived tx wasm execute "$addr" "$msg" \
-        --from="$FROM" --chain-id="$CHAIN_ID" --yes \
-        --fees="$FEES" --gas="$GAS" --node="$NODE" 2>&1) || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        echo "ERROR: injectived tx wasm execute exited rc=$rc on $addr" >&2
-        echo "  msg: $msg" >&2
-        echo "$tx_output" >&2
-        return 1
-    fi
-    txhash=$(echo "$tx_output" | grep -o 'txhash: [A-F0-9]*' | awk '{print $2}')
-    if [ -z "$txhash" ]; then
-        echo "ERROR: could not parse txhash from exec output:" >&2
-        echo "$tx_output" >&2
-        return 1
-    fi
-    wait_for_tx "$txhash" > /dev/null
-    echo "$txhash"
-}
-
-# Broadcast `wasm set-contract-admin` and wait for indexing. Same rc-capture
-# pattern as `exec_contract` — see that comment for why.
-#
-# wasmd rejects `MsgUpdateAdmin` when the new admin equals the existing one
-# (`new admin is the same as the old: invalid` at wasmd/x/wasm/types/tx.go).
-# That trips on testnet self-rotations where DEV_MULTISIG == SIGNER_ADDRESS.
-# Skip the broadcast when already at target so the script stays usable as a
-# dry-run / validation harness.
-set_admin() {
-    local addr="$1"; local new_admin="$2"
-    local current
-    current=$(query_admin "$addr")
-    if [ "$current" = "$new_admin" ]; then
-        echo "  > set-contract-admin $addr already = $new_admin — skipping" >&2
-        return 0
-    fi
-    echo "  > set-contract-admin $addr → $new_admin (was $current)" >&2
-    local tx_output rc=0 txhash
-    tx_output=$(printf '%s\n' "$PASSWORD" | injectived tx wasm set-contract-admin \
-        "$addr" "$new_admin" \
-        --from="$FROM" --chain-id="$CHAIN_ID" --yes \
-        --fees="$FEES" --gas="$GAS" --node="$NODE" 2>&1) || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        echo "ERROR: injectived tx wasm set-contract-admin exited rc=$rc on $addr → $new_admin" >&2
-        echo "$tx_output" >&2
-        return 1
-    fi
-    txhash=$(echo "$tx_output" | grep -o 'txhash: [A-F0-9]*' | awk '{print $2}')
-    if [ -z "$txhash" ]; then
-        echo "ERROR: could not parse txhash from set-contract-admin output:" >&2
-        echo "$tx_output" >&2
-        return 1
-    fi
-    wait_for_tx "$txhash" > /dev/null
-}
-
-# Query a contract's current wasm-admin. Echoes the address on stdout.
-query_admin() {
-    local addr="$1"
-    injectived query wasm contract "$addr" --node="$NODE" 2>/dev/null \
-        | grep -m1 'admin:' | awk '{print $2}'
-}
-
-# Read a single field from a contract's `{"config":{}}` response. Strips quotes.
-query_config_field() {
-    local addr="$1"; local field="$2"
-    injectived query wasm contract-state smart "$addr" '{"config":{}}' \
-        --node="$NODE" 2>/dev/null \
-        | grep -m1 "$field:" | awk '{print $2}' | tr -d '"'
-}
+# ─── Helpers ───────────────────────────────────────────────────────────────
+# exec_contract / set_admin / query_admin / query_config_field are provided by
+# lib.sh (sourced above) and shared with deploy_clmm_mainnet.sh.
 
 # ─── Banner ────────────────────────────────────────────────────────────────
 banner "🚀 FULL LAZY DEPLOY"

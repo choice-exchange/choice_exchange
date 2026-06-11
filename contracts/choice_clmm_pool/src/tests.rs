@@ -2418,31 +2418,36 @@ mod tests {
     }
 
     #[test]
-    fn protocol_fee_on_by_default_per_v3_table() {
-        // Defaults follow the Uniswap v3 deployment table: divisor 6 (~16.7%
-        // of fees) for tiers above 0.05%, divisor 4 (25%) at or below it.
-        // setup_protocol_pool uses base 3000 -> 6.
+    fn protocol_fee_off_by_default() {
+        // Mainnet-launch policy: protocol fees default OFF (divisor 0) on every
+        // tier, so the full swap fee — including the v2 dynamic component —
+        // accrues to LPs and nothing is carved to the treasury until governance
+        // turns it on via `SetFeeProtocol`. setup_protocol_pool uses base 3000.
         let (mut deps, _owner) = setup_protocol_pool();
         let cfg = crate::state::PROTOCOL_FEE_CONFIG
             .load(&deps.storage)
             .unwrap();
-        assert_eq!(cfg.fee_protocol_0, 6, "0.30% tier defaults to 1/6 carve");
-        assert_eq!(cfg.fee_protocol_1, 6);
+        assert_eq!(cfg.fee_protocol_0, 0, "0.30% tier launches with no carve");
+        assert_eq!(cfg.fee_protocol_1, 0);
 
-        // A swap big enough that floor(fee/6) is non-zero accrues protocol
-        // fees with NO SetFeeProtocol call: 12_000 in -> fee 36 -> carve 6.
+        // A swap that WOULD carve if fees were on (12_000 in -> fee 36) accrues
+        // ZERO protocol fee with no SetFeeProtocol call: the carve is off.
         let res = do_swap_zero_for_one(&mut deps, 12_000);
-        assert_ne!(
+        assert_eq!(
             attr(&res, "protocol_fee"),
             "0",
-            "carve must be on by default"
+            "carve must be off by default"
         );
 
         let q = query(deps.as_ref(), mock_env(), QueryMsg::GetProtocolFees {}).unwrap();
         let fees: choice_clmm_common::pool::ProtocolFeesResponse = from_json(&q).unwrap();
-        assert!(!fees.protocol_fees_0.is_zero());
+        assert!(
+            fees.protocol_fees_0.is_zero() && fees.protocol_fees_1.is_zero(),
+            "no protocol fees accrue by default"
+        );
 
-        // Tier rule, low side: a base <= 500 ppm pool defaults to 1/4.
+        // The tier rule no longer applies: a base <= 500 ppm pool also defaults
+        // to 0 (previously 1/4).
         let mut deps2 = mock_dependencies();
         let factory = deps2.api.addr_make("factory");
         instantiate(
@@ -2468,7 +2473,7 @@ mod tests {
         let cfg2 = crate::state::PROTOCOL_FEE_CONFIG
             .load(&deps2.storage)
             .unwrap();
-        assert_eq!(cfg2.fee_protocol_0, 4, "0.05% tier defaults to 1/4 carve");
+        assert_eq!(cfg2.fee_protocol_0, 0, "low tier also launches with no carve");
     }
 
     #[test]

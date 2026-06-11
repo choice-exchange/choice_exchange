@@ -197,21 +197,18 @@ pub fn instantiate(
     // realized move relative to the price the pool was created at.
     initialize_oracle(deps.storage, env.block.time.seconds(), current_tick)?;
 
-    // Protocol fees default ON, matching the Uniswap v3 deployment table:
-    // 1/4 of swap fees (25%) on the 0.01%/0.05% tiers, 1/6 (~16.7%) on the
-    // 0.30%/1.00% tiers. The factory owner can retune or disable per pool via
-    // `SetFeeProtocol` (valid divisors 0 | 4..=10). Treasury defaults to the
-    // factory owner (so a later `CollectProtocol` never strands funds at the
-    // factory contract); the owner can repoint it via
-    // `UpdateProtocolFeeConfig`. The factory's CONFIG is already committed at
-    // this point (instantiate runs inside the factory's CreatePool
-    // submessage), so the query is safe; fall back to the factory address if
-    // it is somehow unavailable.
-    let default_divisor: u8 = if msg.fee_config.base_fee_ppm <= 500 {
-        4
-    } else {
-        6
-    };
+    // Protocol fees default OFF (divisor 0): every pool launches with the full
+    // swap fee — including the v2 dynamic component — accruing to LPs and NO
+    // treasury carve. This is the mainnet-launch policy (LP-first; turn the
+    // protocol split on later as a deliberate governance act). The factory
+    // owner enables/retunes the carve per pool via `SetFeeProtocol` (valid
+    // divisors 0 | 4..=10). `treasury` is still seeded to the factory owner so
+    // that if/when the carve is enabled a later `CollectProtocol` never strands
+    // funds at the factory contract; with divisor 0 it is inert (no carve
+    // happens). The factory's CONFIG is already committed at this point
+    // (instantiate runs inside the factory's CreatePool submessage), so the
+    // query is safe; fall back to the factory address if it is unavailable.
+    let default_divisor: u8 = 0;
     let treasury = deps
         .querier
         .query_wasm_smart::<FactoryConfigResponse>(
