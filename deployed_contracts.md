@@ -61,17 +61,21 @@ Choice Dev Multisig: `inj1vcszz8j58m79exzdlpa8m9u5eyu9r37u7jhm7k`
 
 ## Mainnet Code IDs
 
-| Component       | Code ID |
-| --------------- | ------- |
-| Pair            | 1692    |
-| Factory         | 1693    |
-| Burn Manager    | 1690    |
-| Router          | 1691    |
-| Admin Timelock  | 1999    |
-| Farm            | 2015    |
-| Farm Factory    | 2016    |
-| Zap LP          | 2002    |
-| Token Locker    | 2003    |
+| Component         | Code ID |
+| ----------------- | ------- |
+| Pair              | 1692    |
+| Factory           | 1693    |
+| Burn Manager      | 1690    |
+| Router            | 1691    |
+| Admin Timelock    | 1999    |
+| Farm              | 2015    |
+| Farm Factory      | 2016    |
+| Zap LP            | 2002    |
+| Token Locker      | 2003    |
+| CLMM Pool         | 2039    |
+| CLMM Factory      | 2040    |
+| CLMM Manager      | 2041    |
+| DEX Aggregator v2 | 2042    |
 
 Farm + Farm Factory were redeployed 2026-05-24 to ship the `AddSchedules`
 exec on `choice_farm`. The previous code ids (Farm `2000`, Farm Factory
@@ -80,16 +84,19 @@ launches — frontend points at the new factory only.
 
 ## Mainnet Contract Addresses
 
-| Component       | Address                                      |
-| --------------- | -------------------------------------------- |
-| CW20 Adapter    | `inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk` |
-| Burn Manager    | `inj1yr7srge0lku4h3gd473qdlpdfw63ejdjwkh4c0` |
-| Factory         | `inj1k9lcqtn3y92h4t3tdsu7z8qx292mhxhgsssmxg` |
-| Router          | `inj1ne2durmsx2jurvy4wgnhegv3xt6789up8xgum3` |
-| Admin Timelock  | `inj14tm9kjh396g483aj76xyykem2mdk22q8x769v9` |
-| Farm Factory    | `inj1v79393jctqw38jpwukwuwelwups7qmxtpxzd75` |
-| Zap LP          | `inj17tvqalm2u06a7vjpn8p62czukzyvy8m07sf6c5` |
-| Token Locker    | `inj1y5gtmlv695jz2s5q2lqq0l3h34040nh32snv4m` |
+| Component         | Address                                      |
+| ----------------- | -------------------------------------------- |
+| CW20 Adapter      | `inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk` |
+| Burn Manager      | `inj1yr7srge0lku4h3gd473qdlpdfw63ejdjwkh4c0` |
+| Factory           | `inj1k9lcqtn3y92h4t3tdsu7z8qx292mhxhgsssmxg` |
+| Router            | `inj1ne2durmsx2jurvy4wgnhegv3xt6789up8xgum3` |
+| Admin Timelock    | `inj14tm9kjh396g483aj76xyykem2mdk22q8x769v9` |
+| Farm Factory      | `inj1v79393jctqw38jpwukwuwelwups7qmxtpxzd75` |
+| Zap LP            | `inj17tvqalm2u06a7vjpn8p62czukzyvy8m07sf6c5` |
+| Token Locker      | `inj1y5gtmlv695jz2s5q2lqq0l3h34040nh32snv4m` |
+| CLMM Factory      | `inj1k58yqvsww97asl6eajx0lja6np03naddfc6cs7` |
+| CLMM Manager      | `inj1eag2kjzs5ma5sflxvlhaacdxxpvdjg4ny7yg3g` |
+| DEX Aggregator v2 | `inj1520rsss9aykhkfmuf89nh5hp2jww770z4u3eu0` |
 
 Individual farms are spawned by Farm Factory (code id 2015); their addresses are
 emitted in the `CreateFarm` tx events and not tracked centrally here.
@@ -111,6 +118,16 @@ One contract instance per `(input, pair)` royalty stream (code id 2002, v2.0.0).
 - Keeper: `choice-zap-keeper` on the `choice` host (`/root/bots/choice-zap-keeper`,
   pm2). Keeper hot key `inj1wt8yrdajp6h65qedunmurqv9nypzlm839eck66` (allowlisted via
   `AddKeeper`). Point INJ royalties at the contract via `MsgSend`.
+
+### Mainnet CLMM + Aggregator v2 (deployed 2026-06-12)
+
+Deployed via `deploy/deploy_clmm_mainnet.sh` + `aggregation_contract/scripts/{upload_code,deploy}_mainnet.sh`. Results: `deploy/results/mainnet_clmm_20260612_144113.json`.
+
+- **CLMM Factory:** `inj1k58yqvsww97asl6eajx0lja6np03naddfc6cs7` (`pool_code_id` 2039; default fee tiers 100/500/3000/10000). owner = EOA `inj1q2m26a7j…` (multisig rotation DEFERRED — propose+accept when signers online). wasm-admin = Admin Timelock.
+- **CLMM Manager (cw721 positions):** `inj1eag2kjzs5ma5sflxvlhaacdxxpvdjg4ny7yg3g`. wasm-admin = Admin Timelock.
+- **DEX Aggregator v2** (orderbook-merge + FlashRoute, CLMM-capable): `inj1520rsss9aykhkfmuf89nh5hp2jww770z4u3eu0` (code 2042). config.admin (flash-signer gate, PERMANENT) = ops EOA `inj1yrg4pg8hcu…`; wasm-admin = Admin Timelock. Supersedes legacy agg `inj1a4qvqym…` for CLMM/new-shape routing.
+- **Pools:** none yet — created permissionlessly via the FE (fee-free; pool protocol-carve default OFF). Stores cost ~4.1M gas (CLMM_GAS 8M override).
+- **Flash:** deny-all until BOTH gates open — aggregator `AuthorizeFlashSigner{signer:<bot>}` (config.admin) AND factory `AuthorizeFlashBorrower{borrower:<agg>}` (owner).
 
 ### Superseded mainnet factories (not in FE)
 
