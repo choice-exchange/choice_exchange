@@ -437,12 +437,20 @@ fn execute_create_pool(
     };
 
     // 6. Create WasmMsg with Instantiate2
+    // The instantiate label is capped at 128 chars by wasmd. Two long
+    // tokenfactory denoms (e.g. a `factory/<issuer>/<sub>` launch token paired
+    // with `factory/<admin>/SAI`) blow past that, so truncate defensively —
+    // the label is cosmetic and the canonical pair identity lives in state.
+    let mut label = format!("Choice CLMM Pool {}/{}", token0, token1);
+    if label.len() > 128 {
+        label.truncate(128);
+    }
     let wasm_msg = WasmMsg::Instantiate2 {
         admin: None,
         code_id: config.pool_code_id,
         msg: to_json_binary(&pool_instantiate_msg)?,
         funds: vec![],
-        label: format!("Choice CLMM Pool {}/{}", token0, token1),
+        label,
         salt,
     };
 
