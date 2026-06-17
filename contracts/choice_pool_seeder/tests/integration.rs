@@ -248,6 +248,7 @@ fn admin_rotation_requires_admin() {
         err
     );
 
+    // Step 1: admin proposes — parks `new_admin` as pending, no rotation yet.
     wasm.execute(
         &env.factory,
         &ExecuteMsg::UpdateAdmin {
@@ -257,7 +258,42 @@ fn admin_rotation_requires_admin() {
         &env.admin,
     )
     .unwrap();
+    let cfg: FactoryConfigResponse = wasm
+        .query(&env.factory, &QueryMsg::FactoryConfig {})
+        .unwrap();
+    assert_eq!(cfg.admin, env.admin.address(), "live admin unchanged pre-accept");
+    assert_eq!(cfg.pending_admin, Some(new_admin.address()));
 
+    // The pending key cannot yet act as admin.
+    let err = wasm
+        .execute(
+            &env.factory,
+            &ExecuteMsg::UpdateSinkCodeId {
+                new_sink_code_id: 42,
+            },
+            &[],
+            &new_admin,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("Unauthorized"),
+        "pending admin cannot act before accept, got: {}",
+        err
+    );
+
+    // A non-pending caller cannot accept.
+    let err = wasm
+        .execute(&env.factory, &ExecuteMsg::AcceptAdmin {}, &[], &env.stranger)
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("Unauthorized"),
+        "stranger cannot accept, got: {}",
+        err
+    );
+
+    // Step 2: the pending key accepts and is now admin.
+    wasm.execute(&env.factory, &ExecuteMsg::AcceptAdmin {}, &[], &new_admin)
+        .unwrap();
     wasm.execute(
         &env.factory,
         &ExecuteMsg::UpdateSinkCodeId {
@@ -271,6 +307,7 @@ fn admin_rotation_requires_admin() {
         .query(&env.factory, &QueryMsg::FactoryConfig {})
         .unwrap();
     assert_eq!(cfg.admin, new_admin.address());
+    assert_eq!(cfg.pending_admin, None);
     assert_eq!(cfg.sink_code_id, 42);
 }
 
@@ -507,6 +544,241 @@ fn create_sink_then_settle_full_lifecycle() {
         "second Settle should be rejected as terminal, got: {}",
         err
     );
+}
+
+// ------------------------------------------------------------------------
+// Pre-mainnet operability: factory circuit breaker + admin force-refund.
+// These exercise the cross-contract paths a sink takes against its parent
+// factory (pause read on Settle, admin auth on ForceRefund) which the unit
+// tests can't reach with the mock querier.
+// ------------------------------------------------------------------------
+
+struct SeederEnv {
+    app: InjectiveTestApp,
+    seeder_factory: String,
+    choice_factory: String,
+    sink: String,
+    admin: SigningAccount,
+    stranger: SigningAccount,
+    issuer: SigningAccount,
+    refund_receiver: SigningAccount,
+}
+
+/// Minimal bring-up: a seeder factory + one `Pending` XYK sink created under
+/// it. The pinned `choice_factory` is a plain account (these tests never reach
+/// `CreatePair`), but the sink's recorded `factory` is the real seeder factory
+/// contract, which answers `FactoryConfig` for the pause / force-refund checks.
+fn setup_seeder_with_sink() -> SeederEnv {
+    let app = InjectiveTestApp::new();
+    let wasm = Wasm::new(&app);
+    let big = &[
+        Coin::new(1_000_000_000_000_000_000_000u128, INJ),
+        Coin::new(1_000_000_000_000u128, TOKEN_DENOM),
+        Coin::new(1_000_000_000_000u128, PAIR_DENOM),
+    ];
+    let decimals = &[18u32, 6, 6];
+    let admin = app.init_account_decimals(big, decimals).unwrap();
+    let stranger = app
+        .init_account(&[Coin::new(1_000_000_000_000_000_000u128, INJ)])
+        .unwrap();
+    let issuer = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
+    let refund_receiver = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
+    let choice_factory_acct = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
+    let choice_factory = choice_factory_acct.address();
+
+    let seeder_code_id = store(&wasm, &admin, "choice_pool_seeder.wasm");
+    let seeder_factory = wasm
+        .instantiate(
+            seeder_code_id,
+            &InstantiateMsg::Factory(FactoryInit {
+                admin: admin.address(),
+                sink_code_id: seeder_code_id,
+                choice_factory: choice_factory.clone(),
+                clmm_factory: None,
+                clmm_manager: None,
+                max_tip_bps: 100,
+            }),
+            Some(&admin.address()),
+            Some("Seeder Factory"),
+            &[],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    let res = wasm
+        .execute(
+            &seeder_factory,
+            &ExecuteMsg::CreateSink {
+                salt: b"sink-ops".into(),
+                sink_init: SinkInit {
+                    issuer: issuer.address(),
+                    token_denom: TOKEN_DENOM.to_string(),
+                    pair_denom: PAIR_DENOM.to_string(),
+                    token_decimals: 6,
+                    pair_decimals: 6,
+                    pool_kind: PoolKind::Xyk {
+                        choice_factory: choice_factory.clone(),
+                        lp_destination: LpDestination::Burn,
+                    },
+                    refund_receiver: refund_receiver.address(),
+                    deadline_seconds: 3600,
+                    tip_bps: 0,
+                },
+            },
+            &[],
+            &admin,
+        )
+        .unwrap();
+    let sink = instantiated_addr(&res);
+
+    SeederEnv {
+        app,
+        seeder_factory,
+        choice_factory,
+        sink,
+        admin,
+        stranger,
+        issuer,
+        refund_receiver,
+    }
+}
+
+#[test]
+fn force_refund_by_admin_bypasses_deadline() {
+    let env = setup_seeder_with_sink();
+    let wasm = Wasm::new(&env.app);
+
+    // Fund both seed legs.
+    bank_send(&env.app, &env.admin, &env.sink, TOKEN_DENOM, SEED);
+    bank_send(&env.app, &env.admin, &env.sink, PAIR_DENOM, SEED);
+
+    // Deadline is 3600s out with no block-time advance — a permissionless
+    // Refund is rejected.
+    let err = wasm
+        .execute(&env.sink, &ExecuteMsg::Refund {}, &[], &env.stranger)
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("deadline"),
+        "pre-deadline Refund should be rejected, got: {}",
+        err
+    );
+
+    // A non-admin cannot force-refund (auth is the parent factory's admin).
+    let err = wasm
+        .execute(&env.sink, &ExecuteMsg::ForceRefund {}, &[], &env.stranger)
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("Unauthorized"),
+        "stranger force-refund should be rejected, got: {}",
+        err
+    );
+
+    // The factory admin force-refunds immediately, bypassing the deadline.
+    wasm.execute(&env.sink, &ExecuteMsg::ForceRefund {}, &[], &env.admin)
+        .unwrap();
+
+    // Token leg → issuer, pair leg → refund_receiver; sink drained + Refunded.
+    assert_eq!(
+        bank_balance(&env.app, &env.issuer.address(), TOKEN_DENOM),
+        SEED
+    );
+    assert_eq!(
+        bank_balance(&env.app, &env.refund_receiver.address(), PAIR_DENOM),
+        SEED
+    );
+    assert_eq!(bank_balance(&env.app, &env.sink, TOKEN_DENOM), 0);
+    assert_eq!(bank_balance(&env.app, &env.sink, PAIR_DENOM), 0);
+    let state: SinkStateResponse = wasm.query(&env.sink, &QueryMsg::SinkState {}).unwrap();
+    assert_eq!(state.status, SinkStatus::Refunded);
+
+    // Force-refund is single-shot.
+    let err = wasm
+        .execute(&env.sink, &ExecuteMsg::ForceRefund {}, &[], &env.admin)
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("Terminal") || format!("{}", err).contains("Refunded"),
+        "second force-refund should be terminal, got: {}",
+        err
+    );
+}
+
+#[test]
+fn paused_factory_blocks_create_and_settle() {
+    let env = setup_seeder_with_sink();
+    let wasm = Wasm::new(&env.app);
+
+    // Pause the factory.
+    wasm.execute(
+        &env.seeder_factory,
+        &ExecuteMsg::SetPaused { paused: true },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+
+    // New CreateSink is refused at the factory.
+    let err = wasm
+        .execute(
+            &env.seeder_factory,
+            &ExecuteMsg::CreateSink {
+                salt: b"sink-ops-2".into(),
+                sink_init: SinkInit {
+                    issuer: env.issuer.address(),
+                    token_denom: TOKEN_DENOM.to_string(),
+                    pair_denom: PAIR_DENOM.to_string(),
+                    token_decimals: 6,
+                    pair_decimals: 6,
+                    pool_kind: PoolKind::Xyk {
+                        choice_factory: env.choice_factory.clone(),
+                        lp_destination: LpDestination::Burn,
+                    },
+                    refund_receiver: env.refund_receiver.address(),
+                    deadline_seconds: 3600,
+                    tip_bps: 0,
+                },
+            },
+            &[],
+            &env.admin,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("paused"),
+        "CreateSink should be refused while paused, got: {}",
+        err
+    );
+
+    // The already-created sink freezes settlement — it reads the parent
+    // factory's live pause flag cross-contract. (The pause check precedes the
+    // balance/fee checks, so funding is unnecessary to prove the gate.)
+    let err = wasm
+        .execute(
+            &env.sink,
+            &ExecuteMsg::Settle {},
+            &[Coin::new(CREATE_PAIR_FEE, INJ)],
+            &env.admin,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("paused"),
+        "Settle should be frozen by the factory pause, got: {}",
+        err
+    );
+
+    // Lifting the pause clears the breaker (Settle no longer reports Paused —
+    // it now fails downstream for the unrelated missing-pair reason).
+    wasm.execute(
+        &env.seeder_factory,
+        &ExecuteMsg::SetPaused { paused: false },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+    let cfg: FactoryConfigResponse = wasm
+        .query(&env.seeder_factory, &QueryMsg::FactoryConfig {})
+        .unwrap();
+    assert!(!cfg.paused, "factory unpaused");
 }
 
 // ------------------------------------------------------------------------

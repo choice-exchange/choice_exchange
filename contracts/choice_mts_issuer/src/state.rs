@@ -5,10 +5,17 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Config {
-    /// Admin can rotate `keeper` and `forwarder` and accept migrations. Should
-    /// be a timelock multisig in production. Rotation of `admin` itself goes
-    /// through the same timelock path.
+    /// Admin can rotate `keeper`/`forwarder`, tune `decimals`/
+    /// `refund_deadline_seconds`, flip the `paused` breaker, and accept
+    /// migrations. Should be a timelock multisig in production. Admin rotation
+    /// is itself two-step (`UpdateAdmin` proposes → [`Config::pending_admin`]
+    /// → `AcceptAdmin`) so a typo'd / uncontrolled target can't brick
+    /// governance.
     pub admin: Addr,
+    /// Pending admin for the two-step rotation. `#[serde(default)]` so a config
+    /// written by a pre-two-step build deserializes as `None` across a migrate.
+    #[serde(default)]
+    pub pending_admin: Option<Addr>,
     /// Allowlisted relay key authorized to call `DeliverToSeeder` and
     /// `RefundFailedLaunch`. Rotatable by `admin`. Public tippable cranking is
     /// deferred — gating these on a single keeper keeps the v1 trust model
@@ -20,9 +27,11 @@ pub struct Config {
     /// characters to leave room for a uint64 suffix inside the tokenfactory
     /// 44-char subdenom limit.
     pub subdenom_prefix: String,
-    /// Default tokenfactory metadata decimals. The MTS pair inherits this on
-    /// the EVM side. v1 is 18-only (mainnet launches assume 18-dec); refer
-    /// design §10 item 6.
+    /// Default tokenfactory metadata decimals baked into each denom at
+    /// `RegisterLaunch`. The MTS pair inherits this on the EVM side. v1 is
+    /// 18-only (mainnet launches assume 18-dec); `UpdateDecimals` can retune
+    /// the default for FUTURE launches within `0..=18` (already-created denoms
+    /// keep their snapshot — tokenfactory decimals are immutable post-create).
     pub decimals: u32,
     /// 20-byte bech32 hot account that receives pair-asset from EVM via the
     /// bank precompile and immediately forwards to the seeder. Per the
@@ -30,11 +39,23 @@ pub struct Config {
     /// pair-asset. Rotatable by `admin` (a rotation has the same trust shape
     /// as introducing a new keeper).
     pub forwarder: Addr,
-    /// `RefundFailedLaunch` is auto-callable by anyone after this many
-    /// seconds past `LaunchRecord.registered_at`, in case the keeper goes
-    /// down between `BootstrapReady`/`BootstrapFailed` and the corresponding
-    /// CW relay. Until then, only the keeper can refund.
+    /// Liveness window for `RefundFailedLaunch`: the `keeper` may refund a
+    /// stuck launch at any time; after this many seconds past
+    /// `LaunchRecord.registered_at` the `admin` may ALSO refund (covering a
+    /// keeper outage). It is deliberately NOT permissionless even post-deadline
+    /// — a wide-open refund would let anyone terminally `Refunded` a slow-but-
+    /// valid launch out from under graduation. Tunable by `admin` via
+    /// `UpdateRefundDeadline` (affects all not-yet-refunded launches, since the
+    /// deadline is computed live against this value).
     pub refund_deadline_seconds: u64,
+    /// Circuit breaker. When `true`, `RegisterLaunch` is refused — the
+    /// incident-response halt for a discovered bug in the issuance / seeding
+    /// path. Completion + wind-down paths (`DeliverToSeeder`,
+    /// `RefundFailedLaunch`, `RenounceDenomAdmin`) stay OPEN so in-flight
+    /// launches are never stranded by a pause. `#[serde(default)]` → a
+    /// pre-pause config deserializes as `false` (unpaused).
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]

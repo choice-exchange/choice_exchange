@@ -111,11 +111,13 @@ fn instantiate_factory(
         deps.storage,
         &FactoryConfig {
             admin: admin.clone(),
+            pending_admin: None,
             sink_code_id: init.sink_code_id,
             choice_factory: choice_factory.clone(),
             clmm_factory: clmm_factory.clone(),
             clmm_manager: clmm_manager.clone(),
             max_tip_bps: init.max_tip_bps,
+            paused: false,
         },
     )?;
 
@@ -139,7 +141,7 @@ fn instantiate_factory(
 fn instantiate_sink(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
-    _info: MessageInfo,
+    info: MessageInfo,
     init: SinkInit,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     if init.token_denom == init.pair_denom {
@@ -172,6 +174,10 @@ fn instantiate_sink(
     SINK_CONFIG.save(
         deps.storage,
         &SinkConfig {
+            // The factory that issued the `Instantiate2` is `info.sender`; the
+            // sink records it so `Settle` can honour the factory pause and
+            // `ForceRefund` can authenticate the factory admin.
+            factory: Some(info.sender.clone()),
             issuer: issuer.clone(),
             token_denom: init.token_denom.clone(),
             pair_denom: init.pair_denom.clone(),
@@ -301,10 +307,20 @@ pub fn execute(
         }
         ExecuteMsg::Settle {} => exec_settle(deps, env, info),
         ExecuteMsg::Refund {} => exec_refund(deps, env, info),
+        ExecuteMsg::ForceRefund {} => exec_force_refund(deps, env, info),
         ExecuteMsg::UpdateAdmin { new_admin } => exec_update_admin(deps, info, new_admin),
+        ExecuteMsg::AcceptAdmin {} => exec_accept_admin(deps, info),
         ExecuteMsg::UpdateSinkCodeId { new_sink_code_id } => {
             exec_update_sink_code_id(deps, info, new_sink_code_id)
         }
+        ExecuteMsg::SetPaused { paused } => exec_set_paused(deps, info, paused),
+        ExecuteMsg::UpdateChoiceFactory { new_choice_factory } => {
+            exec_update_choice_factory(deps, info, new_choice_factory)
+        }
+        ExecuteMsg::UpdateClmmAddresses {
+            clmm_factory,
+            clmm_manager,
+        } => exec_update_clmm_addresses(deps, info, clmm_factory, clmm_manager),
         ExecuteMsg::Callback(cb) => exec_callback(deps, env, info, cb),
         ExecuteMsg::CollectFees { token_id } => exec_collect_fees(deps, env, info, token_id),
         ExecuteMsg::UpdateTreasury { new_treasury } => {
@@ -325,6 +341,9 @@ fn exec_create_sink(
     sink_init: SinkInit,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let cfg = require_factory(deps.as_ref(), "create_sink")?;
+    if cfg.paused {
+        return Err(ContractError::Paused {});
+    }
 
     if sink_init.tip_bps > cfg.max_tip_bps {
         return Err(ContractError::TipTooHigh {
@@ -370,6 +389,9 @@ fn exec_create_locker(
     locker_init: LockerInit,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let cfg = require_factory(deps.as_ref(), "create_locker")?;
+    if cfg.paused {
+        return Err(ContractError::Paused {});
+    }
 
     // A locker only makes sense alongside CLMM graduation; pin its `manager`
     // to the factory's CLMM manager so a locker can't be aimed at an
@@ -408,6 +430,9 @@ fn exec_create_locker(
         .add_attribute("creator", locker_init.creator))
 }
 
+/// Step 1 of the two-step admin rotation: park `new_admin` as pending. The
+/// live `admin` is untouched until the pending key accepts, so a typo'd /
+/// uncontrolled target can never brick governance.
 fn exec_update_admin(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
@@ -418,11 +443,118 @@ fn exec_update_admin(
         return Err(ContractError::Unauthorized {});
     }
     let new_admin = deps.api.addr_validate(&new_admin)?;
-    cfg.admin = new_admin.clone();
+    cfg.pending_admin = Some(new_admin.clone());
     FACTORY_CONFIG.save(deps.storage, &cfg)?;
     Ok(Response::new()
         .add_attribute("action", "update_admin")
-        .add_attribute("new_admin", new_admin))
+        .add_attribute("pending_admin", new_admin))
+}
+
+/// Step 2 of the rotation: the pending admin claims the role.
+fn exec_accept_admin(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut cfg = require_factory(deps.as_ref(), "accept_admin")?;
+    let pending = cfg
+        .pending_admin
+        .clone()
+        .ok_or(ContractError::NoPendingAdmin {})?;
+    if info.sender != pending {
+        return Err(ContractError::Unauthorized {});
+    }
+    cfg.admin = pending.clone();
+    cfg.pending_admin = None;
+    FACTORY_CONFIG.save(deps.storage, &cfg)?;
+    Ok(Response::new()
+        .add_attribute("action", "accept_admin")
+        .add_attribute("new_admin", pending))
+}
+
+fn exec_set_paused(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    paused: bool,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut cfg = require_factory(deps.as_ref(), "set_paused")?;
+    if info.sender != cfg.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    cfg.paused = paused;
+    FACTORY_CONFIG.save(deps.storage, &cfg)?;
+    Ok(Response::new()
+        .add_attribute("action", "set_paused")
+        .add_attribute("paused", paused.to_string()))
+}
+
+/// Re-point the XYK `choice_factory` (e.g. after an XYK redeploy). Future
+/// sinks only — already-spawned sinks carry their own snapshot.
+fn exec_update_choice_factory(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    new_choice_factory: String,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut cfg = require_factory(deps.as_ref(), "update_choice_factory")?;
+    if info.sender != cfg.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    let new_choice_factory = deps.api.addr_validate(&new_choice_factory)?;
+    cfg.choice_factory = new_choice_factory.clone();
+    FACTORY_CONFIG.save(deps.storage, &cfg)?;
+    Ok(Response::new()
+        .add_attribute("action", "update_choice_factory")
+        .add_attribute("new_choice_factory", new_choice_factory))
+}
+
+/// Re-point (or disable) the CLMM factory + manager. All-or-nothing, mirroring
+/// instantiate: both set to repoint/enable, both `None` to disable CLMM
+/// graduation. Future sinks only.
+fn exec_update_clmm_addresses(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    clmm_factory: Option<String>,
+    clmm_manager: Option<String>,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut cfg = require_factory(deps.as_ref(), "update_clmm_addresses")?;
+    if info.sender != cfg.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    let (clmm_factory, clmm_manager) = match (clmm_factory, clmm_manager) {
+        (Some(f), Some(m)) => (
+            Some(deps.api.addr_validate(&f)?),
+            Some(deps.api.addr_validate(&m)?),
+        ),
+        (None, None) => (None, None),
+        _ => return Err(ContractError::ClmmAddressesHalfSet {}),
+    };
+    cfg.clmm_factory = clmm_factory.clone();
+    cfg.clmm_manager = clmm_manager.clone();
+    FACTORY_CONFIG.save(deps.storage, &cfg)?;
+    Ok(Response::new()
+        .add_attribute("action", "update_clmm_addresses")
+        .add_attribute(
+            "clmm_factory",
+            clmm_factory.map(|a| a.to_string()).unwrap_or_default(),
+        )
+        .add_attribute(
+            "clmm_manager",
+            clmm_manager.map(|a| a.to_string()).unwrap_or_default(),
+        ))
+}
+
+/// Query the parent factory's `paused` flag. Returns `false` when the sink has
+/// no recorded factory (direct-instantiate debug path) or the address does not
+/// answer as a factory — settlement is never blocked by an inability to read
+/// the breaker, only by an explicit pause.
+fn factory_paused(deps: Deps<InjectiveQueryWrapper>, factory: &Option<cosmwasm_std::Addr>) -> bool {
+    match factory {
+        Some(f) => deps
+            .querier
+            .query_wasm_smart::<FactoryConfigResponse>(f, &QueryMsg::FactoryConfig {})
+            .map(|c| c.paused)
+            .unwrap_or(false),
+        None => false,
+    }
 }
 
 fn exec_update_sink_code_id(
@@ -456,6 +588,13 @@ fn exec_settle(
         return Err(ContractError::SinkTerminal {
             status: format!("{:?}", state.status),
         });
+    }
+    // Honour the parent factory's circuit breaker: during a paused incident,
+    // freeze settlement into a potentially-broken DEX even though `Settle` is
+    // otherwise permissionless. Skipped on the direct-instantiate debug path
+    // (no recorded factory) and tolerant of a non-factory address.
+    if factory_paused(deps.as_ref(), &cfg.factory) {
+        return Err(ContractError::Paused {});
     }
 
     let token_bal = deps
@@ -773,13 +912,14 @@ fn settle_clmm(
         .add_attribute("tip", tip))
 }
 
+/// Permissionless refund, available once `deadline_seconds` past instantiate.
 fn exec_refund(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
     _info: MessageInfo,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let cfg = require_sink(deps.as_ref(), "refund")?;
-    let mut state = SINK_STATE.load(deps.storage)?;
+    let state = SINK_STATE.load(deps.storage)?;
     if state.status != SinkStatus::Pending {
         return Err(ContractError::SinkTerminal {
             status: format!("{:?}", state.status),
@@ -794,6 +934,51 @@ fn exec_refund(
         });
     }
 
+    do_refund(deps, env, &cfg, state, "refund")
+}
+
+/// Admin-gated emergency refund of a `Pending` sink, BYPASSING the deadline.
+/// The recovery lever for a sink that cannot settle (out-of-range seed ratio,
+/// unsupported fee tier) or one caught in a paused incident — instead of
+/// waiting out `deadline_seconds`, the factory admin reclaims the seed now.
+/// Authenticated against the parent factory's `admin`.
+fn exec_force_refund(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let cfg = require_sink(deps.as_ref(), "force_refund")?;
+    let state = SINK_STATE.load(deps.storage)?;
+    if state.status != SinkStatus::Pending {
+        return Err(ContractError::SinkTerminal {
+            status: format!("{:?}", state.status),
+        });
+    }
+
+    // Authenticate against the parent factory's admin (the sink has no admin
+    // of its own). The direct-instantiate debug path has no factory and so no
+    // force-refund — it must wait out the deadline like any other caller.
+    let factory = cfg.factory.clone().ok_or(ContractError::SinkHasNoFactory {})?;
+    let fcfg: FactoryConfigResponse = deps
+        .querier
+        .query_wasm_smart(&factory, &QueryMsg::FactoryConfig {})?;
+    if info.sender.as_str() != fcfg.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    do_refund(deps, env, &cfg, state, "force_refund")
+}
+
+/// Shared refund body: route the sink's `token_denom` back to the issuer and
+/// `pair_denom` to the refund receiver, flip the sink terminal. Callers gate
+/// access (deadline vs. admin) before invoking.
+fn do_refund(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    cfg: &SinkConfig,
+    mut state: SinkState,
+    action: &str,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let token_bal = deps
         .querier
         .query_balance(&env.contract.address, &cfg.token_denom)?
@@ -830,11 +1015,11 @@ fn exec_refund(
 
     Ok(Response::new()
         .add_messages(messages)
-        .add_attribute("action", "refund")
+        .add_attribute("action", action)
         .add_attribute("token_refunded", token_bal)
         .add_attribute("pair_refunded", pair_bal)
-        .add_attribute("issuer", cfg.issuer)
-        .add_attribute("refund_receiver", cfg.refund_receiver))
+        .add_attribute("issuer", cfg.issuer.to_string())
+        .add_attribute("refund_receiver", cfg.refund_receiver.to_string()))
 }
 
 fn exec_callback(
@@ -1232,11 +1417,13 @@ fn query_factory_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<FactoryC
     let c = FACTORY_CONFIG.load(deps.storage)?;
     Ok(FactoryConfigResponse {
         admin: c.admin.into_string(),
+        pending_admin: c.pending_admin.map(|a| a.into_string()),
         sink_code_id: c.sink_code_id,
         choice_factory: c.choice_factory.into_string(),
         clmm_factory: c.clmm_factory.map(|a| a.into_string()),
         clmm_manager: c.clmm_manager.map(|a| a.into_string()),
         max_tip_bps: c.max_tip_bps,
+        paused: c.paused,
     })
 }
 
@@ -1246,6 +1433,7 @@ fn query_sink_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<SinkConfigR
     }
     let c = SINK_CONFIG.load(deps.storage)?;
     Ok(SinkConfigResponse {
+        factory: c.factory.map(|a| a.into_string()),
         issuer: c.issuer.into_string(),
         token_denom: c.token_denom,
         pair_denom: c.pair_denom,

@@ -903,6 +903,7 @@ fn admin_rotations_require_admin_caller() {
         },
     )
     .unwrap();
+    // Two-step admin rotation: UpdateAdmin only parks `new_admin` as pending.
     execute(
         deps.as_mut(),
         mock_env(),
@@ -912,12 +913,162 @@ fn admin_rotations_require_admin_caller() {
         },
     )
     .unwrap();
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.admin, admin.to_string(), "live admin unchanged pre-accept");
+    assert_eq!(cfg.pending_admin, Some(new_admin.to_string()));
+
+    // A non-pending caller cannot accept.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::AcceptAdmin {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    // The pending key accepts and becomes admin.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&new_admin, &[]),
+        ExecuteMsg::AcceptAdmin {},
+    )
+    .unwrap();
 
     let cfg: ConfigResponse =
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
     assert_eq!(cfg.admin, new_admin.to_string());
+    assert_eq!(cfg.pending_admin, None);
     assert_eq!(cfg.keeper, new_keeper.to_string());
     assert_eq!(cfg.forwarder, new_forwarder.to_string());
+}
+
+#[test]
+fn register_launch_rejected_when_paused() {
+    let mut deps = setup();
+    let admin = deps.api.addr_make("admin");
+
+    // A stranger cannot pause.
+    let stranger = deps.api.addr_make("stranger");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::SetPaused { paused: true },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    // Admin pauses; query reflects it.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::SetPaused { paused: true },
+    )
+    .unwrap();
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert!(cfg.paused);
+
+    // RegisterLaunch is refused while paused (even for the keeper).
+    let err = register_default(&mut deps, 1).unwrap_err();
+    assert!(matches!(err, ContractError::Paused {}));
+
+    // Unpause restores registration.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::SetPaused { paused: false },
+    )
+    .unwrap();
+    register_default(&mut deps, 1).unwrap();
+}
+
+#[test]
+fn update_refund_deadline_requires_admin_and_applies() {
+    let mut deps = setup();
+    let admin = deps.api.addr_make("admin");
+    let stranger = deps.api.addr_make("stranger");
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::UpdateRefundDeadline {
+            new_refund_deadline_seconds: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateRefundDeadline {
+            new_refund_deadline_seconds: 12_345,
+        },
+    )
+    .unwrap();
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.refund_deadline_seconds, 12_345);
+}
+
+#[test]
+fn update_decimals_requires_admin_and_bounds() {
+    let mut deps = setup();
+    let admin = deps.api.addr_make("admin");
+    let stranger = deps.api.addr_make("stranger");
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::UpdateDecimals { new_decimals: 6 },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    // Above the 18-cap is rejected.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateDecimals { new_decimals: 19 },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::DecimalsOutOfRange { got: 19 }));
+
+    // A valid retune applies to the default.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateDecimals { new_decimals: 6 },
+    )
+    .unwrap();
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.decimals, 6);
+}
+
+#[test]
+fn accept_admin_without_pending_errors() {
+    let mut deps = setup();
+    let admin = deps.api.addr_make("admin");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::AcceptAdmin {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::NoPendingAdmin {}));
 }
 
 #[test]

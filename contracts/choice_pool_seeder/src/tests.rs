@@ -1044,6 +1044,7 @@ fn admin_rotations_require_admin_caller() {
     let stranger = deps.api.addr_make("stranger");
     let new_admin = deps.api.addr_make("new_admin");
 
+    // A stranger cannot propose a rotation.
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -1055,6 +1056,7 @@ fn admin_rotations_require_admin_caller() {
     .unwrap_err();
     assert!(matches!(err, ContractError::Unauthorized {}));
 
+    // Admin proposes; this parks `new_admin` as pending but does NOT rotate yet.
     execute(
         deps.as_mut(),
         mock_env(),
@@ -1064,6 +1066,42 @@ fn admin_rotations_require_admin_caller() {
         },
     )
     .unwrap();
+    let cfg: FactoryConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::FactoryConfig {}).unwrap()).unwrap();
+    assert_eq!(cfg.admin, admin.to_string(), "live admin unchanged before accept");
+    assert_eq!(cfg.pending_admin, Some(new_admin.to_string()));
+
+    // The pending key must accept; a non-pending caller cannot.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::AcceptAdmin {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    // Until accept lands, the old admin still holds power and the new key does not.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&new_admin, &[]),
+        ExecuteMsg::UpdateSinkCodeId {
+            new_sink_code_id: 99,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&new_admin, &[]),
+        ExecuteMsg::AcceptAdmin {},
+    )
+    .unwrap();
+
+    // Now the rotated admin can act and `pending_admin` is cleared.
     execute(
         deps.as_mut(),
         mock_env(),
@@ -1076,6 +1114,7 @@ fn admin_rotations_require_admin_caller() {
     let cfg: FactoryConfigResponse =
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::FactoryConfig {}).unwrap()).unwrap();
     assert_eq!(cfg.admin, new_admin.to_string());
+    assert_eq!(cfg.pending_admin, None);
     assert_eq!(cfg.sink_code_id, 99);
 }
 
@@ -1094,6 +1133,187 @@ fn admin_actions_rejected_on_sink_instance() {
     )
     .unwrap_err();
     assert!(matches!(err, ContractError::WrongRole { .. }));
+}
+
+#[test]
+fn set_paused_requires_admin_and_blocks_creates() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let admin = deps.api.addr_make("admin");
+    let stranger = deps.api.addr_make("stranger");
+
+    // Non-admin cannot pause.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::SetPaused { paused: true },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    // Admin pauses; query reflects it.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::SetPaused { paused: true },
+    )
+    .unwrap();
+    let cfg: FactoryConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::FactoryConfig {}).unwrap()).unwrap();
+    assert!(cfg.paused);
+
+    // CreateSink is refused while paused.
+    let sink_init = make_sink_init(&deps.api);
+    let caller = deps.api.addr_make("issuer_keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::CreateSink {
+            salt: Binary::from(b"x".to_vec()),
+            sink_init,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Paused {}));
+
+    // Unpause re-opens creation.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::SetPaused { paused: false },
+    )
+    .unwrap();
+    let sink_init2 = make_sink_init(&deps.api);
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::CreateSink {
+            salt: Binary::from(b"x".to_vec()),
+            sink_init: sink_init2,
+        },
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 1, "CreateSink resumes after unpause");
+}
+
+#[test]
+fn update_choice_factory_requires_admin_and_repoints() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let admin = deps.api.addr_make("admin");
+    let stranger = deps.api.addr_make("stranger");
+    let new_factory = deps.api.addr_make("new_xyk_factory");
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::UpdateChoiceFactory {
+            new_choice_factory: new_factory.to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}));
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateChoiceFactory {
+            new_choice_factory: new_factory.to_string(),
+        },
+    )
+    .unwrap();
+    let cfg: FactoryConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::FactoryConfig {}).unwrap()).unwrap();
+    assert_eq!(cfg.choice_factory, new_factory.to_string());
+}
+
+#[test]
+fn update_clmm_addresses_repoints_or_rejects_half_set() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let admin = deps.api.addr_make("admin");
+    let new_clmm_factory = deps.api.addr_make("new_clmm_factory");
+    let new_clmm_manager = deps.api.addr_make("new_clmm_manager");
+
+    // Half-set (only factory) is rejected.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateClmmAddresses {
+            clmm_factory: Some(new_clmm_factory.to_string()),
+            clmm_manager: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::ClmmAddressesHalfSet {}));
+
+    // Both set re-points CLMM graduation.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateClmmAddresses {
+            clmm_factory: Some(new_clmm_factory.to_string()),
+            clmm_manager: Some(new_clmm_manager.to_string()),
+        },
+    )
+    .unwrap();
+    let cfg: FactoryConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::FactoryConfig {}).unwrap()).unwrap();
+    assert_eq!(cfg.clmm_factory, Some(new_clmm_factory.to_string()));
+    assert_eq!(cfg.clmm_manager, Some(new_clmm_manager.to_string()));
+
+    // Both None disables CLMM.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateClmmAddresses {
+            clmm_factory: None,
+            clmm_manager: None,
+        },
+    )
+    .unwrap();
+    let cfg: FactoryConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::FactoryConfig {}).unwrap()).unwrap();
+    assert_eq!(cfg.clmm_factory, None);
+    assert_eq!(cfg.clmm_manager, None);
+}
+
+#[test]
+fn accept_admin_without_pending_errors() {
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let admin = deps.api.addr_make("admin");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::AcceptAdmin {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::NoPendingAdmin {}));
+}
+
+#[test]
+fn sink_records_its_factory() {
+    let mut deps = rich_deps(&[]);
+    instantiate_sink_default(&mut deps);
+    let cfg: SinkConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::SinkConfig {}).unwrap()).unwrap();
+    assert_eq!(
+        cfg.factory,
+        Some(deps.api.addr_make("factory_caller").to_string()),
+        "sink snapshots its instantiating factory for pause/force-refund auth"
+    );
 }
 
 // ------------------------------------------------------------------------

@@ -19,26 +19,52 @@ pub enum Role {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct FactoryConfig {
     pub admin: Addr,
+    /// Pending admin for the two-step rotation. `UpdateAdmin` parks the
+    /// proposed key here; `AcceptAdmin` (called BY that key) promotes it. A
+    /// one-step rotation to a typo'd / uncontrolled address would brick
+    /// factory governance permanently — the handshake makes that
+    /// unreachable. `#[serde(default)]` so a config written by a pre-two-step
+    /// build deserializes as `None` across a migrate.
+    #[serde(default)]
+    pub pending_admin: Option<Addr>,
     /// Code-id used by `Instantiate2` for both sinks and lockers (the seeder
     /// binary serves every role). Mutable via `UpdateSinkCodeId`.
     /// Single-binary deploys set this == own code-id at instantiate; the
     /// admin can repoint to a freshly-audited build later.
     pub sink_code_id: u64,
-    /// Immutable: pinning a factory to one XYK DEX deployment. Used by `Xyk`
-    /// sinks.
+    /// XYK DEX deployment this factory pins for `Xyk` sinks. Mutable via
+    /// `UpdateChoiceFactory` so an XYK redeploy can be re-pointed without
+    /// redeploying the factory. Only affects FUTURE sinks — already-spawned
+    /// sinks carry their own snapshot in `PoolKindStored`.
     pub choice_factory: Addr,
-    /// Immutable: the CLMM factory `Clmm` sinks create pools on. `None`
-    /// disables CLMM graduation for sinks of this factory.
+    /// The CLMM factory `Clmm` sinks create pools on. `None` disables CLMM
+    /// graduation. Mutable via `UpdateClmmAddresses` (set together with
+    /// `clmm_manager`) so a CLMM redeploy can be re-pointed. Future sinks only.
     pub clmm_factory: Option<Addr>,
-    /// Immutable: the CLMM NFT position manager `Clmm` sinks mint through.
-    /// Set together with `clmm_factory`.
+    /// The CLMM NFT position manager `Clmm` sinks mint through. Set/cleared
+    /// together with `clmm_factory` via `UpdateClmmAddresses`. Future sinks only.
     pub clmm_manager: Option<Addr>,
     /// Immutable cap on per-sink `tip_bps`.
     pub max_tip_bps: u16,
+    /// Circuit breaker. When `true`, `CreateSink` / `CreateLocker` are refused
+    /// and any sink whose `Settle` consults this factory (via
+    /// [`SinkConfig::factory`]) is frozen — the incident-response halt for a
+    /// discovered DEX/seeding bug. Toggled by `SetPaused`. `#[serde(default)]`
+    /// so a pre-pause config deserializes as `false` (unpaused).
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SinkConfig {
+    /// Factory that instantiated this sink (`info.sender` at instantiate).
+    /// Lets `Settle` consult the factory's `paused` circuit breaker and
+    /// `ForceRefund` authenticate against the factory `admin` — without the
+    /// sink needing its own admin field. `None` only on the direct-instantiate
+    /// debug path (no parent factory to consult); `#[serde(default)]` so a
+    /// pre-existing stored sink deserializes as `None`.
+    #[serde(default)]
+    pub factory: Option<Addr>,
     pub issuer: Addr,
     pub token_denom: String,
     pub pair_denom: String,

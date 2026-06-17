@@ -266,16 +266,52 @@ pub enum ExecuteMsg {
     /// Single-shot, mutually exclusive with `Settle`.
     Refund {},
 
-    /// **Factory admin.** Rotate the admin key. Both old and new admin must
-    /// validate as bech32; otherwise unchecked (the timelock at the admin
-    /// boundary provides the time delay).
+    /// **Factory admin.** Step 1 of a two-step admin rotation: park
+    /// `new_admin` as the pending admin. It does NOT take effect until the
+    /// pending key calls [`ExecuteMsg::AcceptAdmin`], so a rotation to a
+    /// typo'd / uncontrolled address cannot brick governance. Passing the
+    /// current admin (or re-calling) overwrites any prior pending nomination.
     UpdateAdmin { new_admin: String },
+
+    /// **Pending admin only.** Step 2 of the rotation: the address parked by
+    /// `UpdateAdmin` claims the admin role. Errors if there is no pending
+    /// nomination or the caller is not it.
+    AcceptAdmin {},
 
     /// **Factory admin.** Swap in a new sink code-id (presumably a v2 audited
     /// build). Future `CreateSink` calls instantiate against the new code-id;
     /// existing sinks are unaffected — they were instantiated against the
     /// old one and are immutable post-instantiate.
     UpdateSinkCodeId { new_sink_code_id: u64 },
+
+    /// **Factory admin.** Flip the factory circuit breaker. While `paused`,
+    /// `CreateSink` / `CreateLocker` are refused and every sink that consults
+    /// this factory freezes its `Settle`. The incident-response halt for a
+    /// discovered DEX / seeding bug; lift it to resume.
+    SetPaused { paused: bool },
+
+    /// **Factory admin.** Re-point the XYK `choice_factory` after an XYK
+    /// redeploy. Affects only FUTURE sinks — already-spawned sinks carry their
+    /// own snapshot. Avoids a full factory redeploy when the DEX moves.
+    UpdateChoiceFactory { new_choice_factory: String },
+
+    /// **Factory admin.** Re-point the CLMM factory + manager after a CLMM
+    /// redeploy (the addresses most likely to churn during active
+    /// development). All-or-nothing: pass BOTH to enable/repoint CLMM
+    /// graduation, or BOTH `None` to disable it. Future sinks only.
+    UpdateClmmAddresses {
+        clmm_factory: Option<String>,
+        clmm_manager: Option<String>,
+    },
+
+    /// **Sink-only, factory-admin-gated.** Emergency termination of a
+    /// `Pending` sink that cannot (or should not) settle — e.g. a seed ratio
+    /// that trips `SeedRatioOutOfRange`, an unsupported fee tier, or a sink
+    /// caught up in a paused incident. Identical fund routing to `Refund`
+    /// (token → issuer, pair → refund_receiver) but BYPASSES the
+    /// `deadline_seconds` wait. Authenticated against the parent factory's
+    /// `admin` (looked up via [`crate::state::SinkConfig::factory`]).
+    ForceRefund {},
 
     /// **Sink internal sub-step.** Only callable by the sink itself; gated by
     /// `info.sender == env.contract.address`. Wraps the post-`CreatePair`
@@ -364,15 +400,18 @@ pub enum RoleResponse {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct FactoryConfigResponse {
     pub admin: String,
+    pub pending_admin: Option<String>,
     pub sink_code_id: u64,
     pub choice_factory: String,
     pub clmm_factory: Option<String>,
     pub clmm_manager: Option<String>,
     pub max_tip_bps: u16,
+    pub paused: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SinkConfigResponse {
+    pub factory: Option<String>,
     pub issuer: String,
     pub token_denom: String,
     pub pair_denom: String,

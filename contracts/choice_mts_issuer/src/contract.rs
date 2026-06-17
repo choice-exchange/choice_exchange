@@ -90,11 +90,13 @@ pub fn instantiate(
         deps.storage,
         &Config {
             admin: admin.clone(),
+            pending_admin: None,
             keeper: keeper.clone(),
             subdenom_prefix: msg.subdenom_prefix.clone(),
             decimals: msg.decimals,
             forwarder: forwarder.clone(),
             refund_deadline_seconds: msg.refund_deadline_seconds,
+            paused: false,
         },
     )?;
 
@@ -183,9 +185,17 @@ pub fn execute(
             internal_id,
         } => execute_renounce_denom_admin(deps, env, info, evm_authority, internal_id),
         ExecuteMsg::UpdateAdmin { new_admin } => execute_update_admin(deps, info, new_admin),
+        ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         ExecuteMsg::UpdateKeeper { new_keeper } => execute_update_keeper(deps, info, new_keeper),
         ExecuteMsg::UpdateForwarder { new_forwarder } => {
             execute_update_forwarder(deps, info, new_forwarder)
+        }
+        ExecuteMsg::SetPaused { paused } => execute_set_paused(deps, info, paused),
+        ExecuteMsg::UpdateRefundDeadline {
+            new_refund_deadline_seconds,
+        } => execute_update_refund_deadline(deps, info, new_refund_deadline_seconds),
+        ExecuteMsg::UpdateDecimals { new_decimals } => {
+            execute_update_decimals(deps, info, new_decimals)
         }
     }
 }
@@ -208,6 +218,13 @@ fn execute_register_launch(
     clmm_pool_auth: Option<ClmmPoolAuth>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
+
+    // Circuit breaker: halt NEW launches during an incident. Completion and
+    // wind-down of in-flight launches stay open (those handlers don't check
+    // `paused`) so a pause never strands a launch mid-graduation.
+    if config.paused {
+        return Err(ContractError::Paused {});
+    }
 
     // Keeper-gated (finding C-H1). Previously permissionless, which let anyone
     // front-run/squat an `internal_id` for one create-denom fee and brick a
@@ -797,6 +814,8 @@ fn execute_renounce_denom_admin(
         .add_attribute("new_admin", DEAD_TOKENFACTORY_ADMIN))
 }
 
+/// Step 1 of the two-step admin rotation: park `new_admin` as pending. The
+/// live `admin` is untouched until the pending key accepts.
 fn execute_update_admin(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
@@ -807,11 +826,88 @@ fn execute_update_admin(
         return Err(ContractError::Unauthorized {});
     }
     let new_admin = deps.api.addr_validate(&new_admin)?;
-    config.admin = new_admin.clone();
+    config.pending_admin = Some(new_admin.clone());
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new()
         .add_attribute("action", "update_admin")
-        .add_attribute("new_admin", new_admin))
+        .add_attribute("pending_admin", new_admin))
+}
+
+/// Step 2 of the rotation: the pending admin claims the role.
+fn execute_accept_admin(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    let pending = config
+        .pending_admin
+        .clone()
+        .ok_or(ContractError::NoPendingAdmin {})?;
+    if info.sender != pending {
+        return Err(ContractError::Unauthorized {});
+    }
+    config.admin = pending.clone();
+    config.pending_admin = None;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "accept_admin")
+        .add_attribute("new_admin", pending))
+}
+
+fn execute_set_paused(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    paused: bool,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    config.paused = paused;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "set_paused")
+        .add_attribute("paused", paused.to_string()))
+}
+
+fn execute_update_refund_deadline(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    new_refund_deadline_seconds: u64,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    config.refund_deadline_seconds = new_refund_deadline_seconds;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "update_refund_deadline")
+        .add_attribute(
+            "refund_deadline_seconds",
+            new_refund_deadline_seconds.to_string(),
+        ))
+}
+
+/// Retune the default tokenfactory `decimals` for FUTURE launches. Bounded by
+/// `MAX_DECIMALS` (the EVM ERC20 norm) — already-created denoms are unaffected.
+fn execute_update_decimals(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    new_decimals: u32,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    if new_decimals > MAX_DECIMALS {
+        return Err(ContractError::DecimalsOutOfRange { got: new_decimals });
+    }
+    config.decimals = new_decimals;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "update_decimals")
+        .add_attribute("decimals", new_decimals.to_string()))
 }
 
 fn execute_update_keeper(
@@ -983,11 +1079,13 @@ fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> 
     let c = CONFIG.load(deps.storage)?;
     Ok(ConfigResponse {
         admin: c.admin.into_string(),
+        pending_admin: c.pending_admin.map(|a| a.into_string()),
         keeper: c.keeper.into_string(),
         subdenom_prefix: c.subdenom_prefix,
         decimals: c.decimals,
         forwarder: c.forwarder.into_string(),
         refund_deadline_seconds: c.refund_deadline_seconds,
+        paused: c.paused,
     })
 }
 

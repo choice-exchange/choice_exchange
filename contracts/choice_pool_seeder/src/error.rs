@@ -12,6 +12,18 @@ pub enum ContractError {
     #[error("Unauthorized")]
     Unauthorized {},
 
+    #[error("Factory is paused; CreateSink / CreateLocker / Settle are halted")]
+    Paused {},
+
+    #[error("No pending admin to accept")]
+    NoPendingAdmin {},
+
+    #[error("ForceRefund unavailable: this sink has no recorded factory (direct-instantiate debug path)")]
+    SinkHasNoFactory {},
+
+    #[error("UpdateClmmAddresses must set clmm_factory and clmm_manager together, or neither")]
+    ClmmAddressesHalfSet {},
+
     #[error("Action `{action}` requires the {required} role; this instance is a {actual}")]
     WrongRole {
         action: String,

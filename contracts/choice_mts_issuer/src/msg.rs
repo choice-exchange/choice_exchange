@@ -138,9 +138,13 @@ pub enum ExecuteMsg {
     /// `evm_authority`, etc.) is the dApp's responsibility via its EVM-side
     /// logic; the issuer doesn't reach into EVM here.
     ///
-    /// Callable by `keeper` before [`crate::state::Config::refund_deadline_seconds`],
-    /// by anyone after. `evm_authority` identifies the launch namespace (the
-    /// record is keyed by `(evm_authority, internal_id)` — finding C-H1).
+    /// Callable by `keeper` at any time; after
+    /// [`crate::state::Config::refund_deadline_seconds`] past registration the
+    /// `admin` may ALSO call it (keeper-outage liveness). It is deliberately
+    /// NOT permissionless even post-deadline — a wide-open refund would let
+    /// anyone terminally `Refunded` a slow-but-valid launch out from under
+    /// graduation. `evm_authority` identifies the launch namespace (the record
+    /// is keyed by `(evm_authority, internal_id)` — finding C-H1).
     RefundFailedLaunch {
         evm_authority: String,
         internal_id: u64,
@@ -165,14 +169,35 @@ pub enum ExecuteMsg {
         internal_id: u64,
     },
 
-    /// Admin-only: rotate the admin key.
+    /// Admin-only: step 1 of a two-step admin rotation. Parks `new_admin` as
+    /// the pending admin; the live `admin` is unchanged until the pending key
+    /// calls [`ExecuteMsg::AcceptAdmin`]. Prevents a typo'd / uncontrolled
+    /// target from permanently bricking governance.
     UpdateAdmin { new_admin: String },
+
+    /// Pending-admin-only: step 2 of the rotation. The address parked by
+    /// `UpdateAdmin` claims the admin role.
+    AcceptAdmin {},
 
     /// Admin-only: rotate the keeper key.
     UpdateKeeper { new_keeper: String },
 
     /// Admin-only: rotate the pair-asset forwarder bech32.
     UpdateForwarder { new_forwarder: String },
+
+    /// Admin-only: flip the circuit breaker. While paused, `RegisterLaunch` is
+    /// refused; completion + wind-down of in-flight launches stays open.
+    SetPaused { paused: bool },
+
+    /// Admin-only: retune the auto-refund liveness window (seconds). Applies
+    /// live to every not-yet-refunded launch (the deadline is computed against
+    /// the current value).
+    UpdateRefundDeadline { new_refund_deadline_seconds: u64 },
+
+    /// Admin-only: retune the default tokenfactory `decimals` for FUTURE
+    /// launches (must be `0..=18`). Already-created denoms keep their snapshot
+    /// — tokenfactory decimals are immutable once a denom exists.
+    UpdateDecimals { new_decimals: u32 },
 }
 
 /// Layer B reservation parameters for [`ExecuteMsg::RegisterLaunch`]. Carries
@@ -214,11 +239,13 @@ pub enum QueryMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct ConfigResponse {
     pub admin: String,
+    pub pending_admin: Option<String>,
     pub keeper: String,
     pub subdenom_prefix: String,
     pub decimals: u32,
     pub forwarder: String,
     pub refund_deadline_seconds: u64,
+    pub paused: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

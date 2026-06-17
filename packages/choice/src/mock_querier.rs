@@ -10,7 +10,6 @@ use injective_cosmwasm::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::panic;
 
 use crate::asset::{AssetInfo, PairInfo};
 use crate::factory::{NativeTokenDecimalsResponse, QueryMsg as FactoryQueryMsg};
@@ -208,8 +207,8 @@ impl WasmMockQuerier {
                             spread_amount: Uint128::zero(),
                         })),
                     ),
-                    _ => match from_json(msg).unwrap() {
-                        Cw20QueryMsg::TokenInfo {} => {
+                    _ => match from_json::<Cw20QueryMsg>(msg) {
+                        Ok(Cw20QueryMsg::TokenInfo {}) => {
                             let balances: &HashMap<String, Uint128> =
                                 match self.token_querier.balances.get(contract_addr) {
                                     Some(balances) => balances,
@@ -240,7 +239,7 @@ impl WasmMockQuerier {
                                 .unwrap(),
                             ))
                         }
-                        Cw20QueryMsg::Balance { address } => {
+                        Ok(Cw20QueryMsg::Balance { address }) => {
                             let balances: &HashMap<String, Uint128> =
                                 match self.token_querier.balances.get(contract_addr) {
                                     Some(balances) => balances,
@@ -272,7 +271,16 @@ impl WasmMockQuerier {
                             ))
                         }
 
-                        _ => panic!("DO NOT ENTER HERE"),
+                        // Unrecognised wasm smart query. A real chain returns
+                        // an error for a contract that doesn't handle the
+                        // message (or an address that isn't this contract type);
+                        // mirror that instead of aborting the test, so callers
+                        // that tolerate a query error (e.g. an optional
+                        // cross-contract pause/config lookup) behave as on-chain.
+                        _ => SystemResult::Err(SystemError::InvalidRequest {
+                            error: "unhandled wasm smart query".to_string(),
+                            request: msg.as_slice().into(),
+                        }),
                     },
                 },
             },
@@ -579,16 +587,26 @@ mod mock_exception {
     }
 
     #[test]
-    #[should_panic]
-    fn none_tokens_minter_will_panic() {
+    fn unhandled_wasm_smart_query_returns_error() {
+        // The mock previously aborted on any query it didn't recognise; it now
+        // returns a `SystemError` instead, mirroring how a real chain answers a
+        // contract that doesn't handle the message. This lets callers that
+        // tolerate a query error (e.g. an optional cross-contract config lookup)
+        // behave as they would on-chain rather than crashing the test.
         let deps = mock_dependencies(&[]);
 
         let msg = to_json_binary(&Cw20QueryMsg::Minter {}).unwrap();
 
-        deps.querier
+        let res = deps
+            .querier
             .handle_query(&QueryRequest::Wasm(WasmQuery::Smart {
                 contract_addr: "token0000".to_string(),
                 msg,
             }));
+        assert!(
+            matches!(res, SystemResult::Err(SystemError::InvalidRequest { .. })),
+            "expected an InvalidRequest error, got: {:?}",
+            res
+        );
     }
 }

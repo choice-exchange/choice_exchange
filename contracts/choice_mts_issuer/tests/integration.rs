@@ -169,6 +169,60 @@ fn admin_rotation_requires_admin() {
 }
 
 #[test]
+fn two_step_admin_rotation_and_pause_toggle() {
+    let env = setup();
+    let wasm = Wasm::new(&env.app);
+    let new_admin = env
+        .app
+        .init_account(&[Coin::new(1_000_000_000_000_000_000u128, "inj")])
+        .unwrap();
+
+    // Propose: parks pending, live admin unchanged.
+    wasm.execute(
+        &env.issuer,
+        &ExecuteMsg::UpdateAdmin {
+            new_admin: new_admin.address(),
+        },
+        &[],
+        &env.admin,
+    )
+    .unwrap();
+    let cfg: ConfigResponse = wasm.query(&env.issuer, &QueryMsg::Config {}).unwrap();
+    assert_eq!(cfg.admin, env.admin.address());
+    assert_eq!(cfg.pending_admin, Some(new_admin.address()));
+
+    // Pending key cannot yet pause; stranger cannot accept.
+    assert!(format!(
+        "{}",
+        wasm.execute(&env.issuer, &ExecuteMsg::SetPaused { paused: true }, &[], &new_admin)
+            .unwrap_err()
+    )
+    .contains("Unauthorized"));
+    assert!(format!(
+        "{}",
+        wasm.execute(&env.issuer, &ExecuteMsg::AcceptAdmin {}, &[], &env.stranger)
+            .unwrap_err()
+    )
+    .contains("Unauthorized"));
+
+    // Accept: rotation lands.
+    wasm.execute(&env.issuer, &ExecuteMsg::AcceptAdmin {}, &[], &new_admin)
+        .unwrap();
+    // The new admin can now flip the circuit breaker.
+    wasm.execute(
+        &env.issuer,
+        &ExecuteMsg::SetPaused { paused: true },
+        &[],
+        &new_admin,
+    )
+    .unwrap();
+    let cfg: ConfigResponse = wasm.query(&env.issuer, &QueryMsg::Config {}).unwrap();
+    assert_eq!(cfg.admin, new_admin.address());
+    assert_eq!(cfg.pending_admin, None);
+    assert!(cfg.paused);
+}
+
+#[test]
 fn deliver_to_seeder_requires_keeper_for_unknown_launch() {
     let env = setup();
     let wasm = Wasm::new(&env.app);

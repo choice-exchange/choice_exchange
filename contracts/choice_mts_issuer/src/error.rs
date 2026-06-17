@@ -18,6 +18,12 @@ pub enum ContractError {
     #[error("Caller is not the configured keeper")]
     NotKeeper {},
 
+    #[error("Issuer is paused; RegisterLaunch is halted")]
+    Paused {},
+
+    #[error("No pending admin to accept")]
+    NoPendingAdmin {},
+
     #[error("Subdenom prefix `{got}` is empty or exceeds the {max}-char cap")]
     SubdenomPrefixInvalid { got: String, max: usize },
 
