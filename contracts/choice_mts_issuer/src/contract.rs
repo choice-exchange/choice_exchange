@@ -10,7 +10,10 @@ use crate::state::{Config, LaunchRecord, LaunchStatus, CONFIG, LAUNCHES};
 
 use choice_clmm_common::factory::ExecuteMsg as ClmmFactoryExecuteMsg;
 use choice_clmm_common::types::AssetInfo as ClmmAssetInfo;
-use choice_pool_seeder::msg::{ExecuteMsg as SeederExecuteMsg, PoolKind};
+use choice_pool_seeder::msg::{
+    ExecuteMsg as SeederExecuteMsg, PoolKind, QueryMsg as SeederQueryMsg,
+    SinkConfigResponse as SeederSinkConfig,
+};
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -42,6 +45,15 @@ pub const MAX_SUBDENOM_LEN: usize = 44;
 /// this on the EVM side, so anything > 18 risks the auto-deployed
 /// `MintBurnBankERC20` failing on construction. Matches the chain-side cap.
 pub const MAX_DECIMALS: u32 = 18;
+
+/// Floor on `refund_deadline_seconds` (P2-C). The admin-side `RefundFailedLaunch`
+/// path only opens this many seconds past a launch's `registered_at`; allowing
+/// `0` (or a near-zero value) would let a timelocked-but-compromised admin
+/// collapse the grace window and `Refunded` healthy, still-trading launches out
+/// from under graduation. 1 hour is short enough not to constrain real incident
+/// response (the keeper can refund a stuck launch at any time) but blocks the
+/// instant-mass-refund foot-gun. Enforced at instantiate and `UpdateRefundDeadline`.
+pub const MIN_REFUND_DEADLINE_SECONDS: u64 = 3600;
 
 /// Default pagination size for `QueryMsg::Launches`.
 const DEFAULT_QUERY_LIMIT: u32 = 30;
@@ -80,6 +92,12 @@ pub fn instantiate(
     validate_subdenom_prefix(&msg.subdenom_prefix)?;
     if msg.decimals > MAX_DECIMALS {
         return Err(ContractError::DecimalsOutOfRange { got: msg.decimals });
+    }
+    if msg.refund_deadline_seconds < MIN_REFUND_DEADLINE_SECONDS {
+        return Err(ContractError::RefundDeadlineTooShort {
+            got: msg.refund_deadline_seconds,
+            min: MIN_REFUND_DEADLINE_SECONDS,
+        });
     }
 
     let admin = deps.api.addr_validate(&msg.admin)?;
@@ -589,22 +607,41 @@ fn execute_deliver_to_seeder(
         });
     }
 
-    // Finding C-M3: refuse to bank-send `cw_held` to a `seeder_addr` that
-    // holds no contract code. The sink is instantiated in the RegisterLaunch
-    // tx (the forwarded `CreateSink`), so by the time the keeper cranks
-    // DeliverToSeeder it must exist; a missing contract means the off-chain
-    // instantiate2 address was wrong and the funds would land at a ghost
-    // address unrecoverably. `query_wasm_contract_info` errors when there is
-    // no contract at the address.
-    if !record.cw_held.is_zero()
-        && deps
+    // Finding C-M3 + P2-B: refuse to bank-send `cw_held` unless `seeder_addr`
+    // is provably the SINK for THIS launch. Querying its `SinkConfig` both
+    // closes the old ghost/EOA case (a non-sink errors the query) AND binds the
+    // destination to this launch's `denom`/`pair_denom`, so a keeper that
+    // fat-fingers (or maliciously supplies) a wrong `seeder_addr` can no longer
+    // strand `cw_held` at an unrelated contract or a different launch's sink —
+    // both checks the bare contract-existence guard missed. (A denom-matching
+    // look-alike sink is still possible under full keeper compromise; the
+    // on-chain instantiate2 derivation would close that, at the cost of binding
+    // this critical path to the factory's code checksum.)
+    if !record.cw_held.is_zero() {
+        let sink_cfg: SeederSinkConfig = deps
             .querier
-            .query_wasm_contract_info(record.seeder_addr.as_str())
-            .is_err()
-    {
-        return Err(ContractError::SeederAddrNotAContract {
-            addr: record.seeder_addr.to_string(),
-        });
+            .query_wasm_smart(record.seeder_addr.as_str(), &SeederQueryMsg::SinkConfig {})
+            .map_err(|_| ContractError::SeederAddrNotAContract {
+                addr: record.seeder_addr.to_string(),
+            })?;
+        if sink_cfg.token_denom != record.denom {
+            return Err(ContractError::SeederSinkConfigMismatch {
+                addr: record.seeder_addr.to_string(),
+                reason: format!(
+                    "sink token_denom `{}` != launch denom `{}`",
+                    sink_cfg.token_denom, record.denom
+                ),
+            });
+        }
+        if sink_cfg.pair_denom != record.pair_denom {
+            return Err(ContractError::SeederSinkConfigMismatch {
+                addr: record.seeder_addr.to_string(),
+                reason: format!(
+                    "sink pair_denom `{}` != launch pair_denom `{}`",
+                    sink_cfg.pair_denom, record.pair_denom
+                ),
+            });
+        }
     }
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
@@ -878,6 +915,12 @@ fn execute_update_refund_deadline(
     let mut config = CONFIG.load(deps.storage)?;
     if info.sender != config.admin {
         return Err(ContractError::Unauthorized {});
+    }
+    if new_refund_deadline_seconds < MIN_REFUND_DEADLINE_SECONDS {
+        return Err(ContractError::RefundDeadlineTooShort {
+            got: new_refund_deadline_seconds,
+            min: MIN_REFUND_DEADLINE_SECONDS,
+        });
     }
     config.refund_deadline_seconds = new_refund_deadline_seconds;
     CONFIG.save(deps.storage, &config)?;
@@ -1157,7 +1200,14 @@ pub fn migrate(
                 .add_attribute("to_version", CONTRACT_VERSION))
         }
         MigrateMsg::Patch {} => {
-            if !current.version.starts_with("1.") {
+            // P2-A: accept an in-MAJOR patch against the CURRENT major, not a
+            // hard-coded `1.`. The old `starts_with("1.")` bricked every patch
+            // once the contract shipped a 2.x build (both variants rejected),
+            // leaving no incident-patch path. `FromV1` still handles the
+            // cross-major 1.x → current hop.
+            let cur_major = parse_major(&current.version);
+            let this_major = parse_major(CONTRACT_VERSION);
+            if cur_major.is_none() || cur_major != this_major {
                 return Err(ContractError::InvalidMigration {
                     from: current.version,
                     requested: "patch".to_string(),
@@ -1171,4 +1221,10 @@ pub fn migrate(
                 .add_attribute("to_version", CONTRACT_VERSION))
         }
     }
+}
+
+/// Parse the leading `major` component of a semver string (e.g. `"2.3.1"` →
+/// `Some(2)`). Returns `None` if there is no parseable leading integer.
+fn parse_major(version: &str) -> Option<u64> {
+    version.split('.').next().and_then(|s| s.parse::<u64>().ok())
 }

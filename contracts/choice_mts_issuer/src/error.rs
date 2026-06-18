@@ -104,6 +104,9 @@ pub enum ContractError {
     #[error("Refund deadline not yet reached: {remaining_seconds}s remaining")]
     RefundDeadlineNotReached { remaining_seconds: u64 },
 
+    #[error("refund_deadline_seconds {got} is below the minimum {min}")]
+    RefundDeadlineTooShort { got: u64, min: u64 },
+
     #[error("Migration state missing: no v1 config bytes at storage key `config`")]
     MigrationStateMissing {},
 
@@ -112,6 +115,9 @@ pub enum ContractError {
 
     #[error("Seeder address `{addr}` holds no contract code — refusing to deliver cw_held to a ghost/EOA address")]
     SeederAddrNotAContract { addr: String },
+
+    #[error("Seeder sink at `{addr}` is not a sink configured for this launch ({reason}) — refusing to deliver cw_held")]
+    SeederSinkConfigMismatch { addr: String, reason: String },
 
     #[error("Launch {id} denom admin already renounced")]
     DenomAdminAlreadyRenounced { id: u64 },

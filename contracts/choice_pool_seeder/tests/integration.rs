@@ -24,7 +24,7 @@
 //!    seed balances are fully drained.
 //!  * CLMM: `CreateLocker` + `CreateSink` → fund sink → permissionless `Settle`
 //!    → `choice_clmm_factory` creates the pool at the seed ratio, a full-range
-//!    position NFT is minted to the locker, the caller tip lands, dust is swept,
+//!    position NFT is minted to the locker, dust is swept,
 //!    and `locker.CollectFees` routes swap fees to the beneficiary.
 
 use cosmwasm_std::{Coin, Uint128, Uint256};
@@ -186,7 +186,6 @@ fn setup() -> Env {
                 choice_factory: choice_factory.address(),
                 clmm_factory: None,
                 clmm_manager: None,
-                max_tip_bps: 100,
             }),
             Some(&admin.address()),
             Some("choice_pool_seeder_factory"),
@@ -213,7 +212,6 @@ fn instantiate_factory_and_query_config() {
     match role {
         RoleResponse::Factory(cfg) => {
             assert_eq!(cfg.admin, env.admin.address());
-            assert_eq!(cfg.max_tip_bps, 100);
         }
         _ => panic!("expected Factory role"),
     }
@@ -435,7 +433,6 @@ fn create_sink_then_settle_full_lifecycle() {
                 choice_factory: choice_factory.clone(),
                 clmm_factory: None,
                 clmm_manager: None,
-                max_tip_bps: 100,
             }),
             Some(&admin.address()),
             Some("Seeder Factory"),
@@ -446,7 +443,7 @@ fn create_sink_then_settle_full_lifecycle() {
         .data
         .address;
 
-    // CreateSink (permissionless). tip_bps = 0 keeps the LP-burn assertion exact.
+    // CreateSink (permissionless). No tip — the full balance seeds the pool.
     let res = wasm
         .execute(
             &seeder_factory,
@@ -464,7 +461,6 @@ fn create_sink_then_settle_full_lifecycle() {
                     },
                     refund_receiver: refund_receiver.address(),
                     deadline_seconds: 3600,
-                    tip_bps: 0,
                 },
             },
             &[],
@@ -498,7 +494,7 @@ fn create_sink_then_settle_full_lifecycle() {
     let pair_addr = pair_info.contract_addr.clone();
     let lp_denom = pair_info.liquidity_token.clone();
 
-    // Reserves equal the seed (tip_bps == 0).
+    // Reserves equal the full seed (no tip skimmed).
     let pool: PoolResponse = wasm
         .query(&pair_addr, &ChoicePairQueryMsg::Pool {})
         .unwrap();
@@ -596,7 +592,6 @@ fn setup_seeder_with_sink() -> SeederEnv {
                 choice_factory: choice_factory.clone(),
                 clmm_factory: None,
                 clmm_manager: None,
-                max_tip_bps: 100,
             }),
             Some(&admin.address()),
             Some("Seeder Factory"),
@@ -624,7 +619,6 @@ fn setup_seeder_with_sink() -> SeederEnv {
                     },
                     refund_receiver: refund_receiver.address(),
                     deadline_seconds: 3600,
-                    tip_bps: 0,
                 },
             },
             &[],
@@ -736,7 +730,6 @@ fn paused_factory_blocks_create_and_settle() {
                     },
                     refund_receiver: env.refund_receiver.address(),
                     deadline_seconds: 3600,
-                    tip_bps: 0,
                 },
             },
             &[],
@@ -787,7 +780,6 @@ fn paused_factory_blocks_create_and_settle() {
 // ------------------------------------------------------------------------
 
 const CLMM_FEE_TIER: u32 = 500;
-const CLMM_TIP_BPS: u16 = 100; // 1%
 
 #[test]
 fn create_clmm_sink_then_settle_full_lifecycle() {
@@ -871,7 +863,6 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
                 choice_factory: admin.address(),
                 clmm_factory: Some(clmm_factory.clone()),
                 clmm_manager: Some(clmm_manager.clone()),
-                max_tip_bps: 100,
             }),
             Some(&admin.address()),
             Some("Seeder Factory"),
@@ -924,7 +915,6 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
                     },
                     refund_receiver: refund_receiver.address(),
                     deadline_seconds: 3600,
-                    tip_bps: CLMM_TIP_BPS,
                 },
             },
             &[],
@@ -956,13 +946,11 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
         .unwrap();
     assert!(!pool_addr.is_empty(), "pool should have been created");
 
-    // The caller tip (1% of the pair side) landed with the settler.
+    // P1-B: the cranker receives no tip — its pair balance is unchanged.
     let settler_pair_after = bank_balance(&app, &settler.address(), PAIR_DENOM);
-    let expected_tip = SEED * CLMM_TIP_BPS as u128 / 10_000;
     assert_eq!(
-        settler_pair_after - settler_pair_before,
-        expected_tip,
-        "settler should receive the pair-side tip"
+        settler_pair_after, settler_pair_before,
+        "cranker must not receive any tip"
     );
 
     // The locker owns exactly one position NFT.

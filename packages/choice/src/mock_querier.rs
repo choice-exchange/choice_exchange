@@ -48,6 +48,12 @@ pub struct WasmMockQuerier {
     /// contract code. Empty by default → such a query errors `NoSuchContract`,
     /// matching the real chain for an EOA/ghost address.
     wasm_contracts: std::collections::HashSet<String>,
+    /// Raw `WasmQuery::Smart` overrides keyed by contract address. When set, any
+    /// smart query to that address returns the stored bytes verbatim, ahead of
+    /// the typed dispatch below. Lets a test stub a cross-contract response
+    /// (e.g. a seeder `SinkConfig`) whose type lives in a crate this package
+    /// can't import without a dependency cycle.
+    smart_query_overrides: std::collections::HashMap<String, cosmwasm_std::Binary>,
 }
 
 #[derive(Clone, Default)]
@@ -135,7 +141,11 @@ impl WasmMockQuerier {
     pub fn handle_query(&self, request: &QueryRequest<InjectiveQueryWrapper>) -> QuerierResult {
         let deps = mock_dependencies(&[]);
         match &request {
-            QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => match from_json(msg) {
+            QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => {
+                if let Some(resp) = self.smart_query_overrides.get(contract_addr) {
+                    return SystemResult::Ok(ContractResult::Ok(resp.clone()));
+                }
+                match from_json(msg) {
                 Ok(FactoryQueryMsg::Pair { asset_infos }) => {
                     let key = [asset_infos[0].to_string(), asset_infos[1].to_string()].join("");
                     let mut sort_key: Vec<char> = key.chars().collect();
@@ -283,7 +293,8 @@ impl WasmMockQuerier {
                         }),
                     },
                 },
-            },
+                }
+            }
             QueryRequest::Wasm(WasmQuery::ContractInfo { contract_addr }) => {
                 if self.wasm_contracts.contains(contract_addr) {
                     let resp = cosmwasm_std::ContractInfoResponse::new(
@@ -448,12 +459,21 @@ impl WasmMockQuerier {
             token_factory_denom_creation_fee_handler: None,
             inj: InjWasmMockQuerier::default(),
             wasm_contracts: std::collections::HashSet::new(),
+            smart_query_overrides: std::collections::HashMap::new(),
         }
     }
 
     /// Mark `addr` as hosting contract code so `WasmQuery::ContractInfo`
     /// against it succeeds (others still error `NoSuchContract`).
     pub fn register_wasm_contract(&mut self, addr: &str) {
+        self.wasm_contracts.insert(addr.to_string());
+    }
+
+    /// Stub every `WasmQuery::Smart` to `addr` with `response` (returned
+    /// verbatim). Also marks `addr` as a hosting contract for `ContractInfo`.
+    pub fn with_smart_query_response(&mut self, addr: &str, response: cosmwasm_std::Binary) {
+        self.smart_query_overrides
+            .insert(addr.to_string(), response);
         self.wasm_contracts.insert(addr.to_string());
     }
 

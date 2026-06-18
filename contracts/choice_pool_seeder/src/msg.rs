@@ -41,8 +41,8 @@ pub enum InstantiateMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct FactoryInit {
     /// Admin can rotate itself and update `sink_code_id`. Should be a
-    /// timelock multisig in production. The factory's `choice_factory` and
-    /// `max_tip_bps` are immutable post-instantiate.
+    /// timelock multisig in production. The factory's `choice_factory` is
+    /// immutable post-instantiate.
     pub admin: String,
     /// Code-id used by [`ExecuteMsg::CreateSink`] in
     /// [`cosmwasm_std::WasmMsg::Instantiate2`]. Typically equal to this
@@ -65,10 +65,6 @@ pub struct FactoryInit {
     /// `Clmm` sink mints liquidity through. Paired with `clmm_factory`: both
     /// must be set (and matched) for a `Clmm` sink. Immutable.
     pub clmm_manager: Option<String>,
-    /// Hard cap on `SinkInit.tip_bps`. Belt-and-suspenders against a
-    /// misconfigured (or malicious) consumer dApp draining the pair-asset
-    /// side to its own tip recipient.
-    pub max_tip_bps: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -110,10 +106,6 @@ pub struct SinkInit {
     /// `Settle` is permissionless from t=0; this gate only opens the
     /// alternative termination path.
     pub deadline_seconds: u64,
-    /// Caller tip on permissionless `Settle`, in basis points of the
-    /// pair-asset balance at settle time. 0 disables the tip. Capped at
-    /// `FactoryConfig.max_tip_bps`.
-    pub tip_bps: u16,
 }
 
 /// Graduation venue + its config. The factory validates the embedded
@@ -236,10 +228,10 @@ pub enum ExecuteMsg {
     },
 
     /// **Sink-only, permissionless.** Single-shot. Reads the sink's own bank
-    /// balances of `token_denom` and `pair_denom`, deducts `tip_bps` of
-    /// `pair_denom` to the caller, then submits `factory.CreatePair` followed
-    /// by `pair.ProvideLiquidity` and routes the minted LP per
-    /// `lp_destination`. Atomic across all sub-messages.
+    /// balances of `token_denom` and `pair_denom`, then submits
+    /// `factory.CreatePair` followed by `pair.ProvideLiquidity` and routes the
+    /// minted LP per `lp_destination`. Atomic across all sub-messages. The
+    /// cranker receives no tip — the entire balance seeds the pool.
     ///
     /// Prerequisites the caller MUST ensure:
     ///   * Both denoms are pre-registered on the target `choice_factory` via
@@ -405,7 +397,6 @@ pub struct FactoryConfigResponse {
     pub choice_factory: String,
     pub clmm_factory: Option<String>,
     pub clmm_manager: Option<String>,
-    pub max_tip_bps: u16,
     pub paused: bool,
 }
 
@@ -421,7 +412,6 @@ pub struct SinkConfigResponse {
     pub refund_receiver: String,
     pub deadline_seconds: u64,
     pub instantiated_at: u64,
-    pub tip_bps: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

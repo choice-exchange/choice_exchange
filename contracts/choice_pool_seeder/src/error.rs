@@ -15,6 +15,9 @@ pub enum ContractError {
     #[error("Factory is paused; CreateSink / CreateLocker / Settle are halted")]
     Paused {},
 
+    #[error("factory {factory} config is unreadable; settlement blocked (fail-closed): {reason}")]
+    FactoryUnreadable { factory: String, reason: String },
+
     #[error("No pending admin to accept")]
     NoPendingAdmin {},
 
@@ -30,9 +33,6 @@ pub enum ContractError {
         required: String,
         actual: String,
     },
-
-    #[error("tip_bps {value} exceeds factory's max_tip_bps {max}")]
-    TipTooHigh { value: u16, max: u16 },
 
     #[error(
         "SinkInit.choice_factory `{got}` does not match factory's pinned choice_factory `{expected}`"
@@ -117,9 +117,6 @@ pub enum ContractError {
 
     #[error("info.funds carries unexpected denom `{denom}` (only the chain's create-pair fee may be attached)")]
     UnexpectedFundsDenom { denom: String },
-
-    #[error("tip absorbed the entire pair-asset balance; deposit would be zero")]
-    TipExhaustsBalance {},
 
     #[error("Refund deadline not yet reached: {remaining_seconds}s remaining")]
     RefundDeadlineNotReached { remaining_seconds: u64 },

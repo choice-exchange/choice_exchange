@@ -25,15 +25,22 @@ use choice::mock_querier::{mock_dependencies, WasmMockQuerier};
 use injective_cosmwasm::query::InjectiveQueryWrapper;
 use injective_cosmwasm::{InjectiveMsg, InjectiveRoute};
 
-use crate::contract::{execute, instantiate, query, reply, MAX_DECIMALS, MAX_SUBDENOM_PREFIX_LEN};
+use crate::contract::{
+    execute, instantiate, migrate, query, reply, MAX_DECIMALS, MAX_SUBDENOM_PREFIX_LEN,
+    MIN_REFUND_DEADLINE_SECONDS,
+};
 use crate::error::ContractError;
-use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchesResponse, QueryMsg};
+use crate::msg::{
+    ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchesResponse, MigrateMsg, QueryMsg,
+};
 use crate::proto::{
     MsgBurn, MsgChangeAdmin, MsgCreateDenom, MsgCreateTokenPair, MsgCreateTokenPairResponse,
     TokenPair,
 };
 use crate::state::{LaunchStatus, LAUNCHES};
-use choice_pool_seeder::msg::{ExecuteMsg as SeederExecuteMsg, LpDestination, PoolKind, SinkInit};
+use choice_pool_seeder::msg::{
+    ExecuteMsg as SeederExecuteMsg, LpDestination, PoolKind, SinkConfigResponse, SinkInit,
+};
 use prost::Message;
 
 const PREFIX: &str = "shroom";
@@ -128,6 +135,29 @@ fn denom_with_salt(internal_id: u64, salt: &str) -> String {
     )
 }
 
+/// Stub the seeder sink's `SinkConfig` so `DeliverToSeeder` (P2-B) sees a sink
+/// genuinely configured for launch `internal_id` (matching token/pair denom).
+/// Also marks the address as a hosting contract for the old ghost-check.
+fn install_matching_sink(deps: &mut Deps, seeder: &str, internal_id: u64) {
+    let cfg = SinkConfigResponse {
+        factory: Some(deps.api.addr_make("seeder_factory").to_string()),
+        issuer: mock_env().contract.address.to_string(),
+        token_denom: expected_denom(internal_id),
+        pair_denom: PAIR_DENOM.to_string(),
+        token_decimals: 18,
+        pair_decimals: 18,
+        pool_kind: PoolKind::Xyk {
+            choice_factory: deps.api.addr_make("choice_factory").to_string(),
+            lp_destination: LpDestination::Burn,
+        },
+        refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
+        deadline_seconds: REFUND_DEADLINE,
+        instantiated_at: 0,
+    };
+    deps.querier
+        .with_smart_query_response(seeder, to_json_binary(&cfg).unwrap());
+}
+
 /// Build a coherent XYK `CreateSink` payload whose `token_denom`/`pair_denom`
 /// match what `RegisterLaunch` will derive for `internal_id`. The issuer now
 /// decodes and cross-checks this payload (anti-squat enforcement).
@@ -174,7 +204,6 @@ fn sink_payload(deps: &Deps, token_denom: String, pool_kind: PoolKind) -> Binary
             pool_kind,
             refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
             deadline_seconds: REFUND_DEADLINE,
-            tip_bps: 0,
         },
     })
     .unwrap()
@@ -584,7 +613,7 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
 
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let seeder = deps.api.addr_make("seeder_addr").to_string();
-    deps.querier.register_wasm_contract(&seeder);
+    install_matching_sink(&mut deps, &seeder, 9);
     // DeliverToSeeder now burns the authority's ACTUAL on-chain balance of the
     // launch denom (capped at evm_supply), not the relayed `leftover`. Seed the
     // authority with the unsold supply so the burn leg is emitted.
@@ -654,7 +683,7 @@ fn deliver_to_seeder_with_zero_leftover_omits_burn() {
     register_default(&mut deps, 10).unwrap();
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let seeder = deps.api.addr_make("seeder_addr").to_string();
-    deps.querier.register_wasm_contract(&seeder);
+    install_matching_sink(&mut deps, &seeder, 10);
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
         deps.as_mut(),
@@ -724,7 +753,7 @@ fn deliver_to_seeder_rejects_repeat() {
     register_default(&mut deps, 13).unwrap();
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let seeder = deps.api.addr_make("seeder_addr").to_string();
-    deps.querier.register_wasm_contract(&seeder);
+    install_matching_sink(&mut deps, &seeder, 13);
     let keeper = deps.api.addr_make("keeper");
     execute(
         deps.as_mut(),
@@ -1199,7 +1228,7 @@ fn renounce_denom_admin_after_delivered_emits_change_admin() {
     register_default(&mut deps, 5).unwrap();
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let seeder = deps.api.addr_make("seeder_addr").to_string();
-    deps.querier.register_wasm_contract(&seeder);
+    install_matching_sink(&mut deps, &seeder, 5);
     let keeper = deps.api.addr_make("keeper");
 
     execute(
@@ -1680,4 +1709,83 @@ fn register_launch_rejects_undecodable_sink_payload() {
         matches!(err, ContractError::SinkPayloadDecode(_)),
         "{err:?}"
     );
+}
+
+// ------------------------------------------------------------------------
+// P2-B / P2-C / P2-A regression coverage
+// ------------------------------------------------------------------------
+
+#[test]
+fn deliver_to_seeder_rejects_sink_configured_for_a_different_launch() {
+    // P2-B: the seeder_addr hosts a real sink, but it is configured for a
+    // DIFFERENT launch's denom. DeliverToSeeder must refuse to bank-send
+    // cw_held there rather than stranding it at a wrong-but-codeful contract.
+    let mut deps = setup();
+    register_default(&mut deps, 21).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+    // Sink claims token_denom of launch 999, not launch 21.
+    install_matching_sink(&mut deps, &seeder, 999);
+    let keeper = deps.api.addr_make("keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::DeliverToSeeder {
+            evm_authority,
+            internal_id: 21,
+            leftover: Uint128::zero(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SeederSinkConfigMismatch { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn update_refund_deadline_rejects_below_floor() {
+    // P2-C: admin cannot collapse the refund grace window below the floor.
+    let mut deps = setup();
+    let admin = deps.api.addr_make("admin");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateRefundDeadline {
+            new_refund_deadline_seconds: MIN_REFUND_DEADLINE_SECONDS - 1,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ContractError::RefundDeadlineTooShort { .. }
+    ));
+
+    // At the floor it is accepted.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateRefundDeadline {
+            new_refund_deadline_seconds: MIN_REFUND_DEADLINE_SECONDS,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn migrate_patch_rejects_cross_major_but_accepts_same_major() {
+    // P2-A: Patch accepts an in-major bump (current build is 1.x) ...
+    let mut deps = setup();
+    migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap();
+
+    // ... and rejects a cross-major patch (a 1.x build must not patch over a
+    // stored 2.x deployment), instead of the old hard-coded `starts_with("1.")`
+    // that bricked every patch once a 2.x build shipped.
+    cw2::set_contract_version(deps.as_mut().storage, "crates.io:choice-mts-issuer", "2.0.0")
+        .unwrap();
+    let err = migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap_err();
+    assert!(matches!(err, ContractError::InvalidMigration { .. }), "{err:?}");
 }

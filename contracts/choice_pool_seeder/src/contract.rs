@@ -39,12 +39,6 @@ use injective_cosmwasm::InjectiveMsgWrapper;
 const CONTRACT_NAME: &str = "crates.io:choice-pool-seeder";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Hard ceiling on `FactoryInit.max_tip_bps`. 1000 bps == 10%. The factory's
-/// admin can set anything `≤ HARD_MAX_TIP_BPS`; the per-sink `tip_bps` is
-/// then bounded by the factory's chosen `max_tip_bps`. Belt-and-suspenders
-/// against a misconfigured factory.
-pub const HARD_MAX_TIP_BPS: u16 = 1000;
-
 /// Label used by `Instantiate2` for spawned sinks. The chain prepends a
 /// 64-byte truncated identifier so this just needs to be human-recognizable.
 const SINK_LABEL_PREFIX: &str = "choice-pool-seeder-sink";
@@ -85,13 +79,6 @@ fn instantiate_factory(
     _info: MessageInfo,
     init: FactoryInit,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    if init.max_tip_bps > HARD_MAX_TIP_BPS {
-        return Err(ContractError::TipTooHigh {
-            value: init.max_tip_bps,
-            max: HARD_MAX_TIP_BPS,
-        });
-    }
-
     let admin = deps.api.addr_validate(&init.admin)?;
     let choice_factory = deps.api.addr_validate(&init.choice_factory)?;
 
@@ -116,7 +103,6 @@ fn instantiate_factory(
             choice_factory: choice_factory.clone(),
             clmm_factory: clmm_factory.clone(),
             clmm_manager: clmm_manager.clone(),
-            max_tip_bps: init.max_tip_bps,
             paused: false,
         },
     )?;
@@ -134,8 +120,7 @@ fn instantiate_factory(
         .add_attribute(
             "clmm_manager",
             clmm_manager.map(|a| a.to_string()).unwrap_or_default(),
-        )
-        .add_attribute("max_tip_bps", init.max_tip_bps.to_string()))
+        ))
 }
 
 fn instantiate_sink(
@@ -151,15 +136,6 @@ fn instantiate_sink(
     }
     if init.deadline_seconds == 0 {
         return Err(ContractError::ZeroDeadline {});
-    }
-    // The factory's `CreateSink` enforces the per-instance `max_tip_bps`;
-    // the sink itself only re-checks the hard ceiling so a direct-instantiate
-    // path can't smuggle a runaway tip.
-    if init.tip_bps > HARD_MAX_TIP_BPS {
-        return Err(ContractError::TipTooHigh {
-            value: init.tip_bps,
-            max: HARD_MAX_TIP_BPS,
-        });
     }
 
     let issuer = deps.api.addr_validate(&init.issuer)?;
@@ -187,7 +163,6 @@ fn instantiate_sink(
             refund_receiver: refund_receiver.clone(),
             deadline_seconds: init.deadline_seconds,
             instantiated_at: env.block.time.seconds(),
-            tip_bps: init.tip_bps,
         },
     )?;
     SINK_STATE.save(
@@ -207,8 +182,7 @@ fn instantiate_sink(
         .add_attribute("pair_denom", init.pair_denom)
         .add_attribute("refund_receiver", refund_receiver)
         .add_attribute("pool_kind", pool_kind_label)
-        .add_attribute("deadline_seconds", init.deadline_seconds.to_string())
-        .add_attribute("tip_bps", init.tip_bps.to_string()))
+        .add_attribute("deadline_seconds", init.deadline_seconds.to_string()))
 }
 
 /// Address-validate a `PoolKind` into its stored form. Does NOT check it
@@ -345,12 +319,6 @@ fn exec_create_sink(
         return Err(ContractError::Paused {});
     }
 
-    if sink_init.tip_bps > cfg.max_tip_bps {
-        return Err(ContractError::TipTooHigh {
-            value: sink_init.tip_bps,
-            max: cfg.max_tip_bps,
-        });
-    }
     // Reject — don't silently rewrite — so the caller sees what's wrong. A
     // sink only ever talks to the DEX deployment(s) this factory pins;
     // consumers must construct `sink_init.pool_kind` against the same
@@ -377,8 +345,7 @@ fn exec_create_sink(
         .add_attribute("action", "create_sink")
         .add_attribute("sink_code_id", cfg.sink_code_id.to_string())
         .add_attribute("token_denom", sink_init.token_denom)
-        .add_attribute("pair_denom", sink_init.pair_denom)
-        .add_attribute("tip_bps", sink_init.tip_bps.to_string()))
+        .add_attribute("pair_denom", sink_init.pair_denom))
 }
 
 fn exec_create_locker(
@@ -542,18 +509,50 @@ fn exec_update_clmm_addresses(
         ))
 }
 
-/// Query the parent factory's `paused` flag. Returns `false` when the sink has
-/// no recorded factory (direct-instantiate debug path) or the address does not
-/// answer as a factory — settlement is never blocked by an inability to read
-/// the breaker, only by an explicit pause.
-fn factory_paused(deps: Deps<InjectiveQueryWrapper>, factory: &Option<cosmwasm_std::Addr>) -> bool {
-    match factory {
-        Some(f) => deps
-            .querier
-            .query_wasm_smart::<FactoryConfigResponse>(f, &QueryMsg::FactoryConfig {})
-            .map(|c| c.paused)
-            .unwrap_or(false),
-        None => false,
+/// Consult the parent factory's circuit breaker before settling. Fails CLOSED
+/// (P1-A): if the factory contract EXISTS but its config can't be read — it was
+/// migrated to an incompatible schema, or any other read failure — settlement
+/// is blocked rather than silently proceeding into a possibly-broken DEX, which
+/// is exactly the incident the breaker exists to stop. The previous version
+/// `unwrap_or(false)`'d every read error, so a single failed query silently
+/// defeated the pause.
+///
+/// Two cases are deliberately NOT blocked: a sink with no recorded factory (the
+/// direct-instantiate debug path), and a factory address that hosts no contract
+/// code at all. The latter is unreachable on the real path — a sink's `factory`
+/// is the contract that `Instantiate2`'d it, which always has code — so it only
+/// arises in unit fixtures; there is no live breaker to consult, so blocking
+/// would be wrong.
+fn ensure_factory_not_paused(
+    deps: Deps<InjectiveQueryWrapper>,
+    factory: &Option<cosmwasm_std::Addr>,
+) -> Result<(), ContractError> {
+    let Some(f) = factory else {
+        return Ok(());
+    };
+    match deps
+        .querier
+        .query_wasm_smart::<FactoryConfigResponse>(f, &QueryMsg::FactoryConfig {})
+    {
+        Ok(cfg) => {
+            if cfg.paused {
+                Err(ContractError::Paused {})
+            } else {
+                Ok(())
+            }
+        }
+        Err(read_err) => {
+            // Factory exists but its config is unreadable → fail CLOSED. Only a
+            // code-less address (never the real factory) is allowed through.
+            if deps.querier.query_wasm_contract_info(f.as_str()).is_ok() {
+                Err(ContractError::FactoryUnreadable {
+                    factory: f.to_string(),
+                    reason: read_err.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
@@ -591,11 +590,9 @@ fn exec_settle(
     }
     // Honour the parent factory's circuit breaker: during a paused incident,
     // freeze settlement into a potentially-broken DEX even though `Settle` is
-    // otherwise permissionless. Skipped on the direct-instantiate debug path
-    // (no recorded factory) and tolerant of a non-factory address.
-    if factory_paused(deps.as_ref(), &cfg.factory) {
-        return Err(ContractError::Paused {});
-    }
+    // otherwise permissionless. Fails CLOSED if the factory exists but its
+    // config can't be read (P1-A).
+    ensure_factory_not_paused(deps.as_ref(), &cfg.factory)?;
 
     let token_bal = deps
         .querier
@@ -648,23 +645,6 @@ fn exec_settle(
     }
 }
 
-/// Compute the pair-side tip and the remaining deposit. Tip is taken from the
-/// pair-asset side — the side with real value. The launch token has no market
-/// price until the pool exists, so paying tips in `token_denom` would just
-/// print free tokens to the cranker.
-fn split_tip(seed_pair: Uint128, tip_bps: u16) -> Result<(Uint128, Uint128), ContractError> {
-    let tip = if tip_bps == 0 {
-        Uint128::zero()
-    } else {
-        seed_pair.multiply_ratio(tip_bps as u128, 10_000u128)
-    };
-    let pair_deposit = seed_pair.checked_sub(tip)?;
-    if pair_deposit.is_zero() {
-        return Err(ContractError::TipExhaustsBalance {});
-    }
-    Ok((tip, pair_deposit))
-}
-
 fn settle_xyk(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
@@ -706,8 +686,6 @@ fn settle_xyk(
         });
     }
 
-    let (tip, pair_deposit) = split_tip(seed_pair, cfg.tip_bps)?;
-
     let assets = [
         Asset {
             info: AssetInfo::NativeToken {
@@ -727,13 +705,6 @@ fn settle_xyk(
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
 
-    if !tip.is_zero() {
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: info.sender.to_string(),
-            amount: coins(tip.u128(), &cfg.pair_denom),
-        }));
-    }
-
     messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: choice_factory.to_string(),
         msg: to_json_binary(&FactoryExecuteMsg::CreatePair { assets })?,
@@ -742,12 +713,13 @@ fn settle_xyk(
 
     // Callback chain: each step is a self-`WasmMsg::Execute`, processed
     // depth-first in CW so messages emitted by `ProvideLiquidity` run before
-    // `DistributeLp` starts.
+    // `DistributeLp` starts. The full pair balance seeds the pool — the cranker
+    // takes no tip (P1-B).
     messages.push(self_callback(
         &env,
         CallbackMsg::ProvideLiquidity {
             token_amount: seed_token,
-            pair_amount: pair_deposit,
+            pair_amount: seed_pair,
         },
     )?);
     messages.push(self_callback(&env, CallbackMsg::DistributeLp {})?);
@@ -758,9 +730,7 @@ fn settle_xyk(
         .add_attribute("pool_kind", "xyk")
         .add_attribute("caller", info.sender)
         .add_attribute("token_amount", seed_token)
-        .add_attribute("pair_balance", seed_pair)
-        .add_attribute("pair_deposit", pair_deposit)
-        .add_attribute("tip", tip))
+        .add_attribute("pair_amount", seed_pair))
 }
 
 struct ClmmSettleParams {
@@ -796,9 +766,9 @@ fn settle_clmm(
         max_fee_multiple,
     } = params;
 
-    // Whole token side seeds the pool; tip comes off the pair side.
+    // Whole balance seeds the pool — the cranker takes no tip (P1-B).
     let seed_token = token_bal;
-    let (tip, pair_deposit) = split_tip(pair_bal, cfg.tip_bps)?;
+    let pair_deposit = pair_bal;
 
     // Full-range bounds for this fee tier's spacing.
     let tick_spacing = query_fee_tier_spacing(deps.as_ref(), &clmm_factory, fee_tier)?;
@@ -830,13 +800,6 @@ fn settle_clmm(
     let init_sqrt_price: Uint256 = init_sqrt_price_from_amounts(amount0, amount1)?;
 
     let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
-
-    if !tip.is_zero() {
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: info.sender.to_string(),
-            amount: coins(tip.u128(), &cfg.pair_denom),
-        }));
-    }
 
     // 1. Create the pool at our price (no funds; reply inside the factory
     //    registers it before the next top-level message runs).
@@ -908,8 +871,7 @@ fn settle_clmm(
         .add_attribute("tick_lower", tick_lower.to_string())
         .add_attribute("tick_upper", tick_upper.to_string())
         .add_attribute("init_sqrt_price", init_sqrt_price.to_string())
-        .add_attribute("position_recipient", position_recipient)
-        .add_attribute("tip", tip))
+        .add_attribute("position_recipient", position_recipient))
 }
 
 /// Permissionless refund, available once `deadline_seconds` past instantiate.
@@ -1422,7 +1384,6 @@ fn query_factory_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<FactoryC
         choice_factory: c.choice_factory.into_string(),
         clmm_factory: c.clmm_factory.map(|a| a.into_string()),
         clmm_manager: c.clmm_manager.map(|a| a.into_string()),
-        max_tip_bps: c.max_tip_bps,
         paused: c.paused,
     })
 }
@@ -1443,7 +1404,6 @@ fn query_sink_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<SinkConfigR
         refund_receiver: c.refund_receiver.into_string(),
         deadline_seconds: c.deadline_seconds,
         instantiated_at: c.instantiated_at,
-        tip_bps: c.tip_bps,
     })
 }
 
@@ -1509,7 +1469,14 @@ pub fn migrate(
                 .add_attribute("to_version", CONTRACT_VERSION))
         }
         MigrateMsg::Patch {} => {
-            if !current.version.starts_with("1.") {
+            // P2-A: accept an in-MAJOR patch against the CURRENT major, not a
+            // hard-coded `1.`. The old `starts_with("1.")` bricked every patch
+            // once the contract shipped a 2.x build (both variants rejected),
+            // leaving no incident-patch path. `FromV1` still handles the
+            // cross-major 1.x → current hop.
+            let cur_major = parse_major(&current.version);
+            let this_major = parse_major(CONTRACT_VERSION);
+            if cur_major.is_none() || cur_major != this_major {
                 return Err(ContractError::InvalidMigration {
                     from: current.version,
                     requested: "patch".to_string(),
@@ -1523,6 +1490,12 @@ pub fn migrate(
                 .add_attribute("to_version", CONTRACT_VERSION))
         }
     }
+}
+
+/// Parse the leading `major` component of a semver string (e.g. `"2.3.1"` →
+/// `Some(2)`). Returns `None` if the string has no parseable leading integer.
+fn parse_major(version: &str) -> Option<u64> {
+    version.split('.').next().and_then(|s| s.parse::<u64>().ok())
 }
 
 // ------------------------------------------------------------------------

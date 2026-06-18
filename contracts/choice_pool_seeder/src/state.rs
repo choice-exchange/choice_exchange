@@ -44,8 +44,6 @@ pub struct FactoryConfig {
     /// The CLMM NFT position manager `Clmm` sinks mint through. Set/cleared
     /// together with `clmm_factory` via `UpdateClmmAddresses`. Future sinks only.
     pub clmm_manager: Option<Addr>,
-    /// Immutable cap on per-sink `tip_bps`.
-    pub max_tip_bps: u16,
     /// Circuit breaker. When `true`, `CreateSink` / `CreateLocker` are refused
     /// and any sink whose `Settle` consults this factory (via
     /// [`SinkConfig::factory`]) is frozen — the incident-response halt for a
@@ -76,7 +74,6 @@ pub struct SinkConfig {
     /// Wall-clock seconds at instantiate. `Refund`'s permissionless gate
     /// opens at `instantiated_at + deadline_seconds`.
     pub instantiated_at: u64,
-    pub tip_bps: u16,
 }
 
 /// Address-validated mirror of [`crate::msg::PoolKind`].

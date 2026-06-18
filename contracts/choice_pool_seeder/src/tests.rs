@@ -3,9 +3,9 @@
 //! Coverage:
 //!  * Instantiate both roles + per-field validation.
 //!  * `CreateSink` happy path (Instantiate2 wiring) + rejections
-//!    (tip-too-high, choice_factory mismatch, wrong-role).
-//!  * `Settle` happy path message chain + tip-on-pair-side accounting +
-//!    role/balance/create-fee guards.
+//!    (choice_factory mismatch, wrong-role).
+//!  * `Settle` happy path message chain (no cranker tip — the full balance
+//!    seeds the pool) + role/balance/create-fee guards.
 //!  * `Refund` keeper-or-anyone semantics across the deadline boundary.
 //!  * `Callback::ProvideLiquidity` and `Callback::DistributeLp` exercised
 //!    directly with a pre-populated pair on the mock factory — the
@@ -29,7 +29,7 @@ use cosmwasm_std::testing::{MockApi as TestMockApi, MockQuerier, MockStorage};
 use injective_cosmwasm::query::InjectiveQueryWrapper;
 use std::marker::PhantomData;
 
-use crate::contract::{execute, instantiate, migrate, query, HARD_MAX_TIP_BPS};
+use crate::contract::{execute, instantiate, migrate, query};
 use crate::error::ContractError;
 use crate::msg::{
     CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg, LpDestination,
@@ -70,7 +70,6 @@ fn make_factory_init(api: &MockApi) -> FactoryInit {
         choice_factory: api.addr_make("choice_factory").to_string(),
         clmm_factory: Some(api.addr_make("clmm_factory").to_string()),
         clmm_manager: Some(api.addr_make("clmm_manager").to_string()),
-        max_tip_bps: 50,
     }
 }
 
@@ -103,7 +102,6 @@ fn make_sink_init(api: &MockApi) -> SinkInit {
         pool_kind: xyk_pool_kind(api),
         refund_receiver: api.addr_make("refund_receiver").to_string(),
         deadline_seconds: 86_400,
-        tip_bps: 25,
     }
 }
 
@@ -181,24 +179,7 @@ fn instantiate_factory_happy_path_persists_config() {
         _ => panic!("expected Factory variant"),
     };
     assert_eq!(factory.sink_code_id, 7);
-    assert_eq!(factory.max_tip_bps, 50);
     assert_eq!(factory.admin, deps.api.addr_make("admin").to_string());
-}
-
-#[test]
-fn instantiate_factory_rejects_tip_over_hard_cap() {
-    let mut deps = simple_deps();
-    let mut init = make_factory_init(&deps.api);
-    init.max_tip_bps = HARD_MAX_TIP_BPS + 1;
-    let admin = deps.api.addr_make("admin");
-    let err = instantiate(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&admin, &[]),
-        InstantiateMsg::Factory(init),
-    )
-    .unwrap_err();
-    assert!(matches!(err, ContractError::TipTooHigh { .. }));
 }
 
 #[test]
@@ -215,7 +196,6 @@ fn instantiate_sink_happy_path_sets_pending_state() {
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::SinkConfig {}).unwrap()).unwrap();
     assert_eq!(cfg.token_denom, TOKEN_DENOM);
     assert_eq!(cfg.pair_denom, PAIR_DENOM);
-    assert_eq!(cfg.tip_bps, 25);
     assert!(matches!(
         cfg.pool_kind,
         PoolKind::Xyk {
@@ -255,22 +235,6 @@ fn instantiate_sink_rejects_zero_deadline() {
     )
     .unwrap_err();
     assert!(matches!(err, ContractError::ZeroDeadline {}));
-}
-
-#[test]
-fn instantiate_sink_rejects_tip_over_hard_cap() {
-    let mut deps = rich_deps(&[]);
-    let mut init = make_sink_init(&deps.api);
-    init.tip_bps = HARD_MAX_TIP_BPS + 1;
-    let caller = deps.api.addr_make("factory_caller");
-    let err = instantiate(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&caller, &[]),
-        InstantiateMsg::Sink(init),
-    )
-    .unwrap_err();
-    assert!(matches!(err, ContractError::TipTooHigh { .. }));
 }
 
 // ------------------------------------------------------------------------
@@ -315,33 +279,12 @@ fn create_sink_emits_instantiate2_with_correct_args() {
                 InstantiateMsg::Sink(s) => {
                     assert_eq!(s.token_denom, sink_init.token_denom);
                     assert_eq!(s.pair_denom, sink_init.pair_denom);
-                    assert_eq!(s.tip_bps, 25);
                 }
                 _ => panic!("expected Sink instantiate variant"),
             }
         }
         other => panic!("expected Instantiate2, got {:?}", other),
     }
-}
-
-#[test]
-fn create_sink_rejects_tip_above_factory_cap() {
-    let mut deps = simple_deps();
-    instantiate_factory_default(&mut deps);
-    let mut sink_init = make_sink_init(&deps.api);
-    sink_init.tip_bps = 51; // factory max is 50
-    let caller = deps.api.addr_make("issuer_keeper");
-    let err = execute(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&caller, &[]),
-        ExecuteMsg::CreateSink {
-            salt: Binary::from(b"x".to_vec()),
-            sink_init,
-        },
-    )
-    .unwrap_err();
-    assert!(matches!(err, ContractError::TipTooHigh { .. }));
 }
 
 #[test]
@@ -407,7 +350,7 @@ fn fee_funds() -> Vec<Coin> {
 }
 
 #[test]
-fn settle_emits_full_chain_with_tip_create_pair_callbacks() {
+fn settle_emits_full_chain_create_pair_callbacks_no_tip() {
     let mut deps = rich_deps(&settle_balances());
     instantiate_sink_default(&mut deps);
     install_create_fee(&mut deps);
@@ -421,20 +364,11 @@ fn settle_emits_full_chain_with_tip_create_pair_callbacks() {
     )
     .unwrap();
 
-    // tip + create_pair + provide-callback + distribute-callback (no refund — exact fee)
-    assert_eq!(res.messages.len(), 4);
+    // create_pair + provide-callback + distribute-callback. No tip message
+    // (P1-B): the cranker is paid nothing and the full pair balance seeds.
+    assert_eq!(res.messages.len(), 3);
 
-    // Tip = 800e6 * 25 / 10000 = 2_000_000
-    let expected_tip = Uint128::new(800_000_000u128).multiply_ratio(25u128, 10_000u128);
     match &res.messages[0].msg {
-        CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
-            assert_eq!(to_address, &caller.to_string());
-            assert_eq!(amount, &coins(expected_tip.u128(), PAIR_DENOM));
-        }
-        other => panic!("expected tip BankMsg::Send, got {:?}", other),
-    }
-
-    match &res.messages[1].msg {
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr,
             msg,
@@ -464,7 +398,7 @@ fn settle_emits_full_chain_with_tip_create_pair_callbacks() {
         other => panic!("expected factory.CreatePair WasmExec, got {:?}", other),
     }
 
-    for (idx, expected_kind) in [(2usize, "provide_liquidity"), (3, "distribute_lp")] {
+    for (idx, expected_kind) in [(1usize, "provide_liquidity"), (2, "distribute_lp")] {
         match &res.messages[idx].msg {
             CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr, msg, ..
@@ -480,8 +414,8 @@ fn settle_emits_full_chain_with_tip_create_pair_callbacks() {
                         "provide_liquidity",
                     ) => {
                         assert_eq!(token_amount, Uint128::new(1_000_000_000_000u128));
-                        // pair_deposit = 800e6 - 2e6
-                        assert_eq!(pair_amount, Uint128::new(798_000_000u128));
+                        // Whole pair balance seeds the pool — no tip skimmed.
+                        assert_eq!(pair_amount, Uint128::new(800_000_000u128));
                     }
                     (ExecuteMsg::Callback(CallbackMsg::DistributeLp {}), "distribute_lp") => {}
                     (other, kind) => panic!("expected {} callback, got {:?}", kind, other),
@@ -491,42 +425,39 @@ fn settle_emits_full_chain_with_tip_create_pair_callbacks() {
         }
     }
 
+    // No BankMsg::Send to the cranker anywhere in the chain.
+    assert!(
+        !res.messages
+            .iter()
+            .any(|m| matches!(&m.msg, CosmosMsg::Bank(BankMsg::Send { .. }))),
+        "settle must not pay the cranker a tip"
+    );
+
     // Status flipped pre-dispatch (defense-in-depth against re-entry).
     let state = SINK_STATE.load(deps.as_ref().storage).unwrap();
     assert_eq!(state.status, SinkStatus::Settled);
 }
 
 #[test]
-fn settle_with_zero_tip_omits_tip_message() {
+fn settle_fails_closed_when_factory_exists_but_config_unreadable() {
+    // P1-A: the sink's factory address hosts contract code, but no
+    // FactoryConfig response is installed → the breaker read fails while the
+    // contract exists. Settlement must be BLOCKED (fail-closed), not proceed.
     let mut deps = rich_deps(&settle_balances());
-
-    // Override sink to tip_bps=0.
-    let mut init = make_sink_init(&deps.api);
-    init.tip_bps = 0;
-    let caller = deps.api.addr_make("factory_caller");
-    instantiate(
-        deps.as_mut(),
-        mock_env(),
-        message_info(&caller, &[]),
-        InstantiateMsg::Sink(init),
-    )
-    .unwrap();
+    instantiate_sink_default(&mut deps); // cfg.factory = "factory_caller"
     install_create_fee(&mut deps);
+    deps.querier
+        .register_wasm_contract(deps.api.addr_make("factory_caller").as_str());
 
-    let cranker = deps.api.addr_make("cranker");
-    let res = execute(
+    let caller = deps.api.addr_make("cranker");
+    let err = execute(
         deps.as_mut(),
         mock_env(),
-        message_info(&cranker, &fee_funds()),
+        message_info(&caller, &fee_funds()),
         ExecuteMsg::Settle {},
     )
-    .unwrap();
-    // No tip → only 3 messages (create_pair + 2 callbacks).
-    assert_eq!(res.messages.len(), 3);
-    assert!(matches!(
-        &res.messages[0].msg,
-        CosmosMsg::Wasm(WasmMsg::Execute { .. })
-    ));
+    .unwrap_err();
+    assert!(matches!(err, ContractError::FactoryUnreadable { .. }));
 }
 
 #[test]
@@ -681,9 +612,9 @@ fn settle_pair_denom_equals_create_fee_denom_deposits_leg_b_only() {
     )
     .unwrap();
 
-    // Expected: tip = leg_b_pair * 25 / 10000; deposit = leg_b_pair - tip.
-    let tip = Uint128::new(leg_b_pair).multiply_ratio(25u128, 10_000u128);
-    let expected_deposit = Uint128::new(leg_b_pair) - tip;
+    // The whole Leg B pair balance seeds the pool (no tip skimmed); the
+    // caller's exact fee was excluded from `seed_pair`.
+    let expected_deposit = Uint128::new(leg_b_pair);
 
     // Find the ProvideLiquidity callback and check pair_amount.
     let provide = res
@@ -1384,6 +1315,20 @@ fn migrate_from_v1_accepts_current_v1_marker() {
         .any(|a| a.key == "variant" && a.value == "from_v1"));
 }
 
+#[test]
+fn migrate_patch_rejects_cross_major() {
+    // P2-A: a 1.x build must not Patch over a stored 2.x deployment. The old
+    // `starts_with("1.")` already rejected this, but it ALSO bricked an
+    // in-major patch once the build itself shipped as 2.x — the new major-match
+    // guard fixes that while keeping the cross-major rejection below.
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    cw2::set_contract_version(deps.as_mut().storage, "crates.io:choice-pool-seeder", "2.0.0")
+        .unwrap();
+    let err = migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap_err();
+    assert!(matches!(err, ContractError::InvalidMigration { .. }), "{err:?}");
+}
+
 // ------------------------------------------------------------------------
 // CLMM settle
 // ------------------------------------------------------------------------
@@ -1483,22 +1428,13 @@ fn clmm_settle_emits_create_pool_mint_and_sweep() {
     )
     .unwrap();
 
-    // tip + create_pool + mint + sweep-dust callback
-    assert_eq!(res.messages.len(), 4);
+    // create_pool + mint + sweep-dust callback. No tip message (P1-B).
+    assert_eq!(res.messages.len(), 3);
 
-    // [0] tip on the pair side.
-    let expected_tip = Uint128::new(800_000_000u128).multiply_ratio(25u128, 10_000u128);
+    // [0] CreatePool on the pinned clmm factory, no funds, fee tier 3000.
+    // The whole pair balance seeds the position — no tip skimmed.
+    let pair_deposit = Uint128::new(800_000_000u128);
     match &res.messages[0].msg {
-        CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
-            assert_eq!(to_address, &caller.to_string());
-            assert_eq!(amount, &coins(expected_tip.u128(), PAIR_DENOM));
-        }
-        other => panic!("expected tip send, got {:?}", other),
-    }
-
-    // [1] CreatePool on the pinned clmm factory, no funds, fee tier 3000.
-    let pair_deposit = Uint128::new(800_000_000u128) - expected_tip;
-    match &res.messages[1].msg {
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr,
             msg,
@@ -1531,8 +1467,8 @@ fn clmm_settle_emits_create_pool_mint_and_sweep() {
         other => panic!("expected CreatePool exec, got {:?}", other),
     }
 
-    // [2] MintPosition to the locker with both denoms attached as funds.
-    match &res.messages[2].msg {
+    // [1] MintPosition to the locker with both denoms attached as funds.
+    match &res.messages[1].msg {
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr,
             msg,
@@ -1579,8 +1515,8 @@ fn clmm_settle_emits_create_pool_mint_and_sweep() {
         other => panic!("expected MintPosition exec, got {:?}", other),
     }
 
-    // [3] sweep-dust self callback.
-    match &res.messages[3].msg {
+    // [2] sweep-dust self callback.
+    match &res.messages[2].msg {
         CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr, msg, ..
         }) => {
@@ -2101,7 +2037,7 @@ fn create_sink_payload_json_round_trips() {
         ExecuteMsg::CreateSink { salt, sink_init: s } => {
             assert_eq!(salt.as_slice(), b"abc");
             assert_eq!(s.token_denom, sink_init.token_denom);
-            assert_eq!(s.tip_bps, sink_init.tip_bps);
+            assert_eq!(s.pair_denom, sink_init.pair_denom);
         }
         other => panic!("expected CreateSink, got {:?}", other),
     }
