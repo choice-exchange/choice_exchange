@@ -161,4 +161,22 @@ pub enum ContractError {
 
     #[error("pair_denom must differ from the launch denom `{denom}` (no self-paired pool)")]
     PairDenomEqualsLaunchDenom { denom: String },
+
+    #[error("could not query the seeder factory `{addr}` FactoryConfig for sink_code_id: {reason}")]
+    SeederFactoryConfigQuery { addr: String, reason: String },
+
+    #[error("could not query CodeInfo (checksum) for sink_code_id {code_id}: {reason}")]
+    SinkCodeInfoQuery { code_id: u64, reason: String },
+
+    #[error("instantiate2 address derivation failed: {0}")]
+    SeederAddrDerivation(String),
+
+    #[error(
+        "seeder_addr `{supplied}` is not the Instantiate2 sink for this launch (sink_code_id {sink_code_id} derives `{derived}`) — refusing to register a look-alike sink"
+    )]
+    SeederAddrDerivationMismatch {
+        supplied: String,
+        derived: String,
+        sink_code_id: u64,
+    },
 }

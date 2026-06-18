@@ -56,6 +56,28 @@ pub struct Config {
     /// pre-pause config deserializes as `false` (unpaused).
     #[serde(default)]
     pub paused: bool,
+    /// P1 (this session): when `true`, `RegisterLaunch` derives the per-launch
+    /// sink's `Instantiate2` address on-chain — from the seeder factory's live
+    /// `sink_code_id` checksum, the factory as creator, and the salt carried in
+    /// the forwarded `CreateSink` payload — and rejects a `seeder_addr` that
+    /// doesn't match. This is the only thing that stops a fully-compromised
+    /// keeper from pointing `cw_held` (and the CLMM `AuthorizeCreation`
+    /// `creator`, i.e. the eventual locked-LP recipient) at a denom-matching
+    /// look-alike sink it controls — a case the `DeliverToSeeder` SinkConfig
+    /// denom-match guard cannot catch. Default `true`; the `admin` (timelock)
+    /// can flip it via `SetVerifySeederDerivation` as a mainnet escape hatch so
+    /// an unforeseen chain-version interaction can't brick every launch with no
+    /// recourse short of a redeploy. `#[serde(default = …)]` → on for any
+    /// config written by a pre-P1 build across a migrate.
+    #[serde(default = "default_verify_seeder_derivation")]
+    pub verify_seeder_derivation: bool,
+}
+
+/// Serde default for [`Config::verify_seeder_derivation`]: secure-by-default
+/// (`true`) so a migrated pre-P1 config gains the derivation check rather than
+/// silently keeping it off.
+pub fn default_verify_seeder_derivation() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]

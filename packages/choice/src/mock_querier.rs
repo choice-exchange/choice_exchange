@@ -1,7 +1,8 @@
 use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    from_json, to_json_binary, Addr, Binary, Coin, ContractResult, Empty, OwnedDeps, Querier,
-    QuerierResult, QueryRequest, SystemError, SystemResult, Uint128, WasmQuery,
+    from_json, to_json_binary, Addr, Binary, Checksum, Coin, CodeInfoResponse, ContractResult,
+    Empty, OwnedDeps, Querier, QuerierResult, QueryRequest, SystemError, SystemResult, Uint128,
+    WasmQuery,
 };
 use injective_cosmwasm::tokenfactory::response::TokenFactoryCreateDenomFeeResponse;
 use injective_cosmwasm::{
@@ -54,6 +55,11 @@ pub struct WasmMockQuerier {
     /// (e.g. a seeder `SinkConfig`) whose type lives in a crate this package
     /// can't import without a dependency cycle.
     smart_query_overrides: std::collections::HashMap<String, cosmwasm_std::Binary>,
+    /// `WasmQuery::CodeInfo` answers keyed by `code_id` → wasm-blob checksum.
+    /// Lets a test stub the code-hash an on-chain `instantiate2_address`
+    /// derivation reads (e.g. the seeder `sink_code_id`). Unset code-ids error
+    /// `NoSuchCode`, matching the real chain.
+    code_infos: std::collections::HashMap<u64, [u8; 32]>,
 }
 
 #[derive(Clone, Default)]
@@ -295,6 +301,19 @@ impl WasmMockQuerier {
                 },
                 }
             }
+            QueryRequest::Wasm(WasmQuery::CodeInfo { code_id }) => {
+                match self.code_infos.get(code_id) {
+                    Some(checksum) => {
+                        let resp = CodeInfoResponse::new(
+                            *code_id,
+                            Addr::unchecked("mock_code_creator"),
+                            Checksum::from(*checksum),
+                        );
+                        SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                    }
+                    None => SystemResult::Err(SystemError::NoSuchCode { code_id: *code_id }),
+                }
+            }
             QueryRequest::Wasm(WasmQuery::ContractInfo { contract_addr }) => {
                 if self.wasm_contracts.contains(contract_addr) {
                     let resp = cosmwasm_std::ContractInfoResponse::new(
@@ -460,6 +479,7 @@ impl WasmMockQuerier {
             inj: InjWasmMockQuerier::default(),
             wasm_contracts: std::collections::HashSet::new(),
             smart_query_overrides: std::collections::HashMap::new(),
+            code_infos: std::collections::HashMap::new(),
         }
     }
 
@@ -475,6 +495,12 @@ impl WasmMockQuerier {
         self.smart_query_overrides
             .insert(addr.to_string(), response);
         self.wasm_contracts.insert(addr.to_string());
+    }
+
+    /// Stub `WasmQuery::CodeInfo { code_id }` to report `checksum` as the code's
+    /// wasm-blob hash (what an `instantiate2_address` derivation reads).
+    pub fn with_code_info(&mut self, code_id: u64, checksum: [u8; 32]) {
+        self.code_infos.insert(code_id, checksum);
     }
 
     // configure the mint whitelist mock querier

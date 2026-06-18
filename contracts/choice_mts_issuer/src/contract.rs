@@ -11,16 +11,17 @@ use crate::state::{Config, LaunchRecord, LaunchStatus, CONFIG, LAUNCHES};
 use choice_clmm_common::factory::ExecuteMsg as ClmmFactoryExecuteMsg;
 use choice_clmm_common::types::AssetInfo as ClmmAssetInfo;
 use choice_pool_seeder::msg::{
-    ExecuteMsg as SeederExecuteMsg, PoolKind, QueryMsg as SeederQueryMsg,
-    SinkConfigResponse as SeederSinkConfig,
+    ExecuteMsg as SeederExecuteMsg, FactoryConfigResponse as SeederFactoryConfig, PoolKind,
+    QueryMsg as SeederQueryMsg, SinkConfigResponse as SeederSinkConfig,
 };
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    coins, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
-    Order, Reply, ReplyOn, Response, StdResult, SubMsg, SubMsgResult, Uint128, WasmMsg,
+    coins, instantiate2_address, to_json_binary, Addr, BankMsg, Binary, CanonicalAddr, Coin,
+    CosmosMsg, Deps, DepsMut, Env, MessageInfo, Order, Reply, ReplyOn, Response, StdResult, SubMsg,
+    SubMsgResult, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw_storage_plus::Bound;
@@ -54,6 +55,15 @@ pub const MAX_DECIMALS: u32 = 18;
 /// response (the keeper can refund a stuck launch at any time) but blocks the
 /// instant-mass-refund foot-gun. Enforced at instantiate and `UpdateRefundDeadline`.
 pub const MIN_REFUND_DEADLINE_SECONDS: u64 = 3600;
+
+/// Injective contract-address width. `cosmwasm_std::instantiate2_address`
+/// returns the full 32-byte wasmd address hash, but Injective (an Ethermint
+/// fork) truncates every contract/account address to the first 20 bytes — so
+/// the on-chain `seeder_addr` derivation slices the hash here. Mirrors
+/// `chain_capability_harness::instantiate2_addr` and the keeper's
+/// `addressing/instantiate2.ts`, both proven against the real chain by the
+/// `chain_capability_harness` integration tests.
+const INJ_ADDR_LEN: usize = 20;
 
 /// Default pagination size for `QueryMsg::Launches`.
 const DEFAULT_QUERY_LIMIT: u32 = 30;
@@ -115,6 +125,10 @@ pub fn instantiate(
             forwarder: forwarder.clone(),
             refund_deadline_seconds: msg.refund_deadline_seconds,
             paused: false,
+            // Secure-by-default: derive + verify the sink address on-chain. The
+            // admin can disable via `SetVerifySeederDerivation` if it ever needs
+            // to be turned off without a redeploy.
+            verify_seeder_derivation: true,
         },
     )?;
 
@@ -214,6 +228,9 @@ pub fn execute(
         } => execute_update_refund_deadline(deps, info, new_refund_deadline_seconds),
         ExecuteMsg::UpdateDecimals { new_decimals } => {
             execute_update_decimals(deps, info, new_decimals)
+        }
+        ExecuteMsg::SetVerifySeederDerivation { enabled } => {
+            execute_set_verify_seeder_derivation(deps, info, enabled)
         }
     }
 }
@@ -353,16 +370,20 @@ fn execute_register_launch(
     //   (c) an XYK launch carries no stray CLMM reservation.
     // Importing the real seeder `msg` types makes a future field rename a
     // compile error here rather than a silent enforcement bypass.
-    let sink_init = match cosmwasm_std::from_json::<SeederExecuteMsg>(&create_sink_payload)
-        .map_err(|e| ContractError::SinkPayloadDecode(e.to_string()))?
-    {
-        SeederExecuteMsg::CreateSink { sink_init, .. } => sink_init,
-        _ => {
-            return Err(ContractError::SinkPayloadDecode(
-                "expected a CreateSink message".to_string(),
-            ))
-        }
-    };
+    let (sink_init, sink_salt) =
+        match cosmwasm_std::from_json::<SeederExecuteMsg>(&create_sink_payload)
+            .map_err(|e| ContractError::SinkPayloadDecode(e.to_string()))?
+        {
+            // Capture `salt` too (P1): it is the exact salt the factory will use
+            // in its `Instantiate2` when this same payload is forwarded (step 6),
+            // so deriving the sink address from it is collision-free.
+            SeederExecuteMsg::CreateSink { sink_init, salt } => (sink_init, salt),
+            _ => {
+                return Err(ContractError::SinkPayloadDecode(
+                    "expected a CreateSink message".to_string(),
+                ))
+            }
+        };
     if sink_init.token_denom != denom {
         return Err(ContractError::SinkPayloadMismatch {
             field: "token_denom".to_string(),
@@ -404,6 +425,21 @@ fn execute_register_launch(
                 return Err(ContractError::ClmmAuthUnexpected {});
             }
         }
+    }
+
+    // P1 (this session): stop trusting the keeper-supplied `seeder_addr`. Derive
+    // the sink's `Instantiate2` address on-chain from the seeder factory's live
+    // `sink_code_id` checksum + the salt the factory will actually use, and
+    // reject a mismatch. Until now `DeliverToSeeder` only bound the destination
+    // to this launch's denom/pair (blocking accidental/cross-launch misroutes),
+    // which a fully-compromised keeper could satisfy with a denom-matching
+    // look-alike sink it controls — letting it capture `cw_held` AND, for a CLMM
+    // launch, the locked-LP position minted to the `AuthorizeCreation` `creator`
+    // (= `seeder_addr`) below. Deriving the address closes that vector. The
+    // derivation MUST run before the CLMM `AuthorizeCreation` (step 5b) and the
+    // `CreateSink` forward (step 6), both of which trust `seeder_addr`.
+    if config.verify_seeder_derivation {
+        verify_seeder_addr_derivation(deps.as_ref(), &seeder_factory, &seeder_addr, &sink_salt)?;
     }
 
     // Persist the record up front. `erc20_address` lands in the reply
@@ -953,6 +989,96 @@ fn execute_update_decimals(
         .add_attribute("decimals", new_decimals.to_string()))
 }
 
+/// Admin-only (P1): flip the on-chain `seeder_addr` Instantiate2-derivation
+/// check. Disabling it reverts `RegisterLaunch` to the v1 trust model (it trusts
+/// the keeper-supplied address; `DeliverToSeeder`'s sink denom-match guard still
+/// applies). Provided as a mainnet escape hatch so an unforeseen issue with the
+/// derivation can't brick every launch without recourse to a redeploy.
+fn execute_set_verify_seeder_derivation(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    enabled: bool,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    config.verify_seeder_derivation = enabled;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "set_verify_seeder_derivation")
+        .add_attribute("verify_seeder_derivation", enabled.to_string()))
+}
+
+/// P1: derive the per-launch sink's `Instantiate2` address on-chain and assert
+/// it equals the keeper-supplied `seeder_addr`.
+///
+/// The derivation inputs are exactly what the seeder factory will feed its own
+/// `WasmMsg::Instantiate2` when `RegisterLaunch` forwards the `CreateSink`
+/// payload (step 6) in the SAME tx:
+///   * `checksum`  — the sha256 of the factory's live `sink_code_id` (queried
+///     from its `FactoryConfig`, then `CodeInfo`). No TOCTOU: only the factory
+///     admin's `UpdateSinkCodeId` can change it and there is no reentrancy that
+///     could fire mid-tx.
+///   * `creator`   — the seeder factory itself (it is the `Instantiate2` caller).
+///   * `salt`      — the literal salt bytes from the `CreateSink` payload (NOT a
+///     keeper-claimed convention; the same payload bytes the factory consumes).
+///
+/// So the derived address is provably the sink the factory will create.
+///
+/// `cosmwasm_std::instantiate2_address` returns the full 32-byte wasmd hash;
+/// Injective truncates contract addresses to the first [`INJ_ADDR_LEN`] bytes,
+/// so we slice before comparing. The `chain_capability_harness` integration
+/// tests run this exact path against the real chain (a register with the
+/// harness-derived address must commit), which is what proves the truncation +
+/// key construction match Injective's actual `Instantiate2`.
+fn verify_seeder_addr_derivation(
+    deps: Deps<InjectiveQueryWrapper>,
+    seeder_factory: &Addr,
+    seeder_addr: &Addr,
+    salt: &Binary,
+) -> Result<(), ContractError> {
+    let factory_cfg: SeederFactoryConfig = deps
+        .querier
+        .query_wasm_smart(seeder_factory.as_str(), &SeederQueryMsg::FactoryConfig {})
+        .map_err(|e| ContractError::SeederFactoryConfigQuery {
+            addr: seeder_factory.to_string(),
+            reason: e.to_string(),
+        })?;
+
+    let code_info = deps
+        .querier
+        .query_wasm_code_info(factory_cfg.sink_code_id)
+        .map_err(|e| ContractError::SinkCodeInfoQuery {
+            code_id: factory_cfg.sink_code_id,
+            reason: e.to_string(),
+        })?;
+
+    let creator_canon = deps.api.addr_canonicalize(seeder_factory.as_str())?;
+    let derived_full =
+        instantiate2_address(code_info.checksum.as_slice(), &creator_canon, salt.as_slice())
+            .map_err(|e| ContractError::SeederAddrDerivation(e.to_string()))?;
+    let derived20 = derived_full.as_slice().get(..INJ_ADDR_LEN).ok_or_else(|| {
+        ContractError::SeederAddrDerivation("derived address hash shorter than 20 bytes".to_string())
+    })?;
+
+    let supplied_canon = deps.api.addr_canonicalize(seeder_addr.as_str())?;
+    if derived20 != supplied_canon.as_slice() {
+        // Best-effort humanize of the derived address for the error message.
+        let derived_human = deps
+            .api
+            .addr_humanize(&CanonicalAddr::from(derived20))
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "<unhumanizable>".to_string());
+        return Err(ContractError::SeederAddrDerivationMismatch {
+            supplied: seeder_addr.to_string(),
+            derived: derived_human,
+            sink_code_id: factory_cfg.sink_code_id,
+        });
+    }
+    Ok(())
+}
+
 fn execute_update_keeper(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
@@ -1129,6 +1255,7 @@ fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> 
         forwarder: c.forwarder.into_string(),
         refund_deadline_seconds: c.refund_deadline_seconds,
         paused: c.paused,
+        verify_seeder_derivation: c.verify_seeder_derivation,
     })
 }
 

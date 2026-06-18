@@ -17,8 +17,8 @@
 
 use cosmwasm_std::testing::{message_info, mock_env, MockApi, MockStorage};
 use cosmwasm_std::{
-    coin, coins, from_json, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, OwnedDeps, Reply,
-    ReplyOn, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
+    coin, coins, from_json, instantiate2_address, to_json_binary, Api, BankMsg, Binary, CanonicalAddr,
+    Coin, CosmosMsg, OwnedDeps, Reply, ReplyOn, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
 };
 
 use choice::mock_querier::{mock_dependencies, WasmMockQuerier};
@@ -39,7 +39,8 @@ use crate::proto::{
 };
 use crate::state::{LaunchStatus, LAUNCHES};
 use choice_pool_seeder::msg::{
-    ExecuteMsg as SeederExecuteMsg, LpDestination, PoolKind, SinkConfigResponse, SinkInit,
+    ExecuteMsg as SeederExecuteMsg, FactoryConfigResponse, LpDestination, PoolKind,
+    SinkConfigResponse, SinkInit,
 };
 use prost::Message;
 
@@ -74,7 +75,20 @@ fn setup() -> Deps {
         forwarder: deps.api.addr_make("forwarder").to_string(),
         refund_deadline_seconds: REFUND_DEADLINE,
     };
-    instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+    instantiate(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+    // The bulk of these tests predate the P1 on-chain `seeder_addr` derivation
+    // (default ON) and use placeholder `addr_make("seeder_addr")` sinks that
+    // don't match a real Instantiate2 derivation — turn the check OFF here so
+    // they keep exercising their orthogonal concerns. Dedicated tests below
+    // (`register_launch_*verify_seeder*`) cover the derivation with it ON, and
+    // the `chain_capability_harness` integration tests run it ON by default.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        ExecuteMsg::SetVerifySeederDerivation { enabled: false },
+    )
+    .unwrap();
     deps
 }
 
@@ -1788,4 +1802,210 @@ fn migrate_patch_rejects_cross_major_but_accepts_same_major() {
         .unwrap();
     let err = migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap_err();
     assert!(matches!(err, ContractError::InvalidMigration { .. }), "{err:?}");
+}
+
+// =====================================================================
+// P1: on-chain `seeder_addr` Instantiate2-derivation verification.
+//
+// `setup()` flips the check OFF for the legacy tests; these instantiate a
+// fresh issuer (default ON), stub the seeder factory's `FactoryConfig` +
+// `CodeInfo` so the contract can read `sink_code_id`/checksum, and recompute
+// the expected sink address the same way the contract does. They prove the
+// CODE PATH (query → derive → truncate-20 → compare) is internally correct;
+// the `chain_capability_harness` integration tests prove the truncation +
+// key construction match Injective's real `Instantiate2`.
+// =====================================================================
+
+/// The seeder `sink_code_id` + its wasm checksum the verify tests pin.
+const SINK_CODE_ID: u64 = 7;
+const SINK_CHECKSUM: [u8; 32] = [0xab; 32];
+
+/// Instantiate an issuer WITHOUT flipping the derivation check off (i.e. with
+/// the secure default ON). Mirrors `setup()` minus the `SetVerifySeederDerivation`.
+fn instantiate_issuer(deps: &mut Deps) {
+    let admin = deps.api.addr_make("admin");
+    let msg = InstantiateMsg {
+        admin: admin.to_string(),
+        subdenom_prefix: PREFIX.to_string(),
+        decimals: 18,
+        keeper: deps.api.addr_make("keeper").to_string(),
+        forwarder: deps.api.addr_make("forwarder").to_string(),
+        refund_deadline_seconds: REFUND_DEADLINE,
+    };
+    instantiate(deps.as_mut(), mock_env(), message_info(&admin, &[]), msg).unwrap();
+}
+
+/// Recompute the sink `Instantiate2` address exactly as the contract does:
+/// the full 32-byte wasmd hash truncated to Injective's 20-byte width, then
+/// humanized through the same `MockApi`.
+fn derive_sink_addr(api: &MockApi, seeder_factory: &str, salt: &Binary) -> String {
+    let creator = api.addr_canonicalize(seeder_factory).unwrap();
+    let full = instantiate2_address(&SINK_CHECKSUM, &creator, salt.as_slice()).unwrap();
+    let canon: CanonicalAddr = full.as_slice()[..20].into();
+    api.addr_humanize(&canon).unwrap().to_string()
+}
+
+/// Stub the seeder factory's `FactoryConfig` (→ `sink_code_id`) + the matching
+/// `CodeInfo` checksum so `RegisterLaunch`'s derivation can run, and return the
+/// sink address it must derive for `salt`.
+fn install_seeder_factory(deps: &mut Deps, salt: &Binary) -> String {
+    let seeder_factory = deps.api.addr_make("seeder_factory");
+    let cfg = FactoryConfigResponse {
+        admin: deps.api.addr_make("seeder_admin").to_string(),
+        pending_admin: None,
+        sink_code_id: SINK_CODE_ID,
+        choice_factory: deps.api.addr_make("choice_factory").to_string(),
+        clmm_factory: None,
+        clmm_manager: None,
+        paused: false,
+    };
+    deps.querier
+        .with_smart_query_response(seeder_factory.as_str(), to_json_binary(&cfg).unwrap());
+    deps.querier.with_code_info(SINK_CODE_ID, SINK_CHECKSUM);
+    derive_sink_addr(&deps.api, seeder_factory.as_str(), salt)
+}
+
+/// Build a coherent XYK `CreateSink` payload carrying `salt` for launch `id`.
+fn salted_xyk_payload(deps: &Deps, internal_id: u64, salt: Binary) -> Binary {
+    to_json_binary(&SeederExecuteMsg::CreateSink {
+        salt,
+        sink_init: SinkInit {
+            issuer: mock_env().contract.address.to_string(),
+            token_denom: expected_denom(internal_id),
+            pair_denom: PAIR_DENOM.to_string(),
+            token_decimals: 18,
+            pair_decimals: 18,
+            pool_kind: PoolKind::Xyk {
+                choice_factory: deps.api.addr_make("choice_factory").to_string(),
+                lp_destination: LpDestination::Burn,
+            },
+            refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
+            deadline_seconds: REFUND_DEADLINE,
+        },
+    })
+    .unwrap()
+}
+
+/// `RegisterLaunch` with an explicit `seeder_addr` + `salt` (verification ON).
+fn register_with_seeder(
+    deps: &mut Deps,
+    internal_id: u64,
+    seeder_addr: String,
+    salt: Binary,
+) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
+    let caller = deps.api.addr_make("keeper");
+    let info = message_info(&caller, &fee_funds());
+    let payload = salted_xyk_payload(deps, internal_id, salt);
+    let msg = ExecuteMsg::RegisterLaunch {
+        internal_id,
+        evm_authority: deps.api.addr_make("evm_authority").to_string(),
+        total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
+        evm_supply: Uint128::new(800_000_000u128) * Uint128::new(10u128.pow(18)),
+        pair_denom: PAIR_DENOM.to_string(),
+        seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
+        seeder_addr,
+        create_sink_payload: payload,
+        choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
+    };
+    execute(deps.as_mut(), mock_env(), info, msg)
+}
+
+#[test]
+fn instantiate_defaults_verify_seeder_derivation_on() {
+    let mut deps = new_deps();
+    instantiate_issuer(&mut deps);
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert!(
+        cfg.verify_seeder_derivation,
+        "seeder-addr derivation must be ON by default (secure-by-default)"
+    );
+}
+
+#[test]
+fn register_launch_verify_accepts_derived_seeder_addr() {
+    let mut deps = new_deps();
+    instantiate_issuer(&mut deps);
+    let salt = Binary::from(b"salt-for-launch-77".to_vec());
+    let sink = install_seeder_factory(&mut deps, &salt);
+
+    // The keeper supplies the correctly-derived sink address → accepted.
+    register_with_seeder(&mut deps, 77, sink.clone(), salt).unwrap();
+
+    let rec = LAUNCHES
+        .load(&deps.storage, (&deps.api.addr_make("evm_authority"), 77))
+        .unwrap();
+    assert_eq!(rec.seeder_addr.as_str(), sink);
+    assert_eq!(rec.status, LaunchStatus::Registered);
+}
+
+#[test]
+fn register_launch_verify_rejects_lookalike_seeder_addr() {
+    let mut deps = new_deps();
+    instantiate_issuer(&mut deps);
+    let salt = Binary::from(b"salt-for-launch-77".to_vec());
+    let _correct = install_seeder_factory(&mut deps, &salt);
+
+    // A fully-compromised keeper points at a denom-matching look-alike sink it
+    // controls (any address other than the derived one). With derivation ON the
+    // issuer recomputes the real sink and rejects the substitution.
+    let lookalike = deps.api.addr_make("attacker_sink").to_string();
+    let err = register_with_seeder(&mut deps, 77, lookalike, salt).unwrap_err();
+    assert!(
+        matches!(err, ContractError::SeederAddrDerivationMismatch { .. }),
+        "expected SeederAddrDerivationMismatch, got {err:?}"
+    );
+}
+
+#[test]
+fn register_launch_verify_errors_when_factory_config_unavailable() {
+    let mut deps = new_deps();
+    instantiate_issuer(&mut deps);
+    // No FactoryConfig/CodeInfo stub → the factory query fails and registration
+    // reverts (rather than silently trusting the keeper address).
+    let salt = Binary::from(b"salt-for-launch-77".to_vec());
+    let sink = deps.api.addr_make("seeder_addr").to_string();
+    let err = register_with_seeder(&mut deps, 77, sink, salt).unwrap_err();
+    assert!(
+        matches!(err, ContractError::SeederFactoryConfigQuery { .. }),
+        "expected SeederFactoryConfigQuery, got {err:?}"
+    );
+}
+
+#[test]
+fn set_verify_seeder_derivation_admin_only_and_toggles() {
+    let mut deps = new_deps();
+    instantiate_issuer(&mut deps);
+
+    // Non-admin rejected.
+    let stranger = deps.api.addr_make("stranger");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::SetVerifySeederDerivation { enabled: false },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::Unauthorized {}), "{err:?}");
+
+    // Admin disables → config reflects it.
+    let admin = deps.api.addr_make("admin");
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::SetVerifySeederDerivation { enabled: false },
+    )
+    .unwrap();
+    let cfg: ConfigResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert!(!cfg.verify_seeder_derivation);
+
+    // With the check OFF, a look-alike `seeder_addr` is accepted (v1 trust model)
+    // — confirms the toggle actually gates the derivation path.
+    let salt = Binary::from(b"whatever".to_vec());
+    let lookalike = deps.api.addr_make("any_sink").to_string();
+    register_with_seeder(&mut deps, 88, lookalike, salt).unwrap();
 }

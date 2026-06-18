@@ -198,6 +198,15 @@ pub enum ExecuteMsg {
     /// launches (must be `0..=18`). Already-created denoms keep their snapshot
     /// — tokenfactory decimals are immutable once a denom exists.
     UpdateDecimals { new_decimals: u32 },
+
+    /// Admin-only: flip the on-chain `seeder_addr` Instantiate2-derivation
+    /// check (P1). When enabled (the default), `RegisterLaunch` re-derives the
+    /// sink address from the factory's live `sink_code_id` + salt and rejects a
+    /// mismatching `seeder_addr`. Disabling it falls back to the v1 trust model
+    /// (the keeper-supplied address, guarded only by `DeliverToSeeder`'s sink
+    /// denom-match) — a mainnet escape hatch in case the derivation ever needs
+    /// to be turned off without a redeploy. Affects FUTURE registrations only.
+    SetVerifySeederDerivation { enabled: bool },
 }
 
 /// Layer B reservation parameters for [`ExecuteMsg::RegisterLaunch`]. Carries
@@ -246,6 +255,9 @@ pub struct ConfigResponse {
     pub forwarder: String,
     pub refund_deadline_seconds: u64,
     pub paused: bool,
+    /// P1: whether `RegisterLaunch` derives + verifies the sink's Instantiate2
+    /// address on-chain (vs. trusting the keeper-supplied `seeder_addr`).
+    pub verify_seeder_derivation: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
