@@ -29,7 +29,7 @@ set -euo pipefail
 #   CLMM_MANAGER     mainnet CLMM NFT position manager
 # Optional:
 #   SUBDENOM_PREFIX (default "shroom"), DECIMALS (18),
-#   REFUND_DEADLINE_SECONDS (86400), MAX_TIP_BPS (1000)
+#   REFUND_DEADLINE_SECONDS (86400)
 #
 # Output: deploy/results/phase3_mainnet_<timestamp>.json
 
@@ -58,7 +58,6 @@ SEEDER_WASM="${SEEDER_WASM:-$ARTIFACTS_DIR/choice_pool_seeder.wasm}"
 SUBDENOM_PREFIX="${SUBDENOM_PREFIX:-shroom}"
 DECIMALS="${DECIMALS:-18}"
 REFUND_DEADLINE_SECONDS="${REFUND_DEADLINE_SECONDS:-86400}"
-MAX_TIP_BPS="${MAX_TIP_BPS:-1000}"
 
 # Loud guard: the whole point of this script is that ADMIN is NOT a hot EOA.
 if [ "$ADMIN" = "$SIGNER_ADDRESS" ]; then
@@ -142,7 +141,6 @@ SEEDER_INIT=$(cat <<EOF
     "admin": "$ADMIN",
     "sink_code_id": $SEEDER_CODE_ID,
     "choice_factory": "$CHOICE_FACTORY",
-    "max_tip_bps": $MAX_TIP_BPS,
     "clmm_factory": "$CLMM_FACTORY",
     "clmm_manager": "$CLMM_MANAGER"
   }
@@ -184,8 +182,7 @@ cat > "$RESULTS_PATH" <<EOF
   "config": {
     "subdenom_prefix": "$SUBDENOM_PREFIX",
     "decimals": $DECIMALS,
-    "refund_deadline_seconds": $REFUND_DEADLINE_SECONDS,
-    "max_tip_bps": $MAX_TIP_BPS
+    "refund_deadline_seconds": $REFUND_DEADLINE_SECONDS
   }
 }
 EOF
