@@ -37,12 +37,12 @@ Deprecated v1 zap-LP contract `inj1crke0ye0jhace2eryy4mvlna3qluqgyaz4v0md`
 (code id 39458) is neutralized: `default_recipient` cleared, all keepers
 removed. Do not direct new royalty flows at it.
 
-### Testnet CLMM (fresh deploy 2026-06-07, admin `inj1q2m26a7j…`)
+### Testnet CLMM (fresh deploy 2026-06-11, admin `inj1q2m26a7j…`)
 
-Code IDs: pool `39562`, factory `39563`, manager `39564`.
+Code IDs: pool `39611`, factory `39612`, manager `39613`.
 
-- **CLMM Factory:** `inj199tssgl479hn06x83qwdg66jc67wr4du7c8p7n` (`pool_code_id` 39562; fee tiers 100/500/3000/10000)
-- **CLMM Manager (cw721 positions):** `inj16p37lexmlugtqn5n7z8gmg785rgrztpqs3vjyz`
+- **CLMM Factory:** `inj1tscqujw9j9sa9n49xzln0f0n96gvy32dq5gw3c` (`pool_code_id` 39611; fee tiers 100/500/3000/10000)
+- **CLMM Manager (cw721 positions):** `inj1srtw4f8yzf4dvnmqr02n7qhpt2px0zf0v9lz5e`
 
 ## Additional Addresses
 
