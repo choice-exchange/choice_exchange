@@ -167,6 +167,8 @@ fn install_matching_sink(deps: &mut Deps, seeder: &str, internal_id: u64) {
         refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
         deadline_seconds: REFUND_DEADLINE,
         instantiated_at: 0,
+        expected_token: None,
+        expected_pair: None,
     };
     deps.querier
         .with_smart_query_response(seeder, to_json_binary(&cfg).unwrap());
@@ -218,6 +220,8 @@ fn sink_payload(deps: &Deps, token_denom: String, pool_kind: PoolKind) -> Binary
             pool_kind,
             refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
             deadline_seconds: REFUND_DEADLINE,
+            expected_token: None,
+            expected_pair: None,
         },
     })
     .unwrap()
@@ -1881,6 +1885,8 @@ fn salted_xyk_payload(deps: &Deps, internal_id: u64, salt: Binary) -> Binary {
             },
             refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
             deadline_seconds: REFUND_DEADLINE,
+            expected_token: None,
+            expected_pair: None,
         },
     })
     .unwrap()

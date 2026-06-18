@@ -74,6 +74,24 @@ pub struct SinkConfig {
     /// Wall-clock seconds at instantiate. `Refund`'s permissionless gate
     /// opens at `instantiated_at + deadline_seconds`.
     pub instantiated_at: u64,
+    /// Committed seed amounts (audit H-1 / M-1). The graduation seed is
+    /// deterministic and known to the keeper at `CreateSink` time
+    /// (`expected_pair == graduationPairTarget`; `expected_token == curveSupply
+    /// − tokensAtGraduation + graduationTokenReserve`), so we pin them here and
+    /// `Settle` seeds EXACTLY these amounts at EXACTLY this ratio — ignoring any
+    /// extra balance. That neutralises the donation-reprice attack (an attacker
+    /// bank-sending extra of one denom to the sink to skew the opening price,
+    /// then dumping into the mispriced pool) and the premature/partial-deposit
+    /// settle (M-1): `Settle` requires the live balance to be `>=` the committed
+    /// amount and sweeps any surplus to the refund/issuer legs after seeding.
+    ///
+    /// `None` on both ⇒ legacy "seed whatever the live balance is" behaviour,
+    /// retained only for the direct-instantiate debug path and pre-existing
+    /// stored sinks (`#[serde(default)]`). Production sinks always set both.
+    #[serde(default)]
+    pub expected_token: Option<Uint128>,
+    #[serde(default)]
+    pub expected_pair: Option<Uint128>,
 }
 
 /// Address-validated mirror of [`crate::msg::PoolKind`].

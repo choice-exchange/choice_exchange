@@ -102,6 +102,11 @@ fn make_sink_init(api: &MockApi) -> SinkInit {
         pool_kind: xyk_pool_kind(api),
         refund_receiver: api.addr_make("refund_receiver").to_string(),
         deadline_seconds: 86_400,
+        // Legacy (uncommitted) default so existing tests keep exercising the
+        // seed-the-live-balance path. Committed-amount behaviour (H-1/M-1) is
+        // covered by the dedicated tests below.
+        expected_token: None,
+        expected_pair: None,
     }
 }
 
@@ -364,9 +369,10 @@ fn settle_emits_full_chain_create_pair_callbacks_no_tip() {
     )
     .unwrap();
 
-    // create_pair + provide-callback + distribute-callback. No tip message
-    // (P1-B): the cranker is paid nothing and the full pair balance seeds.
-    assert_eq!(res.messages.len(), 3);
+    // create_pair + provide-callback + distribute-callback + sweep-dust. No tip
+    // message (P1-B): the cranker is paid nothing and the full pair balance
+    // seeds. (SweepDust routes any committed-seed surplus out of the sink.)
+    assert_eq!(res.messages.len(), 4);
 
     match &res.messages[0].msg {
         CosmosMsg::Wasm(WasmMsg::Execute {
@@ -398,7 +404,9 @@ fn settle_emits_full_chain_create_pair_callbacks_no_tip() {
         other => panic!("expected factory.CreatePair WasmExec, got {:?}", other),
     }
 
-    for (idx, expected_kind) in [(1usize, "provide_liquidity"), (2, "distribute_lp")] {
+    for (idx, expected_kind) in
+        [(1usize, "provide_liquidity"), (2, "distribute_lp"), (3, "sweep_dust")]
+    {
         match &res.messages[idx].msg {
             CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr, msg, ..
@@ -418,6 +426,7 @@ fn settle_emits_full_chain_create_pair_callbacks_no_tip() {
                         assert_eq!(pair_amount, Uint128::new(800_000_000u128));
                     }
                     (ExecuteMsg::Callback(CallbackMsg::DistributeLp {}), "distribute_lp") => {}
+                    (ExecuteMsg::Callback(CallbackMsg::SweepDust {}), "sweep_dust") => {}
                     (other, kind) => panic!("expected {} callback, got {:?}", kind, other),
                 }
             }
@@ -436,6 +445,128 @@ fn settle_emits_full_chain_create_pair_callbacks_no_tip() {
     // Status flipped pre-dispatch (defense-in-depth against re-entry).
     let state = SINK_STATE.load(deps.as_ref().storage).unwrap();
     assert_eq!(state.status, SinkStatus::Settled);
+}
+
+// ------------------------------------------------------------------------
+// Committed seed amounts (H-1 / M-1)
+// ------------------------------------------------------------------------
+
+fn instantiate_sink_committed(deps: &mut RichDeps, expected_token: u128, expected_pair: u128) {
+    let mut init = make_sink_init(&deps.api);
+    init.expected_token = Some(Uint128::new(expected_token));
+    init.expected_pair = Some(Uint128::new(expected_pair));
+    let caller = deps.api.addr_make("factory_caller");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap();
+}
+
+#[test]
+fn instantiate_sink_rejects_half_set_expected_amounts() {
+    let mut deps = rich_deps(&[]);
+    let mut init = make_sink_init(&deps.api);
+    init.expected_token = Some(Uint128::new(1_000));
+    init.expected_pair = None;
+    let caller = deps.api.addr_make("factory_caller");
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::ExpectedAmountsHalfSet {}));
+}
+
+#[test]
+fn instantiate_sink_rejects_zero_expected_amount() {
+    let mut deps = rich_deps(&[]);
+    let mut init = make_sink_init(&deps.api);
+    init.expected_token = Some(Uint128::zero());
+    init.expected_pair = Some(Uint128::new(1));
+    let caller = deps.api.addr_make("factory_caller");
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::ZeroExpectedAmount {}));
+}
+
+/// H-1: a donation bank-sent to the sink before `Settle` must NOT inflate the
+/// pool seed — the committed amounts are seeded verbatim and the surplus is
+/// swept, so the opening price can't be skewed.
+#[test]
+fn settle_committed_ignores_donation_and_seeds_exact() {
+    let committed_token = 1_000_000_000_000u128;
+    let committed_pair = 800_000_000u128;
+    let donation_token = 5_000_000u128;
+    let donation_pair = 123_456u128;
+    let mut deps = rich_deps(&[
+        coin(committed_token + donation_token, TOKEN_DENOM),
+        coin(committed_pair + donation_pair, PAIR_DENOM),
+    ]);
+    instantiate_sink_committed(&mut deps, committed_token, committed_pair);
+    install_create_fee(&mut deps);
+
+    let caller = deps.api.addr_make("cranker");
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &fee_funds()),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap();
+
+    let mut provide = None;
+    for m in &res.messages {
+        if let CosmosMsg::Wasm(WasmMsg::Execute { msg, .. }) = &m.msg {
+            if let Ok(ExecuteMsg::Callback(CallbackMsg::ProvideLiquidity {
+                token_amount,
+                pair_amount,
+            })) = from_json::<ExecuteMsg>(msg.as_slice())
+            {
+                provide = Some((token_amount, pair_amount));
+            }
+        }
+    }
+    let (token_amount, pair_amount) = provide.expect("provide_liquidity callback present");
+    // Seeds the committed amounts, NOT the donation-inflated balance.
+    assert_eq!(token_amount, Uint128::new(committed_token));
+    assert_eq!(pair_amount, Uint128::new(committed_pair));
+}
+
+/// M-1: settling before the full graduation deposit has landed must revert,
+/// rather than lock a pool at a wrong (partial) ratio.
+#[test]
+fn settle_committed_reverts_on_partial_deposit() {
+    let committed_token = 1_000_000_000_000u128;
+    let committed_pair = 800_000_000u128;
+    let mut deps = rich_deps(&[
+        coin(committed_token, TOKEN_DENOM),
+        coin(committed_pair - 1, PAIR_DENOM), // pair leg 1 wei short
+    ]);
+    instantiate_sink_committed(&mut deps, committed_token, committed_pair);
+    install_create_fee(&mut deps);
+
+    let caller = deps.api.addr_make("cranker");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &fee_funds()),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SeedBelowCommitted { ref which, .. } if which == "pair"),
+        "expected SeedBelowCommitted(pair), got {err:?}"
+    );
 }
 
 #[test]

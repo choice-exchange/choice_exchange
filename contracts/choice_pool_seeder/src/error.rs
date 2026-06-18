@@ -89,6 +89,21 @@ pub enum ContractError {
     #[error("deadline_seconds must be > 0")]
     ZeroDeadline {},
 
+    #[error("expected_token and expected_pair must be set together, or both omitted")]
+    ExpectedAmountsHalfSet {},
+
+    #[error("expected_token / expected_pair must be > 0 when set")]
+    ZeroExpectedAmount {},
+
+    #[error(
+        "Settle: live {which} balance {available} is below the committed seed {expected}; the full graduation deposit has not landed yet"
+    )]
+    SeedBelowCommitted {
+        which: String,
+        available: String,
+        expected: String,
+    },
+
     #[error("Sink is already terminal (status={status})")]
     SinkTerminal { status: String },
 

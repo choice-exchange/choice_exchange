@@ -106,6 +106,17 @@ pub struct SinkInit {
     /// `Settle` is permissionless from t=0; this gate only opens the
     /// alternative termination path.
     pub deadline_seconds: u64,
+    /// Committed seed amounts (audit H-1 / M-1). When set, `Settle` seeds
+    /// EXACTLY these amounts at EXACTLY this ratio and sweeps any surplus —
+    /// pinning the opening price against the donation-reprice attack and
+    /// rejecting premature/partial settlement. The keeper computes them from the
+    /// launch's deterministic graduation amounts. `None` ⇒ legacy seed-the-live-
+    /// balance behaviour (direct-instantiate debug path only). Both must be set
+    /// together; setting only one is rejected at `CreateSink`/instantiate.
+    #[serde(default)]
+    pub expected_token: Option<Uint128>,
+    #[serde(default)]
+    pub expected_pair: Option<Uint128>,
 }
 
 /// Graduation venue + its config. The factory validates the embedded
@@ -412,6 +423,10 @@ pub struct SinkConfigResponse {
     pub refund_receiver: String,
     pub deadline_seconds: u64,
     pub instantiated_at: u64,
+    #[serde(default)]
+    pub expected_token: Option<Uint128>,
+    #[serde(default)]
+    pub expected_pair: Option<Uint128>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

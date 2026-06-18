@@ -137,6 +137,17 @@ fn instantiate_sink(
     if init.deadline_seconds == 0 {
         return Err(ContractError::ZeroDeadline {});
     }
+    // H-1 / M-1: committed seed amounts must be supplied together (or both
+    // omitted, for the legacy debug path) and, when supplied, be non-zero.
+    match (init.expected_token, init.expected_pair) {
+        (Some(t), Some(p)) => {
+            if t.is_zero() || p.is_zero() {
+                return Err(ContractError::ZeroExpectedAmount {});
+            }
+        }
+        (None, None) => {}
+        _ => return Err(ContractError::ExpectedAmountsHalfSet {}),
+    }
 
     let issuer = deps.api.addr_validate(&init.issuer)?;
     let refund_receiver = deps.api.addr_validate(&init.refund_receiver)?;
@@ -163,6 +174,8 @@ fn instantiate_sink(
             refund_receiver: refund_receiver.clone(),
             deadline_seconds: init.deadline_seconds,
             instantiated_at: env.block.time.seconds(),
+            expected_token: init.expected_token,
+            expected_pair: init.expected_pair,
         },
     )?;
     SINK_STATE.save(
@@ -645,6 +658,31 @@ fn exec_settle(
     }
 }
 
+/// Resolve the amount to seed for one leg (H-1 / M-1). With a committed
+/// `expected`, require the live `available` balance to have reached it (else the
+/// full graduation deposit has not landed — refuse rather than seed a
+/// partial/skewed pool) and seed EXACTLY `expected`, ignoring any surplus. With
+/// no commitment (legacy debug path), seed the whole `available` balance.
+fn resolve_seed(
+    available: Uint128,
+    expected: Option<Uint128>,
+    which: &str,
+) -> Result<Uint128, ContractError> {
+    match expected {
+        Some(e) => {
+            if available < e {
+                return Err(ContractError::SeedBelowCommitted {
+                    which: which.to_string(),
+                    available: available.to_string(),
+                    expected: e.to_string(),
+                });
+            }
+            Ok(e)
+        }
+        None => Ok(available),
+    }
+}
+
 fn settle_xyk(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
@@ -677,14 +715,21 @@ fn settle_xyk(
         .find(|c| c.denom == cfg.token_denom)
         .map(|c| c.amount)
         .unwrap_or_default();
-    let seed_pair = pair_bal.checked_sub(caller_pair_funds)?;
-    let seed_token = token_bal.checked_sub(caller_token_funds)?;
-    if seed_pair.is_zero() || seed_token.is_zero() {
+    let avail_pair = pair_bal.checked_sub(caller_pair_funds)?;
+    let avail_token = token_bal.checked_sub(caller_token_funds)?;
+    if avail_pair.is_zero() || avail_token.is_zero() {
         return Err(ContractError::InsufficientBalanceForSettle {
-            token: seed_token.to_string(),
-            pair: seed_pair.to_string(),
+            token: avail_token.to_string(),
+            pair: avail_pair.to_string(),
         });
     }
+    // H-1 / M-1: seed EXACTLY the committed amounts (rejecting a still-partial
+    // deposit), so a donation that inflated `avail_*` can't skew the opening
+    // pool ratio. Any surplus above the committed seed is swept to the
+    // refund/issuer legs by the trailing `SweepDust`. Uncommitted (debug) sinks
+    // fall back to seeding the live balance.
+    let seed_token = resolve_seed(avail_token, cfg.expected_token, "token")?;
+    let seed_pair = resolve_seed(avail_pair, cfg.expected_pair, "pair")?;
 
     let assets = [
         Asset {
@@ -723,6 +768,10 @@ fn settle_xyk(
         },
     )?);
     messages.push(self_callback(&env, CallbackMsg::DistributeLp {})?);
+    // H-1/M-1: route any committed-seed surplus (donation above the committed
+    // amount, plus the pair contract's own one-sided refund) out of the
+    // terminal sink so nothing strands.
+    messages.push(self_callback(&env, CallbackMsg::SweepDust {})?);
 
     Ok(Response::new()
         .add_messages(messages)
@@ -766,9 +815,14 @@ fn settle_clmm(
         max_fee_multiple,
     } = params;
 
-    // Whole balance seeds the pool — the cranker takes no tip (P1-B).
-    let seed_token = token_bal;
-    let pair_deposit = pair_bal;
+    // H-1 / M-1: seed EXACTLY the committed amounts (rejecting a still-partial
+    // deposit). `init_sqrt_price_from_amounts` below is then computed from the
+    // committed ratio, NOT the live balance — so a donation bank-sent to the
+    // sink can't move the opening price. The trailing `SweepDust` routes any
+    // surplus (donation + the manager's one-sided refund) out of the sink.
+    // Uncommitted (debug) sinks fall back to the whole live balance.
+    let seed_token = resolve_seed(token_bal, cfg.expected_token, "token")?;
+    let pair_deposit = resolve_seed(pair_bal, cfg.expected_pair, "pair")?;
 
     // Full-range bounds for this fee tier's spacing.
     let tick_spacing = query_fee_tier_spacing(deps.as_ref(), &clmm_factory, fee_tier)?;
@@ -934,6 +988,48 @@ fn exec_force_refund(
 /// Shared refund body: route the sink's `token_denom` back to the issuer and
 /// `pair_denom` to the refund receiver, flip the sink terminal. Callers gate
 /// access (deadline vs. admin) before invoking.
+/// Route EVERY residual bank balance out of the sink (M-2): the launch
+/// `token_denom` back to the `issuer` (which burns it via `RefundFailedLaunch`,
+/// leaving no zombie supply), and every OTHER denom — the pair plus any
+/// stray/donated denom — to the `refund_receiver`. Denom-agnostic (enumerates
+/// `query_all_balances`) so nothing strands in a terminal sink, unlike the old
+/// token-and-pair-only routing. Returns the messages plus the routed token /
+/// pair amounts for logging.
+fn route_residual(
+    deps: Deps<InjectiveQueryWrapper>,
+    env: &Env,
+    cfg: &SinkConfig,
+) -> StdResult<(Vec<CosmosMsg<InjectiveMsgWrapper>>, Uint128, Uint128)> {
+    // `query_all_balances` is deprecated (doesn't scale with many denoms) but a
+    // sink holds at most token + pair + the odd stray/donated denom, and we
+    // genuinely need denom-agnostic enumeration so nothing strands. Same
+    // justification as the locker's `callback_distribute_fees`.
+    #[allow(deprecated)]
+    let balances = deps.querier.query_all_balances(&env.contract.address)?;
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
+    let mut token_routed = Uint128::zero();
+    let mut pair_routed = Uint128::zero();
+    for coin in balances {
+        if coin.amount.is_zero() {
+            continue;
+        }
+        let to_address = if coin.denom == cfg.token_denom {
+            token_routed = coin.amount;
+            cfg.issuer.to_string()
+        } else {
+            if coin.denom == cfg.pair_denom {
+                pair_routed = coin.amount;
+            }
+            cfg.refund_receiver.to_string()
+        };
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+            to_address,
+            amount: vec![coin],
+        }));
+    }
+    Ok((messages, token_routed, pair_routed))
+}
+
 fn do_refund(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
@@ -941,45 +1037,19 @@ fn do_refund(
     mut state: SinkState,
     action: &str,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    let token_bal = deps
-        .querier
-        .query_balance(&env.contract.address, &cfg.token_denom)?
-        .amount;
-    let pair_bal = deps
-        .querier
-        .query_balance(&env.contract.address, &cfg.pair_denom)?
-        .amount;
-
-    if token_bal.is_zero() && pair_bal.is_zero() {
+    let (messages, token_routed, pair_routed) = route_residual(deps.as_ref(), &env, cfg)?;
+    if messages.is_empty() {
         return Err(ContractError::NothingToRefund {});
     }
 
     state.status = SinkStatus::Refunded;
     SINK_STATE.save(deps.storage, &state)?;
 
-    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
-    if !token_bal.is_zero() {
-        // Token side back to the issuer — which has `RefundFailedLaunch` to
-        // burn it cleanly, so no zombie supply lingers on the CW side.
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: cfg.issuer.to_string(),
-            amount: coins(token_bal.u128(), &cfg.token_denom),
-        }));
-    }
-    if !pair_bal.is_zero() {
-        // Pair side to the consumer dApp's refund authority (for SHROOM,
-        // LaunchpadCore's proportional-refund accounting).
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: cfg.refund_receiver.to_string(),
-            amount: coins(pair_bal.u128(), &cfg.pair_denom),
-        }));
-    }
-
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", action)
-        .add_attribute("token_refunded", token_bal)
-        .add_attribute("pair_refunded", pair_bal)
+        .add_attribute("token_refunded", token_routed)
+        .add_attribute("pair_refunded", pair_routed)
         .add_attribute("issuer", cfg.issuer.to_string())
         .add_attribute("refund_receiver", cfg.refund_receiver.to_string()))
 }
@@ -1030,28 +1100,9 @@ fn callback_sweep_dust(
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let cfg = SINK_CONFIG.load(deps.storage)?;
 
-    let token_dust = deps
-        .querier
-        .query_balance(&env.contract.address, &cfg.token_denom)?
-        .amount;
-    let pair_dust = deps
-        .querier
-        .query_balance(&env.contract.address, &cfg.pair_denom)?
-        .amount;
-
-    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
-    if !token_dust.is_zero() {
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: cfg.issuer.to_string(),
-            amount: coins(token_dust.u128(), &cfg.token_denom),
-        }));
-    }
-    if !pair_dust.is_zero() {
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            to_address: cfg.refund_receiver.to_string(),
-            amount: coins(pair_dust.u128(), &cfg.pair_denom),
-        }));
-    }
+    // M-2: route ALL residual denoms, not just token + pair — the committed-seed
+    // surplus, the manager/pair one-sided refund, AND any stray donated denom.
+    let (messages, token_dust, pair_dust) = route_residual(deps.as_ref(), &env, &cfg)?;
 
     Ok(Response::new()
         .add_messages(messages)
@@ -1404,6 +1455,8 @@ fn query_sink_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<SinkConfigR
         refund_receiver: c.refund_receiver.into_string(),
         deadline_seconds: c.deadline_seconds,
         instantiated_at: c.instantiated_at,
+        expected_token: c.expected_token,
+        expected_pair: c.expected_pair,
     })
 }
 
