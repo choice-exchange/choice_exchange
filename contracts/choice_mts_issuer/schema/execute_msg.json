@@ -1,0 +1,405 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecuteMsg",
+  "oneOf": [
+    {
+      "description": "Keeper-only. Creates the launch denom, mints `total_supply` to self, ships `evm_supply` to `evm_authority`, pairs the denom to a freshly auto-deployed `MintBurnBankERC20` via `MsgCreateTokenPair`, and routes the bundled `create_sink_payload` to the consumer dApp's chosen `seeder_factory`. All five steps are atomic — any failure reverts the launch (no partial denom creation, no orphaned mint).\n\nGated to [`crate::state::Config::keeper`] (finding C-H1). It was previously permissionless, which let anyone front-run/squat an `internal_id` for one create-denom fee and permanently brick a launch. The launch is keyed by `(evm_authority, internal_id)`, so each EVM authority gets its own id namespace (no cross-deployment collision).",
+      "type": "object",
+      "required": [
+        "register_launch"
+      ],
+      "properties": {
+        "register_launch": {
+          "type": "object",
+          "required": [
+            "create_sink_payload",
+            "evm_authority",
+            "evm_supply",
+            "internal_id",
+            "pair_denom",
+            "seeder_addr",
+            "seeder_factory",
+            "total_supply"
+          ],
+          "properties": {
+            "choice_factory": {
+              "description": "Optional `choice_factory` to register the launch denom on via `AddNativeTokenDecimals`. When set, the issuer atomically chains a `WasmMsg::Execute` to the given factory with `1` wei of the fresh launch denom attached — the factory's per-denom verification reads its own bank balance, so the attached coin doubles as the \"I exist\" proof.\n\n`Some` is the right default for any consumer dApp whose seeder targets a legacy XYK `choice_factory`. The denom owner (this issuer) is the only entity authorized to register a `factory/<this>/...` denom, so deferring this to a separate keeper tx would not work — see `feedback_inj_bank_precompile_20byte` for context on why no other actor can sign as the denom owner.\n\nSide effect: `cw_held` is reduced by 1 wei (the dust delivered to `choice_factory`). The stored `LaunchRecord.cw_held` reflects the reduced amount. Caller must therefore ensure `total_supply - evm_supply >= 1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "clmm_pool_auth": {
+              "description": "Layer B (anti-squat gate). When `Some`, the issuer chains an `AuthorizeCreation` at the given CLMM factory reserving the `(launch_denom, pair_denom, fee)` pool slot for `seeder_addr` (the sink that runs `CreatePool` at `Settle`). The issuer owns the `factory/{this}/…` namespace, so it is authorized to reserve. Use `ttl_seconds = 0` (no expiry) for graduations. `None` skips the reservation (e.g. legacy XYK graduations).",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ClmmPoolAuth"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "create_sink_payload": {
+              "description": "Already-serialized `CreateSink { salt, sink_init }` payload for the seeder factory. Opaque to the issuer: keeps the SinkInit/PoolKind/LpDestination surface inside the seeder code-id where it belongs.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Binary"
+                }
+              ]
+            },
+            "evm_authority": {
+              "description": "dApp's EVM authority contract bech32 (lower-20-byte form). Becomes the recipient of `evm_supply` and the `burn_from_address` at `DeliverToSeeder` time.",
+              "type": "string"
+            },
+            "evm_supply": {
+              "description": "Initially-circulating amount handed to the EVM authority. The curve / fair launch / vault uses this on EVM. Must be ≤ `total_supply`. `cw_held = total_supply - evm_supply`.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                }
+              ]
+            },
+            "internal_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "pair_denom": {
+              "description": "Pair asset for the eventual Choice pool. Stored verbatim; the issuer doesn't act on it directly (Leg C is bank-precompile-fed by EVM into [`crate::state::Config::forwarder`]).",
+              "type": "string"
+            },
+            "salt_suffix": {
+              "description": "Layer A (anti-squat entropy). When `Some`, the per-launch salt is appended to the subdenom: `{prefix}_{internal_id}_{salt_suffix}`, making the launch denom unguessable before this tx exists. Must be ASCII-alphanumeric and short enough that the full subdenom stays within the 44-char tokenfactory cap. `None` preserves the legacy `{prefix}_{internal_id}` form. The keeper persists the salt so the denom round-trips; off-chain consumers must read the denom from the `register_launch` event rather than recomputing it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "seeder_addr": {
+              "description": "Per-launch sink address — caller computes it off-chain as `instantiate2(seeder_factory, sink_code_id, salt=encode(this_contract_addr, internal_id))`. Stored verbatim and used as the `BankMsg::Send` target at `DeliverToSeeder` time.",
+              "type": "string"
+            },
+            "seeder_factory": {
+              "description": "Seeder factory bech32 the consumer dApp instantiated (a `choice_pool_seeder` factory). The issuer forwards `create_sink_payload` to this contract during registration.",
+              "type": "string"
+            },
+            "total_supply": {
+              "description": "= `evm_supply` + `cw_held`. Both halves are minted up front to keep downstream amounts straight.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Keeper-relayed after the EVM authority emits `BootstrapReady(internal_id, leftover)`. The issuer (as tokenfactory admin with `allow_admin_burn=true`) burns `leftover` from `evm_authority.bech32` and sends the retained `cw_held` to `seeder_addr` in the same tx.\n\n`leftover` is sourced from the EVM event payload so the contract doesn't need to query the EVM authority's bank balance. Caller (keeper) is trusted to relay it faithfully; bounded by `leftover ≤ evm_supply`. Public tippable cranking is deferred for v1.\n\n`evm_authority` identifies the launch namespace (the record is keyed by `(evm_authority, internal_id)` — finding C-H1). Before sending `cw_held`, the issuer verifies `seeder_addr` actually holds contract code, refusing to deliver to a ghost/EOA address (finding C-M3).",
+      "type": "object",
+      "required": [
+        "deliver_to_seeder"
+      ],
+      "properties": {
+        "deliver_to_seeder": {
+          "type": "object",
+          "required": [
+            "evm_authority",
+            "internal_id",
+            "leftover"
+          ],
+          "properties": {
+            "evm_authority": {
+              "type": "string"
+            },
+            "internal_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "leftover": {
+              "$ref": "#/definitions/Uint128"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Failure path: burns the CW-side `cw_held` so the launch leaves no zombie supply on this contract. EVM-side circulating supply cleanup (refunds to participants, burning of `evm_supply` chunks still at `evm_authority`, etc.) is the dApp's responsibility via its EVM-side logic; the issuer doesn't reach into EVM here.\n\nCallable by `keeper` at any time; after [`crate::state::Config::refund_deadline_seconds`] past registration the `admin` may ALSO call it (keeper-outage liveness). It is deliberately NOT permissionless even post-deadline — a wide-open refund would let anyone terminally `Refunded` a slow-but-valid launch out from under graduation. `evm_authority` identifies the launch namespace (the record is keyed by `(evm_authority, internal_id)` — finding C-H1).",
+      "type": "object",
+      "required": [
+        "refund_failed_launch"
+      ],
+      "properties": {
+        "refund_failed_launch": {
+          "type": "object",
+          "required": [
+            "evm_authority",
+            "internal_id",
+            "reason"
+          ],
+          "properties": {
+            "evm_authority": {
+              "type": "string"
+            },
+            "internal_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "reason": {
+              "description": "Free-text reason — surfaced as an event attribute for observability. Not validated.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Keeper-or-admin, post-`Delivered`: relinquish this contract's tokenfactory admin over the launch denom by rotating the admin to the 20-zero-byte burn-address convention via `MsgChangeAdmin` (finding C-M2). After this the issuer can no longer `MsgMint` new supply or admin-`MsgBurn`-from holders for the denom.\n\nNOTE: this renounces the *tokenfactory* admin only. The auto-deployed `MintBurnBankERC20` owner is the issuer's lower-20-byte EVM address; a CosmWasm contract cannot sign the EVM tx to renounce that ERC20 ownership, so that step must be performed separately by the issuer's controller on the EVM side (deployment runbook item).",
+      "type": "object",
+      "required": [
+        "renounce_denom_admin"
+      ],
+      "properties": {
+        "renounce_denom_admin": {
+          "type": "object",
+          "required": [
+            "evm_authority",
+            "internal_id"
+          ],
+          "properties": {
+            "evm_authority": {
+              "type": "string"
+            },
+            "internal_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Admin-only: step 1 of a two-step admin rotation. Parks `new_admin` as the pending admin; the live `admin` is unchanged until the pending key calls [`ExecuteMsg::AcceptAdmin`]. Prevents a typo'd / uncontrolled target from permanently bricking governance.",
+      "type": "object",
+      "required": [
+        "update_admin"
+      ],
+      "properties": {
+        "update_admin": {
+          "type": "object",
+          "required": [
+            "new_admin"
+          ],
+          "properties": {
+            "new_admin": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Pending-admin-only: step 2 of the rotation. The address parked by `UpdateAdmin` claims the admin role.",
+      "type": "object",
+      "required": [
+        "accept_admin"
+      ],
+      "properties": {
+        "accept_admin": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Admin-only: rotate the keeper key.",
+      "type": "object",
+      "required": [
+        "update_keeper"
+      ],
+      "properties": {
+        "update_keeper": {
+          "type": "object",
+          "required": [
+            "new_keeper"
+          ],
+          "properties": {
+            "new_keeper": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Admin-only: rotate the pair-asset forwarder bech32.",
+      "type": "object",
+      "required": [
+        "update_forwarder"
+      ],
+      "properties": {
+        "update_forwarder": {
+          "type": "object",
+          "required": [
+            "new_forwarder"
+          ],
+          "properties": {
+            "new_forwarder": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Admin-only: flip the circuit breaker. While paused, `RegisterLaunch` is refused; completion + wind-down of in-flight launches stays open.",
+      "type": "object",
+      "required": [
+        "set_paused"
+      ],
+      "properties": {
+        "set_paused": {
+          "type": "object",
+          "required": [
+            "paused"
+          ],
+          "properties": {
+            "paused": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Admin-only: retune the auto-refund liveness window (seconds). Applies live to every not-yet-refunded launch (the deadline is computed against the current value).",
+      "type": "object",
+      "required": [
+        "update_refund_deadline"
+      ],
+      "properties": {
+        "update_refund_deadline": {
+          "type": "object",
+          "required": [
+            "new_refund_deadline_seconds"
+          ],
+          "properties": {
+            "new_refund_deadline_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Admin-only: retune the default tokenfactory `decimals` for FUTURE launches (must be `0..=18`). Already-created denoms keep their snapshot — tokenfactory decimals are immutable once a denom exists.",
+      "type": "object",
+      "required": [
+        "update_decimals"
+      ],
+      "properties": {
+        "update_decimals": {
+          "type": "object",
+          "required": [
+            "new_decimals"
+          ],
+          "properties": {
+            "new_decimals": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Admin-only: flip the on-chain `seeder_addr` Instantiate2-derivation check (P1). When enabled (the default), `RegisterLaunch` re-derives the sink address from the factory's live `sink_code_id` + salt and rejects a mismatching `seeder_addr`. Disabling it falls back to the v1 trust model (the keeper-supplied address, guarded only by `DeliverToSeeder`'s sink denom-match) — a mainnet escape hatch in case the derivation ever needs to be turned off without a redeploy. Affects FUTURE registrations only.",
+      "type": "object",
+      "required": [
+        "set_verify_seeder_derivation"
+      ],
+      "properties": {
+        "set_verify_seeder_derivation": {
+          "type": "object",
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "Binary": {
+      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>. See also <https://github.com/CosmWasm/cosmwasm/blob/main/docs/MESSAGE_TYPES.md>.",
+      "type": "string"
+    },
+    "ClmmPoolAuth": {
+      "description": "Layer B reservation parameters for [`ExecuteMsg::RegisterLaunch`]. Carries just enough for the issuer to emit `AuthorizeCreation` at the CLMM factory; the launch denom (token_a) and `pair_denom` (token_b) and the sink (`seeder_addr`, the authorized creator) are already known to the issuer.",
+      "type": "object",
+      "required": [
+        "clmm_factory",
+        "fee",
+        "ttl_seconds"
+      ],
+      "properties": {
+        "clmm_factory": {
+          "description": "The consumer dApp's CLMM factory the sink will `CreatePool` on.",
+          "type": "string"
+        },
+        "fee": {
+          "description": "Fee tier (pips) of the graduation pool — must match the sink's configured `fee_tier`, else the reservation guards the wrong slot.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "ttl_seconds": {
+          "description": "Reservation TTL in seconds; `0` means no expiry (the graduation default — the launch denom is unique, so it can't lapse before Settle).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Uint128": {
+      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
+      "type": "string"
+    }
+  }
+}

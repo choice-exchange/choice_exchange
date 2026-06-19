@@ -26,6 +26,13 @@
 //!    → `choice_clmm_factory` creates the pool at the seed ratio, a full-range
 //!    position NFT is minted to the locker, dust is swept,
 //!    and `locker.CollectFees` routes swap fees to the beneficiary.
+//!
+//! Genericity (a non-SHROOM consumer):
+//!  * `second_consumer_sendto_lp_and_committed_seed_xyk` — drives a full XYK
+//!    graduation for a consumer whose economic model differs from SHROOM's:
+//!    LP routed to a treasury (`LpDestination::SendTo`) instead of burned, with
+//!    committed `expected_token` / `expected_pair` seed amounts. Proves the
+//!    seeder is dApp-agnostic — Burn + uncommitted seed are config, not code.
 
 use cosmwasm_std::{Coin, Uint128, Uint256};
 use injective_test_tube::{
@@ -1071,4 +1078,196 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
         0,
         "locker must not hold collected fees"
     );
+}
+
+// ------------------------------------------------------------------------
+// Genericity: a SECOND consumer with a non-SHROOM economic model.
+//
+// SHROOM's v1 uses `LpDestination::Burn` (permanently locked floor). This test
+// stands up the seeder for a deliberately *different* consumer — one that wants
+// the graduated LP routed to its own treasury (`SendTo`) rather than burned —
+// and drives a full XYK graduation with **committed** seed amounts
+// (`expected_token` / `expected_pair`). It proves the seeder is dApp-agnostic:
+// the only SHROOM-specific choices (Burn LP, uncommitted seed) are config, not
+// code. Covers the two production-relevant paths the SHROOM-shaped lifecycle
+// tests don't: `SendTo` LP routing and committed-amount seeding on XYK.
+#[test]
+fn second_consumer_sendto_lp_and_committed_seed_xyk() {
+    let app = InjectiveTestApp::new();
+    let wasm = Wasm::new(&app);
+
+    let big = &[
+        Coin::new(1_000_000_000_000_000_000_000u128, INJ),
+        Coin::new(1_000_000_000_000u128, TOKEN_DENOM),
+        Coin::new(1_000_000_000_000u128, PAIR_DENOM),
+    ];
+    let decimals = &[18u32, 6, 6];
+    let admin = app.init_account_decimals(big, decimals).unwrap();
+    let settler = app.init_account_decimals(big, decimals).unwrap();
+    let issuer = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
+    let refund_receiver = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
+    // The distinguishing actor: this consumer wants its graduated LP here,
+    // not burned. (A different launchpad economic model — treasury-owned LP.)
+    let treasury = app.init_account(&[Coin::new(1u128, INJ)]).unwrap();
+
+    // Real XYK DEX stack.
+    let pair_code_id = store(&wasm, &admin, "choice_pair.wasm");
+    let factory_code_id = store(&wasm, &admin, "choice_factory.wasm");
+    let auction_code_id = store(&wasm, &admin, "choice_send_to_auction.wasm");
+    let seeder_code_id = store(&wasm, &admin, "choice_pool_seeder.wasm");
+
+    let auction_addr = wasm
+        .instantiate(
+            auction_code_id,
+            &choice::send_to_auction::InstantiateMsg {
+                owner: admin.address(),
+                adapter_contract: admin.address(),
+                burn_auction_subaccount:
+                    "0x1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_string(),
+            },
+            Some(&admin.address()),
+            Some("Auction"),
+            &[],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    let choice_factory = wasm
+        .instantiate(
+            factory_code_id,
+            &ChoiceFactoryInstantiateMsg {
+                pair_code_id,
+                burn_address: auction_addr,
+                fee_wallet_address: admin.address(),
+            },
+            Some(&admin.address()),
+            Some("Choice Factory"),
+            &[],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    for denom in [TOKEN_DENOM, PAIR_DENOM] {
+        wasm.execute(
+            &choice_factory,
+            &ChoiceFactoryExecuteMsg::AddNativeTokenDecimals {
+                denom: denom.to_string(),
+                decimals: 6,
+            },
+            &[Coin::new(1u128, denom)],
+            &admin,
+        )
+        .unwrap();
+    }
+
+    let seeder_factory = wasm
+        .instantiate(
+            seeder_code_id,
+            &InstantiateMsg::Factory(FactoryInit {
+                admin: admin.address(),
+                sink_code_id: seeder_code_id,
+                choice_factory: choice_factory.clone(),
+                clmm_factory: None,
+                clmm_manager: None,
+            }),
+            Some(&admin.address()),
+            Some("Seeder Factory"),
+            &[],
+            &admin,
+        )
+        .unwrap()
+        .data
+        .address;
+
+    // CreateSink with the second consumer's model: LP → treasury, and the seed
+    // amounts are COMMITTED (pins the opening ratio; sweeps any surplus).
+    let res = wasm
+        .execute(
+            &seeder_factory,
+            &ExecuteMsg::CreateSink {
+                salt: b"second-consumer-xyk".into(),
+                sink_init: SinkInit {
+                    issuer: issuer.address(),
+                    token_denom: TOKEN_DENOM.to_string(),
+                    pair_denom: PAIR_DENOM.to_string(),
+                    token_decimals: 6,
+                    pair_decimals: 6,
+                    pool_kind: PoolKind::Xyk {
+                        choice_factory: choice_factory.clone(),
+                        lp_destination: LpDestination::SendTo(treasury.address()),
+                    },
+                    refund_receiver: refund_receiver.address(),
+                    deadline_seconds: 3600,
+                    expected_token: Some(Uint128::new(SEED)),
+                    expected_pair: Some(Uint128::new(SEED)),
+                },
+            },
+            &[],
+            &admin,
+        )
+        .unwrap();
+    let sink = instantiated_addr(&res);
+
+    // Fund both legs at exactly the committed amounts.
+    bank_send(&app, &admin, &sink, TOKEN_DENOM, SEED);
+    bank_send(&app, &admin, &sink, PAIR_DENOM, SEED);
+
+    // Permissionless Settle (XYK: attach exactly the create-pair fee).
+    wasm.execute(
+        &sink,
+        &ExecuteMsg::Settle {},
+        &[Coin::new(CREATE_PAIR_FEE, INJ)],
+        &settler,
+    )
+    .unwrap();
+
+    let pair_info: PairInfo = wasm
+        .query(
+            &choice_factory,
+            &ChoiceFactoryQueryMsg::Pair {
+                asset_infos: [native(TOKEN_DENOM), native(PAIR_DENOM)],
+            },
+        )
+        .unwrap();
+    let pair_addr = pair_info.contract_addr.clone();
+    let lp_denom = pair_info.liquidity_token.clone();
+
+    // Pool reserves == the committed seed, exactly.
+    let pool: PoolResponse = wasm
+        .query(&pair_addr, &ChoicePairQueryMsg::Pool {})
+        .unwrap();
+    for asset in pool.assets.iter() {
+        assert_eq!(
+            asset.amount,
+            Uint128::new(SEED),
+            "reserve for {:?} should equal the committed seed",
+            asset.info
+        );
+    }
+
+    let state: SinkStateResponse = wasm.query(&sink, &QueryMsg::SinkState {}).unwrap();
+    assert_eq!(state.status, SinkStatus::Settled);
+    let lp_minted = state.lp_minted.unwrap_or_default();
+    assert!(lp_minted > Uint128::zero(), "expected positive LP minted");
+
+    // The genericity assertion: LP landed in the consumer's TREASURY (SendTo),
+    // not burned and not stranded in the sink.
+    assert_eq!(
+        bank_balance(&app, &treasury.address(), &lp_denom),
+        lp_minted.u128(),
+        "all minted LP should be routed to the consumer treasury"
+    );
+    assert_eq!(
+        bank_balance(&app, &sink, &lp_denom),
+        0,
+        "sink should retain no LP after SendTo"
+    );
+    // Seed balances fully consumed (committed == funded, so no surplus dust).
+    assert_eq!(bank_balance(&app, &sink, TOKEN_DENOM), 0, "token drained");
+    assert_eq!(bank_balance(&app, &sink, PAIR_DENOM), 0, "pair drained");
 }

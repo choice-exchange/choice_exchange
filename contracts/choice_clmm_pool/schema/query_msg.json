@@ -1,0 +1,343 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "get_config"
+      ],
+      "properties": {
+        "get_config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_slot0"
+      ],
+      "properties": {
+        "get_slot0": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_tick_info"
+      ],
+      "properties": {
+        "get_tick_info": {
+          "type": "object",
+          "required": [
+            "tick"
+          ],
+          "properties": {
+            "tick": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Simulate a swap and return expected output without executing.",
+      "type": "object",
+      "required": [
+        "quote"
+      ],
+      "properties": {
+        "quote": {
+          "type": "object",
+          "required": [
+            "amount_in",
+            "token_in"
+          ],
+          "properties": {
+            "amount_in": {
+              "$ref": "#/definitions/Uint128"
+            },
+            "token_in": {
+              "$ref": "#/definitions/AssetInfo"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Simulate an exact-output swap: given a desired `amount_out` of `token_out`, return the input cost (in `amount_in_consumed`) and fee. `amount_out` in the response is the actually-deliverable output (equals the request when fully fillable, less if liquidity/price-limit bound).",
+      "type": "object",
+      "required": [
+        "quote_exact_output"
+      ],
+      "properties": {
+        "quote_exact_output": {
+          "type": "object",
+          "required": [
+            "amount_out",
+            "token_out"
+          ],
+          "properties": {
+            "amount_out": {
+              "$ref": "#/definitions/Uint128"
+            },
+            "token_out": {
+              "$ref": "#/definitions/AssetInfo"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Get position info including unclaimed fees.",
+      "type": "object",
+      "required": [
+        "get_position"
+      ],
+      "properties": {
+        "get_position": {
+          "type": "object",
+          "required": [
+            "owner",
+            "tick_lower",
+            "tick_upper"
+          ],
+          "properties": {
+            "owner": {
+              "type": "string"
+            },
+            "tick_lower": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "tick_upper": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "List all positions in the pool with pagination.",
+      "type": "object",
+      "required": [
+        "get_all_positions"
+      ],
+      "properties": {
+        "get_all_positions": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              ],
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Get the tick bitmap word at a given word position.",
+      "type": "object",
+      "required": [
+        "get_tick_bitmap"
+      ],
+      "properties": {
+        "get_tick_bitmap": {
+          "type": "object",
+          "required": [
+            "word_position"
+          ],
+          "properties": {
+            "word_position": {
+              "type": "integer",
+              "format": "int16"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Get pool-level totals: active liquidity, fee growth globals, current state.",
+      "type": "object",
+      "required": [
+        "get_total_liquidity"
+      ],
+      "properties": {
+        "get_total_liquidity": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Get the fee growth accumulated INSIDE a tick range, using the V3 \"outside model\". Used by the NFT manager to attribute fees to individual NFTs that share one pool-level position.\n\nErrors if either `tick_lower` or `tick_upper` has not been initialized (i.e., no position has ever referenced that tick). Callers should only query this AFTER the pool's Mint has run for the range.",
+      "type": "object",
+      "required": [
+        "get_fee_growth_inside"
+      ],
+      "properties": {
+        "get_fee_growth_inside": {
+          "type": "object",
+          "required": [
+            "tick_lower",
+            "tick_upper"
+          ],
+          "properties": {
+            "tick_lower": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "tick_upper": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Accrued, not-yet-collected protocol fees for each token.",
+      "type": "object",
+      "required": [
+        "get_protocol_fees"
+      ],
+      "properties": {
+        "get_protocol_fees": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Current protocol-fee carve rates and routing.",
+      "type": "object",
+      "required": [
+        "get_protocol_fee_config"
+      ],
+      "properties": {
+        "get_protocol_fee_config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "The live dynamic fee (ppm) a swap landing in THIS block would be charged, computed from the current oracle state, current price, and block time — the read-only twin of what `swap` charges. Unlike `GetSlot0` (which omits the fee), this lets off-chain consumers (the router edge) refresh the fee between swaps, since the on-chain fee keeps evolving with time/volatility even when no swap emits a new `fee_ppm`.",
+      "type": "object",
+      "required": [
+        "get_dynamic_fee"
+      ],
+      "properties": {
+        "get_dynamic_fee": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "AssetInfo": {
+      "description": "Represents a token type: either a native bank denom or a CW20 contract.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "native_token"
+          ],
+          "properties": {
+            "native_token": {
+              "type": "object",
+              "required": [
+                "denom"
+              ],
+              "properties": {
+                "denom": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "token"
+          ],
+          "properties": {
+            "token": {
+              "type": "object",
+              "required": [
+                "contract_addr"
+              ],
+              "properties": {
+                "contract_addr": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Uint128": {
+      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
+      "type": "string"
+    }
+  }
+}

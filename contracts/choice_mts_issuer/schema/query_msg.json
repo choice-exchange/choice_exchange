@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "config"
+      ],
+      "properties": {
+        "config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Look up one launch by its `(evm_authority, internal_id)` key.",
+      "type": "object",
+      "required": [
+        "launch"
+      ],
+      "properties": {
+        "launch": {
+          "type": "object",
+          "required": [
+            "evm_authority",
+            "internal_id"
+          ],
+          "properties": {
+            "evm_authority": {
+              "type": "string"
+            },
+            "internal_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Paginated listing of a single `evm_authority`'s launches (its `internal_id` namespace), oldest-first. `start_after` is an `internal_id` within that authority. Per-authority because `internal_id` is no longer globally unique (finding C-H1).",
+      "type": "object",
+      "required": [
+        "launches"
+      ],
+      "properties": {
+        "launches": {
+          "type": "object",
+          "required": [
+            "evm_authority"
+          ],
+          "properties": {
+            "evm_authority": {
+              "type": "string"
+            },
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

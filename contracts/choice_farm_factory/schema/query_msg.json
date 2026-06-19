@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "oneOf": [
+    {
+      "description": "Current factory config (owner, fee collector, fee amount, farm code id).",
+      "type": "object",
+      "required": [
+        "config"
+      ],
+      "properties": {
+        "config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Pending owner rotation (if any).",
+      "type": "object",
+      "required": [
+        "pending_owner_rotation"
+      ],
+      "properties": {
+        "pending_owner_rotation": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Pending farm_code_id swap (if any).",
+      "type": "object",
+      "required": [
+        "pending_farm_code_id_update"
+      ],
+      "properties": {
+        "pending_farm_code_id_update": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Farm record for `id`. Errors if the id is unknown.",
+      "type": "object",
+      "required": [
+        "farm"
+      ],
+      "properties": {
+        "farm": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Farm record by farm contract address. Errors if the address is not in the registry (i.e. the farm was not factory-created).",
+      "type": "object",
+      "required": [
+        "farm_by_addr"
+      ],
+      "properties": {
+        "farm_by_addr": {
+          "type": "object",
+          "required": [
+            "addr"
+          ],
+          "properties": {
+            "addr": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Paginated registry scan. `start_after` is exclusive; `limit` defaults to 30 and is capped at 100.",
+      "type": "object",
+      "required": [
+        "farms"
+      ],
+      "properties": {
+        "farms": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Total number of farms ever created (== next id).",
+      "type": "object",
+      "required": [
+        "farm_count"
+      ],
+      "properties": {
+        "farm_count": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

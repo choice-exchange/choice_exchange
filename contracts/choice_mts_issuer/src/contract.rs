@@ -399,13 +399,17 @@ fn execute_register_launch(
         });
     }
 
-    // H-1 (this session): pin the sink's failure-path pair-asset recipient. On a
-    // SHROOM launch `refund_receiver` MUST be the launch's `evm_authority` (the
-    // LaunchpadCore that performs the proportional, per-participant refund). The
+    // H-1 (this session): pin the sink's failure-path pair-asset recipient. For
+    // EVERY issuer-driven launch (not just SHROOM) `refund_receiver` MUST equal
+    // the launch's `evm_authority` — the launch's controlling contract, which is
+    // the natural failure-path refund authority (for SHROOM that's the
+    // `LaunchpadCore` running proportional per-participant refunds). The
     // sink-address derivation below proves the sink is the real per-launch sink
     // but does NOT constrain the sink's init contents, so without this a
     // compromised keeper could register a valid-looking launch whose sink routes
-    // any failure-path pair-asset (real value) to an attacker.
+    // any failure-path pair-asset (real value) to an attacker. (Driving the
+    // seeder's `CreateSink` directly — bypassing the issuer — leaves
+    // `refund_receiver` unconstrained; this invariant is issuer-enforced only.)
     let supplied_refund_receiver = deps.api.addr_validate(&sink_init.refund_receiver)?;
     if supplied_refund_receiver != evm_authority {
         return Err(ContractError::RefundReceiverMismatch {

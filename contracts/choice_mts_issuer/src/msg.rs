@@ -71,7 +71,7 @@ pub enum ExecuteMsg {
         seeder_addr: String,
         /// Already-serialized `CreateSink { salt, sink_init }` payload for
         /// the seeder factory. Opaque to the issuer: keeps the
-        /// SeederInit/LpDestination/tip_bps surface inside the seeder code-id
+        /// SinkInit/PoolKind/LpDestination surface inside the seeder code-id
         /// where it belongs.
         create_sink_payload: Binary,
         /// Optional `choice_factory` to register the launch denom on via

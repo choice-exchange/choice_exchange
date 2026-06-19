@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "oneOf": [
+    {
+      "description": "Whichever role this instance has. Returns [`RoleResponse::Factory`] or [`RoleResponse::Sink`] with the full config inline — clients don't need to know the role up front.",
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Targeted query: errors with `WrongRole` if invoked on a sink.",
+      "type": "object",
+      "required": [
+        "factory_config"
+      ],
+      "properties": {
+        "factory_config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Targeted query: errors with `WrongRole` if invoked on a factory.",
+      "type": "object",
+      "required": [
+        "sink_config"
+      ],
+      "properties": {
+        "sink_config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Sink-only mutable state: status (`Pending` / `Settled` / `Refunded`) plus, if settled, the resulting pair address and LP minted amount.",
+      "type": "object",
+      "required": [
+        "sink_state"
+      ],
+      "properties": {
+        "sink_state": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Targeted query: errors with `WrongRole` unless invoked on a locker.",
+      "type": "object",
+      "required": [
+        "locker_config"
+      ],
+      "properties": {
+        "locker_config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

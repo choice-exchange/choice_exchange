@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DynamicFeeResponse",
+  "type": "object",
+  "required": [
+    "fee_ppm"
+  ],
+  "properties": {
+    "fee_ppm": {
+      "description": "Live dynamic fee in parts-per-million (e.g. 3000 = 0.3%).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false
+}

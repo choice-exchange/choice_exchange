@@ -252,10 +252,12 @@ pub enum ExecuteMsg {
     ///     denom, this is the consumer dApp's responsibility — usually a
     ///     no-op because the pair denom (SHROOM, INJ, etc.) is already
     ///     registered from existing pools.
-    ///   * The sink's bank balance includes at least the tokenfactory
-    ///     `create_pair` fee in INJ (queried by `Settle` at runtime). The
-    ///     keeper or settlement cranker pre-funds this — typically alongside
-    ///     the Leg C pair-asset forward.
+    ///   * The create-pair fee rides in `info.funds` on the `Settle` tx
+    ///     itself (NOT pre-funded into the sink balance): an `Xyk` sink must
+    ///     attach EXACTLY the live tokenfactory denom-creation fee (queried at
+    ///     runtime; the chain debits it to mint `factory/<pair>/lp`), while a
+    ///     `Clmm` sink must attach NOTHING — pool creation is free and any
+    ///     attached funds are rejected (`UnexpectedFundsForClmmSettle`).
     Settle {},
 
     /// **Sink-only, permissionless after `deadline_seconds`.** Routes:

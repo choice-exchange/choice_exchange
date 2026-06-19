@@ -110,15 +110,20 @@ Any EVM dApp can become a consumer by:
 1. Deploying its own `choice_mts_issuer` instance (admin/timelock + keeper
    key pair + forwarder bech32).
 2. Deploying its own `choice_pool_seeder` factory (per the seeder's docs).
-3. Implementing an EVM "authority contract" that emits two events:
-   ```solidity
-   event BootstrapReady(uint256 indexed internalId, uint256 leftover);
-   event BootstrapFailed(uint256 indexed internalId, string reason);
-   ```
-4. Running a keeper bot that observes these events and relays them to its
-   issuer instance (`DeliverToSeeder` / `RefundFailedLaunch`). The keeper
-   also relays `LaunchCreated` to its issuer's `RegisterLaunch`.
+3. Implementing an "authority contract" (EVM or otherwise) that owns the
+   launch lifecycle and signals three transitions to its keeper: launch
+   created, bootstrap-ready (carrying the unsold `leftover` to burn), and
+   failure. *How* it signals is the consumer's choice — the issuer never
+   sees EVM events, only the keeper-relayed CW messages below. SHROOM does
+   it with `LaunchpadCore.LaunchCreated` + `Phase3Settler.BootstrapReady`
+   (see those contracts for the exact, richer signatures); the failure path
+   is keeper- or deadline-driven, not a dedicated event.
+4. Running a keeper that maps those transitions onto this issuer:
+   `RegisterLaunch` (created) → `DeliverToSeeder` (bootstrap-ready) →
+   `RenounceDenomAdmin`, with `RefundFailedLaunch` on the failure path.
 
-That is the entire EVM-side surface. The SHROOM launchpad is the first
-consumer; a second toy consumer for genericity validation is on the phase-3
-to-do list.
+That is the entire surface the issuer cares about: keeper-relayed CW
+messages. The full cross-contract walkthrough (3-leg value flow, lifecycle,
+keeper duties, constraints) lives in
+[`docs/launchpad_integration.md`](../../docs/launchpad_integration.md).
+SHROOM is the first consumer, not the owner.

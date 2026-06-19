@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MigrateMsg",
+  "description": "Migration payload. Two distinct paths so a v2 → v2 patch cannot accidentally rewrite the immutable `(input, pair)` route by re-using the v1-shaped JSON.\n\n`FromV1` requires the on-chain cw2 version to be `1.x.x` (legacy ROUTES map config). It pins the new immutable route from the message.\n\n`Patch` requires the on-chain cw2 version to be `2.x.x`. It bumps CONTRACT_VERSION but never touches Config — so a future v2.y → v2.z migration cannot smuggle a route change in via `MsgMigrateContract`.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "from_v1"
+      ],
+      "properties": {
+        "from_v1": {
+          "type": "object",
+          "required": [
+            "input",
+            "pair"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AssetInfo"
+            },
+            "pair": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "patch"
+      ],
+      "properties": {
+        "patch": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "AssetInfo": {
+      "description": "AssetInfo contract_addr is usually passed from the cw20 hook so we can trust the contract_addr is properly validated.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "token"
+          ],
+          "properties": {
+            "token": {
+              "type": "object",
+              "required": [
+                "contract_addr"
+              ],
+              "properties": {
+                "contract_addr": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "native_token"
+          ],
+          "properties": {
+            "native_token": {
+              "type": "object",
+              "required": [
+                "denom"
+              ],
+              "properties": {
+                "denom": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

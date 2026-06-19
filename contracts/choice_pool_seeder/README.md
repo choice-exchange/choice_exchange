@@ -17,7 +17,7 @@ key and rejects cross-role calls with `ContractError::WrongRole`.
 
 | Instance | Spawned by | Purpose |
 |---|---|---|
-| **Factory** | The consumer dApp, once. Pinned to a `choice_factory` address + a `max_tip_bps`. | Receives `CreateSink { salt, sink_init }` from `choice_mts_issuer.RegisterLaunch`. Spawns the sink at `instantiate2(this_factory, sink_code_id, salt)`. Carries no funds. |
+| **Factory** | The consumer dApp, once. Pinned to the target DEX: `choice_factory` (XYK) and/or `clmm_factory` + `clmm_manager` (CLMM). | Receives `CreateSink { salt, sink_init }` from `choice_mts_issuer.RegisterLaunch`. Spawns the sink at `instantiate2(this_factory, sink_code_id, salt)`. Carries no funds. |
 | **Sink** | The factory, once per launch via Instantiate2. Immutable post-instantiate (no admin). | Holds the launch + pair denoms between Leg B/C arrival and `Settle`. Single-shot: terminates as `Settled` or `Refunded`. |
 
 The factory's `sink_code_id` is typically equal to its own code-id (the
@@ -44,8 +44,7 @@ rebuilding the factory.
                                             (token_denom + pair_denom now in sink) ──────────┘
                                                              │
                                                              ▼ atomic chain
-                                          ┌─── tip → caller (pair_denom * tip_bps)
-                                          ├─── factory.CreatePair (with creation fee)
+                                          ┌─── factory.CreatePair (with creation fee)
                                           ├─── self.Callback::ProvideLiquidity
                                           │      └─ pair.ProvideLiquidity { full deposits }
                                           └─── self.Callback::DistributeLp
@@ -69,27 +68,32 @@ to a known address.
 
 ## `Settle` prerequisites (caller-enforced)
 
-`Settle` is permissionless and tip-incentivized, but the caller MUST
-ensure two things before it can succeed:
+`Settle` is permissionless and takes **no tip** — the entire seed balance
+goes into the pool. What the caller must get right depends on the venue:
 
-1. **Both denoms are pre-registered** on the target `choice_factory` via
-   `AddNativeTokenDecimals`. For the launch denom, `choice_mts_issuer`
+1. **(XYK only) both denoms pre-registered** on the target `choice_factory`
+   via `AddNativeTokenDecimals`. For the launch denom, `choice_mts_issuer`
    handles this in its own `RegisterLaunch` flow when called with
    `choice_factory: Some(...)` — the issuer is the denom owner and the
    only entity authorized to sign that registration. For the pair denom
    (SHROOM, INJ, …) this is the consumer dApp's responsibility; usually a
    no-op because the pair denom is already registered from existing pools.
-2. **Attach the tokenfactory create-pair fee in `info.funds`** (currently
-   0.1 INJ on Injective mainnet). `Settle` queries the live fee from
-   `query_token_factory_denom_create_fee`, validates the attached funds
-   cover it, forwards it as `funds:` on the `factory.CreatePair` exec, and
-   refunds any over-payment back to the caller at the end of the message
-   chain. No pre-funding is needed; the sink stays free of stranded INJ
-   regardless of fee changes between the keeper's off-chain quote and
-   on-chain execution.
+   (CLMM pools don't go through `AddNativeTokenDecimals`.)
+2. **The create-pair fee in `info.funds` on the `Settle` tx itself** — NOT
+   pre-funded into the sink. The amount is venue-specific:
+   - **XYK** — attach **exactly** the live tokenfactory denom-creation fee
+     (the chain debits it to mint the `factory/<pair>/lp` denom). `Settle`
+     queries the live fee via `query_token_factory_denom_create_fee` and
+     rejects anything that isn't an exact match (denom set + amounts) — no
+     over-pay refund path, no chance of folding the fee into the pool. If
+     the chain fee changed since the keeper's preflight quote, just retry
+     with the new value.
+   - **CLMM** — attach **nothing**. CLMM pool creation is free, and `Settle`
+     rejects any attached funds (`UnexpectedFundsForClmmSettle`) so a stray
+     coin can't be silently folded into the deposit.
 
-If either prerequisite is missing, `Settle` fails atomically (no partial
-state mutation).
+If a prerequisite is missing, `Settle` fails atomically (no partial state
+mutation).
 
 ## `Refund`
 
@@ -145,7 +149,7 @@ cargo test -p choice-pool-seeder --test integration # integration; needs WASM ar
 
 Unit tests use `choice::mock_querier` to populate bank balances + the
 tokenfactory create-fee handler, and exercise the full message chain
-emitted by `Settle` (tip + CreatePair + ProvideLiquidity callback +
+emitted by `Settle` (CreatePair + ProvideLiquidity callback +
 DistributeLp callback) end-to-end against mocked storage. The
 post-`CreatePair` `factory.Pair { asset_infos }` lookup that runs
 on-chain between the callbacks is exercised by directly invoking the
@@ -161,8 +165,8 @@ on-chain lifecycles against real DEX stacks:
   balances are fully drained.
 - **CLMM** — `CreateLocker` + `CreateSink` → fund → `Settle` → the CLMM
   factory creates the pool at the seed ratio, a full-range position NFT is
-  minted to the locker, the caller tip lands, dust is swept, and
-  `locker.CollectFees` routes swap fees to the beneficiary.
+  minted to the locker, dust is swept, and `locker.CollectFees` routes swap
+  fees to the beneficiary.
 
 Both need `make build-all` artifacts (the legacy + CLMM stack wasm). The
 launchpad-side E2E (phase-3 step 11) additionally exercises the round trip
@@ -174,9 +178,10 @@ Any EVM dApp that has already deployed a [`choice_mts_issuer`](../choice_mts_iss
 instance becomes a consumer by:
 
 1. Deploying its own `choice_pool_seeder` factory instance against the
-   same code-id, pointing at the desired `choice_factory` deployment
-   with a `max_tip_bps` of choice. The factory addr is then wired into
-   the issuer's `RegisterLaunch.seeder_factory` field per launch.
+   same code-id, pinned to the target DEX deployment — `choice_factory`
+   (XYK) and/or `clmm_factory` + `clmm_manager` (CLMM; both or neither).
+   The factory addr is then wired into the issuer's
+   `RegisterLaunch.seeder_factory` field per launch.
 2. Pre-computing each per-launch sink address off-chain via
    `instantiate2_address(checksum_of_seeder_code, factory_addr,
    salt=encode(issuer_addr, internal_id))`. The result feeds the
@@ -184,8 +189,16 @@ instance becomes a consumer by:
 3. Constructing each `SinkInit` with `choice_factory` set to the
    factory's pinned value (the factory rejects mismatches at
    `CreateSink` time).
-4. Funding the sink with INJ for the create-pair fee before any keeper
-   calls `Settle` — typically batched with the Leg C pair-asset forward.
+4. Cranking `Settle` with the correct `info.funds`: for an **XYK** sink,
+   attach exactly the live tokenfactory create-pair fee; for a **CLMM**
+   sink, attach nothing. The fee rides on the `Settle` tx — the sink is
+   never pre-funded with it.
 
-The SHROOM launchpad is the first consumer; a second toy consumer for
-genericity validation is on the phase-3 to-do list (design §11 step 11).
+The SHROOM launchpad is the first consumer. Genericity is validated on-chain
+by `tests/integration.rs::second_consumer_sendto_lp_and_committed_seed_xyk`
+— a consumer with a non-SHROOM economic model (treasury-owned LP via `SendTo`
++ committed seed amounts) driven through a full XYK graduation.
+
+The full cross-contract walkthrough (3-leg value flow, lifecycle, keeper
+duties, constraints) lives in
+[`docs/launchpad_integration.md`](../../docs/launchpad_integration.md).

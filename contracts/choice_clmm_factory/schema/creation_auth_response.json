@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CreationAuthResponse",
+  "type": "object",
+  "required": [
+    "creator",
+    "expires_at"
+  ],
+  "properties": {
+    "creator": {
+      "description": "The only address allowed to `CreatePool` for this slot until expiry.",
+      "type": "string"
+    },
+    "expires_at": {
+      "description": "Unix seconds; `u64::MAX` means no expiry.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false
+}

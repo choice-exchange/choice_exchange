@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FactoryConfigResponse",
+  "type": "object",
+  "required": [
+    "admin",
+    "choice_factory",
+    "paused",
+    "sink_code_id"
+  ],
+  "properties": {
+    "admin": {
+      "type": "string"
+    },
+    "choice_factory": {
+      "type": "string"
+    },
+    "clmm_factory": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "clmm_manager": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "paused": {
+      "type": "boolean"
+    },
+    "pending_admin": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sink_code_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false
+}
