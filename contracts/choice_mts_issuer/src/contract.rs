@@ -398,10 +398,30 @@ fn execute_register_launch(
             expected: pair_denom.clone(),
         });
     }
-    match &sink_init.pool_kind {
+
+    // H-1 (this session): pin the sink's failure-path pair-asset recipient. On a
+    // SHROOM launch `refund_receiver` MUST be the launch's `evm_authority` (the
+    // LaunchpadCore that performs the proportional, per-participant refund). The
+    // sink-address derivation below proves the sink is the real per-launch sink
+    // but does NOT constrain the sink's init contents, so without this a
+    // compromised keeper could register a valid-looking launch whose sink routes
+    // any failure-path pair-asset (real value) to an attacker.
+    let supplied_refund_receiver = deps.api.addr_validate(&sink_init.refund_receiver)?;
+    if supplied_refund_receiver != evm_authority {
+        return Err(ContractError::RefundReceiverMismatch {
+            supplied: sink_init.refund_receiver.clone(),
+            expected: evm_authority.to_string(),
+        });
+    }
+
+    // Capture the CLMM `position_recipient` (the eventual owner of the locked-LP
+    // position NFT) so the verification block below can pin it to the derived
+    // locker. `None` for XYK launches (unreachable on the live SHROOM path).
+    let clmm_position_recipient: Option<Addr> = match &sink_init.pool_kind {
         PoolKind::Clmm {
             clmm_factory: sink_clmm_factory,
             fee_tier,
+            position_recipient,
             ..
         } => {
             let auth = clmm_pool_auth
@@ -419,13 +439,15 @@ fn execute_register_launch(
                     sink_factory: sink_clmm_factory.clone(),
                 });
             }
+            Some(deps.api.addr_validate(position_recipient)?)
         }
         PoolKind::Xyk { .. } => {
             if clmm_pool_auth.is_some() {
                 return Err(ContractError::ClmmAuthUnexpected {});
             }
+            None
         }
-    }
+    };
 
     // P1 (this session): stop trusting the keeper-supplied `seeder_addr`. Derive
     // the sink's `Instantiate2` address on-chain from the seeder factory's live
@@ -440,6 +462,18 @@ fn execute_register_launch(
     // `CreateSink` forward (step 6), both of which trust `seeder_addr`.
     if config.verify_seeder_derivation {
         verify_seeder_addr_derivation(deps.as_ref(), &seeder_factory, &seeder_addr, &sink_salt)?;
+        // H-1: a CLMM launch additionally pins `position_recipient` to the
+        // derived per-launch locker, so the locked-LP position NFT can only ever
+        // mint to a no-withdraw locker — never to a keeper-chosen address.
+        if let Some(ref position_recipient) = clmm_position_recipient {
+            verify_locker_addr_derivation(
+                deps.as_ref(),
+                &env,
+                &seeder_factory,
+                position_recipient,
+                internal_id,
+            )?;
+        }
     }
 
     // Persist the record up front. `erc20_address` lands in the reply
@@ -460,6 +494,10 @@ fn execute_register_launch(
         erc20_address: None,
         choice_factory: choice_factory_addr.clone(),
         admin_renounced: false,
+        // M-3: snapshot whether the sink/locker derivation actually ran here, so
+        // `DeliverToSeeder` can refuse to ship to a sink that was registered
+        // during a derivation-disabled escape-hatch window.
+        seeder_verified: config.verify_seeder_derivation,
     };
     LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
 
@@ -643,6 +681,17 @@ fn execute_deliver_to_seeder(
         });
     }
 
+    // M-3: never ship `cw_held` to a sink whose Instantiate2 address was not
+    // derivation-verified at RegisterLaunch. `verify_seeder_derivation` is an
+    // admin escape hatch that can be toggled off then back on; this stops the
+    // window where a launch registered with the check OFF (its `seeder_addr`
+    // unproven) could still deliver once the check is flipped back ON. Delivery
+    // is allowed only if the record was verified OR verification is currently
+    // disabled (the operator is knowingly running the escape hatch end-to-end).
+    if config.verify_seeder_derivation && !record.seeder_verified {
+        return Err(ContractError::SeederDerivationNotVerified {});
+    }
+
     // Finding C-M3 + P2-B: refuse to bank-send `cw_held` unless `seeder_addr`
     // is provably the SINK for THIS launch. Querying its `SinkConfig` both
     // closes the old ghost/EOA case (a non-sink errors the query) AND binds the
@@ -764,7 +813,18 @@ fn execute_refund_failed_launch(
     // for its whole curve lifetime). Both keeper and admin are trusted
     // parties, so the only thing the post-deadline path grants is liveness,
     // never the power to grief a healthy launch.
-    if info.sender != config.keeper {
+    if info.sender == config.keeper {
+        // M-1: the `paused` breaker now ALSO halts keeper-initiated refunds.
+        // `RefundFailedLaunch` is `Registered`-only and a launch stays
+        // `Registered` for its whole curve lifetime, so a compromised keeper
+        // could otherwise burn `cw_held` + the EVM supply of every in-flight
+        // launch in one sweep. Pausing freezes that path; the admin's
+        // post-deadline path below stays OPEN even while paused so genuine
+        // failed launches can still be wound down by the timelock.
+        if config.paused {
+            return Err(ContractError::KeeperRefundPaused {});
+        }
+    } else {
         let deadline = record
             .registered_at
             .saturating_add(config.refund_deadline_seconds);
@@ -1038,6 +1098,102 @@ fn verify_seeder_addr_derivation(
     seeder_addr: &Addr,
     salt: &Binary,
 ) -> Result<(), ContractError> {
+    let (sink_code_id, checksum) = query_factory_sink_code(deps, seeder_factory)?;
+    let derived20 =
+        derive_factory_instantiate2_20(deps, &checksum, seeder_factory, salt.as_slice())?;
+
+    let supplied_canon = deps.api.addr_canonicalize(seeder_addr.as_str())?;
+    if derived20.as_slice() != supplied_canon.as_slice() {
+        // Best-effort humanize of the derived address for the error message.
+        let derived_human = deps
+            .api
+            .addr_humanize(&CanonicalAddr::from(derived20.as_slice()))
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "<unhumanizable>".to_string());
+        return Err(ContractError::SeederAddrDerivationMismatch {
+            supplied: seeder_addr.to_string(),
+            derived: derived_human,
+            sink_code_id,
+        });
+    }
+    Ok(())
+}
+
+/// H-1 (this session): pin a CLMM launch's `position_recipient` to the
+/// deterministically-derived per-launch **Locker**.
+///
+/// The sink-address derivation above proves the funds land in the real sink,
+/// but `Instantiate2`'s address is a function of `(creator, code_id, salt)`
+/// ONLY — NOT of the init message — so it does NOT constrain the sink's stored
+/// `position_recipient`. Left unchecked, a fully-compromised keeper could
+/// register an otherwise-valid launch whose sink mints the full-range
+/// graduation position NFT to an attacker address; the attacker then calls
+/// `choice_clmm_manager::DecreaseLiquidity` (owner-gated) and drains the entire
+/// graduation pool. A genuine Locker is the only recipient with NO
+/// principal-withdrawal path (it can `CollectFees` but never decrease), which is
+/// exactly what makes graduation liquidity permanently locked.
+///
+/// The keeper derives the locker address as
+/// `instantiate2(seeder_factory, sink_code_id, salt = b"locker" ||
+/// canonical(issuer) || be_u64(internal_id))` (see the keeper's
+/// `addressing/instantiate2.ts::lockerSalt`) and creates it in the SAME tx,
+/// immediately before `RegisterLaunch`. We reproduce that salt on-chain and
+/// reject any `position_recipient` that isn't the derived locker. Whatever lives
+/// at the derived address was necessarily instantiated by the seeder factory
+/// from `sink_code_id` (the only contract code it deploys), so it has no
+/// principal-withdrawal path regardless of its init.
+fn verify_locker_addr_derivation(
+    deps: Deps<InjectiveQueryWrapper>,
+    env: &Env,
+    seeder_factory: &Addr,
+    position_recipient: &Addr,
+    internal_id: u64,
+) -> Result<(), ContractError> {
+    let (_sink_code_id, checksum) = query_factory_sink_code(deps, seeder_factory)?;
+    let locker_salt = locker_salt_bytes(deps, env, internal_id)?;
+    let derived20 = derive_factory_instantiate2_20(deps, &checksum, seeder_factory, &locker_salt)?;
+
+    let supplied_canon = deps.api.addr_canonicalize(position_recipient.as_str())?;
+    if derived20.as_slice() != supplied_canon.as_slice() {
+        let derived_human = deps
+            .api
+            .addr_humanize(&CanonicalAddr::from(derived20.as_slice()))
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "<unhumanizable>".to_string());
+        return Err(ContractError::LockerAddrDerivationMismatch {
+            supplied: position_recipient.to_string(),
+            derived: derived_human,
+        });
+    }
+    Ok(())
+}
+
+/// Locker `Instantiate2` salt, byte-identical to the keeper's `lockerSalt`:
+/// `b"locker" || canonical(issuer) || be_u64(internal_id)`. The `"locker"`
+/// marker is what distinguishes it from the sink salt (`canonical(issuer) ||
+/// be_u64(internal_id)`) so the two derive to different addresses off the same
+/// factory + code id.
+fn locker_salt_bytes(
+    deps: Deps<InjectiveQueryWrapper>,
+    env: &Env,
+    internal_id: u64,
+) -> Result<Vec<u8>, ContractError> {
+    let issuer_canon = deps.api.addr_canonicalize(env.contract.address.as_str())?;
+    let mut salt = Vec::with_capacity(6 + issuer_canon.len() + 8);
+    salt.extend_from_slice(b"locker");
+    salt.extend_from_slice(issuer_canon.as_slice());
+    salt.extend_from_slice(&internal_id.to_be_bytes());
+    Ok(salt)
+}
+
+/// Query the seeder factory's live `sink_code_id` and its code checksum — the
+/// two reads both `Instantiate2` derivations (sink + locker) share. No TOCTOU:
+/// only the factory admin's `UpdateSinkCodeId` mutates the code id and there is
+/// no reentrancy that could fire mid-tx.
+fn query_factory_sink_code(
+    deps: Deps<InjectiveQueryWrapper>,
+    seeder_factory: &Addr,
+) -> Result<(u64, Vec<u8>), ContractError> {
     let factory_cfg: SeederFactoryConfig = deps
         .querier
         .query_wasm_smart(seeder_factory.as_str(), &SeederQueryMsg::FactoryConfig {})
@@ -1045,7 +1201,6 @@ fn verify_seeder_addr_derivation(
             addr: seeder_factory.to_string(),
             reason: e.to_string(),
         })?;
-
     let code_info = deps
         .querier
         .query_wasm_code_info(factory_cfg.sink_code_id)
@@ -1053,30 +1208,31 @@ fn verify_seeder_addr_derivation(
             code_id: factory_cfg.sink_code_id,
             reason: e.to_string(),
         })?;
+    Ok((
+        factory_cfg.sink_code_id,
+        code_info.checksum.as_slice().to_vec(),
+    ))
+}
 
+/// Derive the 20-byte Injective `Instantiate2` address for
+/// `(checksum, creator = seeder_factory, salt)`. `cosmwasm_std::instantiate2_address`
+/// returns the full 32-byte wasmd hash; Injective truncates to the first
+/// [`INJ_ADDR_LEN`] bytes, so we slice before returning the canonical form.
+fn derive_factory_instantiate2_20(
+    deps: Deps<InjectiveQueryWrapper>,
+    checksum: &[u8],
+    seeder_factory: &Addr,
+    salt: &[u8],
+) -> Result<Vec<u8>, ContractError> {
     let creator_canon = deps.api.addr_canonicalize(seeder_factory.as_str())?;
-    let derived_full =
-        instantiate2_address(code_info.checksum.as_slice(), &creator_canon, salt.as_slice())
-            .map_err(|e| ContractError::SeederAddrDerivation(e.to_string()))?;
+    let derived_full = instantiate2_address(checksum, &creator_canon, salt)
+        .map_err(|e| ContractError::SeederAddrDerivation(e.to_string()))?;
     let derived20 = derived_full.as_slice().get(..INJ_ADDR_LEN).ok_or_else(|| {
-        ContractError::SeederAddrDerivation("derived address hash shorter than 20 bytes".to_string())
+        ContractError::SeederAddrDerivation(
+            "derived address hash shorter than 20 bytes".to_string(),
+        )
     })?;
-
-    let supplied_canon = deps.api.addr_canonicalize(seeder_addr.as_str())?;
-    if derived20 != supplied_canon.as_slice() {
-        // Best-effort humanize of the derived address for the error message.
-        let derived_human = deps
-            .api
-            .addr_humanize(&CanonicalAddr::from(derived20))
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| "<unhumanizable>".to_string());
-        return Err(ContractError::SeederAddrDerivationMismatch {
-            supplied: seeder_addr.to_string(),
-            derived: derived_human,
-            sink_code_id: factory_cfg.sink_code_id,
-        });
-    }
-    Ok(())
+    Ok(derived20.to_vec())
 }
 
 fn execute_update_keeper(
@@ -1353,5 +1509,8 @@ pub fn migrate(
 /// Parse the leading `major` component of a semver string (e.g. `"2.3.1"` →
 /// `Some(2)`). Returns `None` if there is no parseable leading integer.
 fn parse_major(version: &str) -> Option<u64> {
-    version.split('.').next().and_then(|s| s.parse::<u64>().ok())
+    version
+        .split('.')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
 }

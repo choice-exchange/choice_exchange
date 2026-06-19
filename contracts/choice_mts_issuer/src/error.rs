@@ -162,7 +162,9 @@ pub enum ContractError {
     #[error("pair_denom must differ from the launch denom `{denom}` (no self-paired pool)")]
     PairDenomEqualsLaunchDenom { denom: String },
 
-    #[error("could not query the seeder factory `{addr}` FactoryConfig for sink_code_id: {reason}")]
+    #[error(
+        "could not query the seeder factory `{addr}` FactoryConfig for sink_code_id: {reason}"
+    )]
     SeederFactoryConfigQuery { addr: String, reason: String },
 
     #[error("could not query CodeInfo (checksum) for sink_code_id {code_id}: {reason}")]
@@ -179,4 +181,22 @@ pub enum ContractError {
         derived: String,
         sink_code_id: u64,
     },
+
+    #[error(
+        "sink refund_receiver `{supplied}` must equal the launch's evm_authority `{expected}` — a CLMM launch's failure-path pair-asset is only allowed to route back to the LaunchpadCore that does the proportional refund (audit H-1)"
+    )]
+    RefundReceiverMismatch { supplied: String, expected: String },
+
+    #[error(
+        "CLMM position_recipient `{supplied}` is not the Instantiate2 locker for this launch (derives `{derived}`) — refusing to register a launch whose graduation position NFT would mint anywhere but the no-withdraw locker (audit H-1)"
+    )]
+    LockerAddrDerivationMismatch { supplied: String, derived: String },
+
+    #[error(
+        "refusing to deliver cw_held: this launch was registered while seeder-address derivation was DISABLED (seeder_verified=false) and verification is now required — flip SetVerifySeederDerivation off to use the escape hatch, or RefundFailedLaunch instead (audit M-3)"
+    )]
+    SeederDerivationNotVerified {},
+
+    #[error("Issuer is paused; keeper-initiated RefundFailedLaunch is halted (the admin may still refund past the deadline)")]
+    KeeperRefundPaused {},
 }

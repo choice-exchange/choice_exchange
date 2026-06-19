@@ -194,8 +194,13 @@ fn two_step_admin_rotation_and_pause_toggle() {
     // Pending key cannot yet pause; stranger cannot accept.
     assert!(format!(
         "{}",
-        wasm.execute(&env.issuer, &ExecuteMsg::SetPaused { paused: true }, &[], &new_admin)
-            .unwrap_err()
+        wasm.execute(
+            &env.issuer,
+            &ExecuteMsg::SetPaused { paused: true },
+            &[],
+            &new_admin
+        )
+        .unwrap_err()
     )
     .contains("Unauthorized"));
     assert!(format!(

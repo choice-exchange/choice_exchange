@@ -17,8 +17,9 @@
 
 use cosmwasm_std::testing::{message_info, mock_env, MockApi, MockStorage};
 use cosmwasm_std::{
-    coin, coins, from_json, instantiate2_address, to_json_binary, Api, BankMsg, Binary, CanonicalAddr,
-    Coin, CosmosMsg, OwnedDeps, Reply, ReplyOn, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
+    coin, coins, from_json, instantiate2_address, to_json_binary, Api, BankMsg, Binary,
+    CanonicalAddr, Coin, CosmosMsg, OwnedDeps, Reply, ReplyOn, SubMsgResponse, SubMsgResult,
+    Uint128, WasmMsg,
 };
 
 use choice::mock_querier::{mock_dependencies, WasmMockQuerier};
@@ -176,7 +177,8 @@ fn install_matching_sink(deps: &mut Deps, seeder: &str, internal_id: u64) {
 
 /// Build a coherent XYK `CreateSink` payload whose `token_denom`/`pair_denom`
 /// match what `RegisterLaunch` will derive for `internal_id`. The issuer now
-/// decodes and cross-checks this payload (anti-squat enforcement).
+/// decodes and cross-checks this payload (anti-squat enforcement). The
+/// `refund_receiver` is pinned to the default `evm_authority` (audit H-1).
 fn xyk_sink_payload(deps: &Deps, internal_id: u64) -> Binary {
     sink_payload(
         deps,
@@ -185,6 +187,7 @@ fn xyk_sink_payload(deps: &Deps, internal_id: u64) -> Binary {
             choice_factory: deps.api.addr_make("choice_factory").to_string(),
             lp_destination: LpDestination::Burn,
         },
+        &deps.api.addr_make("evm_authority").to_string(),
     )
 }
 
@@ -205,10 +208,19 @@ fn clmm_sink_payload(
             position_recipient: deps.api.addr_make("locker").to_string(),
             max_fee_multiple: None,
         },
+        &deps.api.addr_make("evm_authority").to_string(),
     )
 }
 
-fn sink_payload(deps: &Deps, token_denom: String, pool_kind: PoolKind) -> Binary {
+/// `refund_receiver` is pinned to the launch's `evm_authority` (audit H-1), so
+/// the helper takes it explicitly — most tests pass the default authority; the
+/// multi-authority test passes each registering authority in turn.
+fn sink_payload(
+    _deps: &Deps,
+    token_denom: String,
+    pool_kind: PoolKind,
+    refund_receiver: &str,
+) -> Binary {
     to_json_binary(&SeederExecuteMsg::CreateSink {
         salt: Binary::default(),
         sink_init: SinkInit {
@@ -218,7 +230,7 @@ fn sink_payload(deps: &Deps, token_denom: String, pool_kind: PoolKind) -> Binary
             token_decimals: 18,
             pair_decimals: 18,
             pool_kind,
-            refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
+            refund_receiver: refund_receiver.to_string(),
             deadline_seconds: REFUND_DEADLINE,
             expected_token: None,
             expected_pair: None,
@@ -962,7 +974,11 @@ fn admin_rotations_require_admin_caller() {
     .unwrap();
     let cfg: ConfigResponse =
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
-    assert_eq!(cfg.admin, admin.to_string(), "live admin unchanged pre-accept");
+    assert_eq!(
+        cfg.admin,
+        admin.to_string(),
+        "live admin unchanged pre-accept"
+    );
     assert_eq!(cfg.pending_admin, Some(new_admin.to_string()));
 
     // A non-pending caller cannot accept.
@@ -1195,9 +1211,18 @@ fn two_authorities_share_internal_id_without_record_collision() {
     let seeder_addr = deps.api.addr_make("seeder_addr").to_string();
 
     // Both authorities share internal_id 0, so the launch denom (which doesn't
-    // embed the authority) is identical — one coherent XYK payload serves both.
-    let payload = xyk_sink_payload(&deps, 0);
+    // embed the authority) is identical. The payloads differ only in
+    // `refund_receiver`, which H-1 pins to each registering authority.
     for auth in [&auth_a, &auth_b] {
+        let payload = sink_payload(
+            &deps,
+            expected_denom(0),
+            PoolKind::Xyk {
+                choice_factory: deps.api.addr_make("choice_factory").to_string(),
+                lp_destination: LpDestination::Burn,
+            },
+            auth,
+        );
         let msg = ExecuteMsg::RegisterLaunch {
             internal_id: 0,
             evm_authority: auth.clone(),
@@ -1449,7 +1474,12 @@ fn register_full(
             lp_destination: LpDestination::Burn,
         },
     };
-    let payload = sink_payload(deps, token_denom, pool_kind);
+    let payload = sink_payload(
+        deps,
+        token_denom,
+        pool_kind,
+        &deps.api.addr_make("evm_authority").to_string(),
+    );
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
@@ -1776,10 +1806,7 @@ fn update_refund_deadline_rejects_below_floor() {
         },
     )
     .unwrap_err();
-    assert!(matches!(
-        err,
-        ContractError::RefundDeadlineTooShort { .. }
-    ));
+    assert!(matches!(err, ContractError::RefundDeadlineTooShort { .. }));
 
     // At the floor it is accepted.
     execute(
@@ -1802,10 +1829,17 @@ fn migrate_patch_rejects_cross_major_but_accepts_same_major() {
     // ... and rejects a cross-major patch (a 1.x build must not patch over a
     // stored 2.x deployment), instead of the old hard-coded `starts_with("1.")`
     // that bricked every patch once a 2.x build shipped.
-    cw2::set_contract_version(deps.as_mut().storage, "crates.io:choice-mts-issuer", "2.0.0")
-        .unwrap();
+    cw2::set_contract_version(
+        deps.as_mut().storage,
+        "crates.io:choice-mts-issuer",
+        "2.0.0",
+    )
+    .unwrap();
     let err = migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap_err();
-    assert!(matches!(err, ContractError::InvalidMigration { .. }), "{err:?}");
+    assert!(
+        matches!(err, ContractError::InvalidMigration { .. }),
+        "{err:?}"
+    );
 }
 
 // =====================================================================
@@ -1883,7 +1917,8 @@ fn salted_xyk_payload(deps: &Deps, internal_id: u64, salt: Binary) -> Binary {
                 choice_factory: deps.api.addr_make("choice_factory").to_string(),
                 lp_destination: LpDestination::Burn,
             },
-            refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
+            // H-1: refund_receiver must equal the launch's evm_authority.
+            refund_receiver: deps.api.addr_make("evm_authority").to_string(),
             deadline_seconds: REFUND_DEADLINE,
             expected_token: None,
             expected_pair: None,
@@ -1977,6 +2012,225 @@ fn register_launch_verify_errors_when_factory_config_unavailable() {
     assert!(
         matches!(err, ContractError::SeederFactoryConfigQuery { .. }),
         "expected SeederFactoryConfigQuery, got {err:?}"
+    );
+}
+
+// =====================================================================
+// Audit H-1 / M-1 / M-3 (this session).
+// =====================================================================
+
+/// H-1: the sink's `refund_receiver` must equal the launch's `evm_authority`.
+/// Always enforced (independent of `verify_seeder_derivation`).
+#[test]
+fn register_launch_rejects_refund_receiver_mismatch() {
+    let mut deps = setup();
+    let caller = deps.api.addr_make("keeper");
+    let info = message_info(&caller, &fee_funds());
+    // Payload whose refund_receiver is an attacker address, not the authority.
+    let payload = sink_payload(
+        &deps,
+        expected_denom(5),
+        PoolKind::Xyk {
+            choice_factory: deps.api.addr_make("choice_factory").to_string(),
+            lp_destination: LpDestination::Burn,
+        },
+        &deps.api.addr_make("attacker").to_string(),
+    );
+    let msg = ExecuteMsg::RegisterLaunch {
+        internal_id: 5,
+        evm_authority: deps.api.addr_make("evm_authority").to_string(),
+        total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
+        evm_supply: Uint128::new(800_000_000u128) * Uint128::new(10u128.pow(18)),
+        pair_denom: PAIR_DENOM.to_string(),
+        seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
+        seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
+        create_sink_payload: payload,
+        choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: None,
+    };
+    let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+    assert!(
+        matches!(err, ContractError::RefundReceiverMismatch { .. }),
+        "expected RefundReceiverMismatch, got {err:?}"
+    );
+}
+
+/// Recompute the LOCKER `Instantiate2` address the contract pins
+/// `position_recipient` to: salt = `b"locker" || canonical(issuer) || be(id)`.
+fn derive_locker_addr(api: &MockApi, seeder_factory: &str, internal_id: u64) -> String {
+    let issuer_canon = api
+        .addr_canonicalize(mock_env().contract.address.as_str())
+        .unwrap();
+    let mut salt = Vec::new();
+    salt.extend_from_slice(b"locker");
+    salt.extend_from_slice(issuer_canon.as_slice());
+    salt.extend_from_slice(&internal_id.to_be_bytes());
+    let creator = api.addr_canonicalize(seeder_factory).unwrap();
+    let full = instantiate2_address(&SINK_CHECKSUM, &creator, &salt).unwrap();
+    let canon: CanonicalAddr = full.as_slice()[..20].into();
+    api.addr_humanize(&canon).unwrap().to_string()
+}
+
+/// Build a verify-on CLMM `CreateSink` payload with a chosen `position_recipient`.
+fn salted_clmm_payload(
+    deps: &Deps,
+    internal_id: u64,
+    salt: Binary,
+    position_recipient: String,
+) -> Binary {
+    to_json_binary(&SeederExecuteMsg::CreateSink {
+        salt,
+        sink_init: SinkInit {
+            issuer: mock_env().contract.address.to_string(),
+            token_denom: expected_denom(internal_id),
+            pair_denom: PAIR_DENOM.to_string(),
+            token_decimals: 18,
+            pair_decimals: 18,
+            pool_kind: PoolKind::Clmm {
+                clmm_factory: deps.api.addr_make("clmm_factory").to_string(),
+                clmm_manager: deps.api.addr_make("clmm_manager").to_string(),
+                fee_tier: 3000,
+                position_recipient,
+                max_fee_multiple: None,
+            },
+            refund_receiver: deps.api.addr_make("evm_authority").to_string(),
+            deadline_seconds: REFUND_DEADLINE,
+            expected_token: None,
+            expected_pair: None,
+        },
+    })
+    .unwrap()
+}
+
+fn register_clmm_verify(
+    deps: &mut Deps,
+    internal_id: u64,
+    seeder_addr: String,
+    salt: Binary,
+    position_recipient: String,
+) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
+    let caller = deps.api.addr_make("keeper");
+    let info = message_info(&caller, &fee_funds());
+    let payload = salted_clmm_payload(deps, internal_id, salt, position_recipient);
+    let msg = ExecuteMsg::RegisterLaunch {
+        internal_id,
+        evm_authority: deps.api.addr_make("evm_authority").to_string(),
+        total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
+        evm_supply: Uint128::new(800_000_000u128) * Uint128::new(10u128.pow(18)),
+        pair_denom: PAIR_DENOM.to_string(),
+        seeder_factory: deps.api.addr_make("seeder_factory").to_string(),
+        seeder_addr,
+        create_sink_payload: payload,
+        choice_factory: None,
+        salt_suffix: None,
+        clmm_pool_auth: Some(crate::msg::ClmmPoolAuth {
+            clmm_factory: deps.api.addr_make("clmm_factory").to_string(),
+            fee: 3000,
+            ttl_seconds: 0,
+        }),
+    };
+    execute(deps.as_mut(), mock_env(), info, msg)
+}
+
+/// H-1: a CLMM launch's `position_recipient` is pinned to the derived locker.
+/// The correct locker is accepted; any other address (a compromised keeper's
+/// attacker-owned recipient) is rejected — closing the locked-LP theft vector.
+#[test]
+fn register_launch_verify_pins_clmm_position_recipient() {
+    let mut deps = new_deps();
+    instantiate_issuer(&mut deps);
+    let salt = Binary::from(b"clmm-launch-88".to_vec());
+    let sink = install_seeder_factory(&mut deps, &salt);
+    let seeder_factory = deps.api.addr_make("seeder_factory").to_string();
+    let locker = derive_locker_addr(&deps.api, &seeder_factory, 88);
+
+    // Correct derived locker → accepted.
+    register_clmm_verify(&mut deps, 88, sink.clone(), salt.clone(), locker).unwrap();
+    let rec = LAUNCHES
+        .load(&deps.storage, (&deps.api.addr_make("evm_authority"), 88))
+        .unwrap();
+    assert_eq!(rec.status, LaunchStatus::Registered);
+
+    // Attacker-owned recipient at the same (valid) sink → rejected.
+    let attacker = deps.api.addr_make("attacker").to_string();
+    let err = register_clmm_verify(&mut deps, 89, sink, salt, attacker).unwrap_err();
+    assert!(
+        matches!(err, ContractError::LockerAddrDerivationMismatch { .. }),
+        "expected LockerAddrDerivationMismatch, got {err:?}"
+    );
+}
+
+/// M-1: while paused, a keeper-initiated `RefundFailedLaunch` is halted (so a
+/// compromised keeper can't mass-refund in-flight launches during an incident).
+#[test]
+fn refund_failed_launch_keeper_blocked_when_paused() {
+    let mut deps = setup();
+    register_default(&mut deps, 30).unwrap();
+    let admin = deps.api.addr_make("admin");
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::SetPaused { paused: true },
+    )
+    .unwrap();
+
+    let keeper = deps.api.addr_make("keeper");
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::RefundFailedLaunch {
+            evm_authority,
+            internal_id: 30,
+            reason: "test".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::KeeperRefundPaused {}),
+        "expected KeeperRefundPaused, got {err:?}"
+    );
+}
+
+/// M-3: a launch registered while derivation was OFF (`seeder_verified=false`)
+/// cannot `DeliverToSeeder` once verification is flipped back ON.
+#[test]
+fn deliver_to_seeder_rejects_unverified_record_when_verify_on() {
+    let mut deps = setup(); // verify is OFF here → record.seeder_verified=false
+    register_default(&mut deps, 31).unwrap();
+    simulate_create_token_pair_reply(&mut deps, 31, "0xdeadbeef00000000000000000000000000000000");
+
+    // Admin flips derivation back ON.
+    let admin = deps.api.addr_make("admin");
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::SetVerifySeederDerivation { enabled: true },
+    )
+    .unwrap();
+
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+    install_matching_sink(&mut deps, &seeder, 31);
+    let keeper = deps.api.addr_make("keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::DeliverToSeeder {
+            evm_authority,
+            internal_id: 31,
+            leftover: Uint128::zero(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SeederDerivationNotVerified {}),
+        "expected SeederDerivationNotVerified, got {err:?}"
     );
 }
 

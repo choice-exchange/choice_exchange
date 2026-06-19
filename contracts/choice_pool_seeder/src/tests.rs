@@ -404,9 +404,11 @@ fn settle_emits_full_chain_create_pair_callbacks_no_tip() {
         other => panic!("expected factory.CreatePair WasmExec, got {:?}", other),
     }
 
-    for (idx, expected_kind) in
-        [(1usize, "provide_liquidity"), (2, "distribute_lp"), (3, "sweep_dust")]
-    {
+    for (idx, expected_kind) in [
+        (1usize, "provide_liquidity"),
+        (2, "distribute_lp"),
+        (3, "sweep_dust"),
+    ] {
         match &res.messages[idx].msg {
             CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr, msg, ..
@@ -1130,7 +1132,11 @@ fn admin_rotations_require_admin_caller() {
     .unwrap();
     let cfg: FactoryConfigResponse =
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::FactoryConfig {}).unwrap()).unwrap();
-    assert_eq!(cfg.admin, admin.to_string(), "live admin unchanged before accept");
+    assert_eq!(
+        cfg.admin,
+        admin.to_string(),
+        "live admin unchanged before accept"
+    );
     assert_eq!(cfg.pending_admin, Some(new_admin.to_string()));
 
     // The pending key must accept; a non-pending caller cannot.
@@ -1454,10 +1460,17 @@ fn migrate_patch_rejects_cross_major() {
     // guard fixes that while keeping the cross-major rejection below.
     let mut deps = simple_deps();
     instantiate_factory_default(&mut deps);
-    cw2::set_contract_version(deps.as_mut().storage, "crates.io:choice-pool-seeder", "2.0.0")
-        .unwrap();
+    cw2::set_contract_version(
+        deps.as_mut().storage,
+        "crates.io:choice-pool-seeder",
+        "2.0.0",
+    )
+    .unwrap();
     let err = migrate(deps.as_mut(), mock_env(), MigrateMsg::Patch {}).unwrap_err();
-    assert!(matches!(err, ContractError::InvalidMigration { .. }), "{err:?}");
+    assert!(
+        matches!(err, ContractError::InvalidMigration { .. }),
+        "{err:?}"
+    );
 }
 
 // ------------------------------------------------------------------------
@@ -1810,6 +1823,9 @@ fn create_sink_clmm_happy_path() {
     instantiate_factory_default(&mut deps);
     let mut sink_init = make_sink_init(&deps.api);
     sink_init.pool_kind = clmm_pool_kind(&deps.api);
+    // H-1/M-1: factory-created CLMM sinks must commit their seed amounts.
+    sink_init.expected_token = Some(Uint128::new(800_000_000));
+    sink_init.expected_pair = Some(Uint128::new(15));
     let caller = deps.api.addr_make("issuer_keeper");
     let res = execute(
         deps.as_mut(),
@@ -1826,6 +1842,39 @@ fn create_sink_clmm_happy_path() {
         &res.messages[0].msg,
         CosmosMsg::Wasm(WasmMsg::Instantiate2 { code_id, .. }) if *code_id == 7
     ));
+}
+
+#[test]
+fn create_sink_clmm_rejects_missing_committed_amounts() {
+    // H-1/M-1: a factory CLMM sink that omits its committed seed amounts (the
+    // donation-repriceable seed-the-live-balance path) is refused.
+    let mut deps = simple_deps();
+    instantiate_factory_default(&mut deps);
+    let caller = deps.api.addr_make("issuer_keeper");
+    for (et, ep) in [
+        (None, None),
+        (Some(Uint128::new(800_000_000)), None),
+        (None, Some(Uint128::new(15))),
+    ] {
+        let mut sink_init = make_sink_init(&deps.api);
+        sink_init.pool_kind = clmm_pool_kind(&deps.api);
+        sink_init.expected_token = et;
+        sink_init.expected_pair = ep;
+        let err = execute(
+            deps.as_mut(),
+            mock_env(),
+            message_info(&caller, &[]),
+            ExecuteMsg::CreateSink {
+                salt: Binary::from(b"clmm-salt".to_vec()),
+                sink_init,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ContractError::CommittedAmountsRequiredForClmm {}),
+            "expected CommittedAmountsRequiredForClmm, got {err:?}"
+        );
+    }
 }
 
 // ------------------------------------------------------------------------

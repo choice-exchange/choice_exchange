@@ -155,4 +155,9 @@ pub enum ContractError {
 
     #[error("Cannot migrate: stored contract is `{found}`, expected `{expected}`")]
     MigrationWrongContract { found: String, expected: String },
+
+    #[error(
+        "a factory-created CLMM sink must commit its seed amounts (expected_token + expected_pair) — seed-the-live-balance is a donation-repriceable debug-only path (audit H-1/M-1)"
+    )]
+    CommittedAmountsRequiredForClmm {},
 }

@@ -259,7 +259,11 @@ fn admin_rotation_requires_admin() {
     let cfg: FactoryConfigResponse = wasm
         .query(&env.factory, &QueryMsg::FactoryConfig {})
         .unwrap();
-    assert_eq!(cfg.admin, env.admin.address(), "live admin unchanged pre-accept");
+    assert_eq!(
+        cfg.admin,
+        env.admin.address(),
+        "live admin unchanged pre-accept"
+    );
     assert_eq!(cfg.pending_admin, Some(new_admin.address()));
 
     // The pending key cannot yet act as admin.
@@ -281,7 +285,12 @@ fn admin_rotation_requires_admin() {
 
     // A non-pending caller cannot accept.
     let err = wasm
-        .execute(&env.factory, &ExecuteMsg::AcceptAdmin {}, &[], &env.stranger)
+        .execute(
+            &env.factory,
+            &ExecuteMsg::AcceptAdmin {},
+            &[],
+            &env.stranger,
+        )
         .unwrap_err();
     assert!(
         format!("{}", err).contains("Unauthorized"),
@@ -921,8 +930,10 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
                     },
                     refund_receiver: refund_receiver.address(),
                     deadline_seconds: 3600,
-                    expected_token: None,
-                    expected_pair: None,
+                    // Factory CLMM sinks must commit their seed amounts (audit
+                    // H-1/M-1); the sink is funded with SEED of each leg at 1:1.
+                    expected_token: Some(Uint128::new(SEED)),
+                    expected_pair: Some(Uint128::new(SEED)),
                 },
             },
             &[],

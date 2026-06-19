@@ -164,6 +164,17 @@ fn instantiate_sink(
             // The factory that issued the `Instantiate2` is `info.sender`; the
             // sink records it so `Settle` can honour the factory pause and
             // `ForceRefund` can authenticate the factory admin.
+            //
+            // Security note: `CreateSink`/`instantiate_sink` is permissionless,
+            // so anyone can stand up a sink with an arbitrary (even code-less)
+            // `factory`. That is harmless because the only funds a sink ever
+            // receives come from the issuer, which delivers EXCLUSIVELY to the
+            // Instantiate2 address it derives + verifies on-chain
+            // (`verify_seeder_addr_derivation`, with `verify_seeder_derivation`
+            // ON by default). A look-alike sink at any other address is never
+            // funded, so its spoofed `factory` (and the `ensure_factory_not_paused`
+            // fail-open on a code-less factory) grants nothing. Keep
+            // `verify_seeder_derivation` ON in production — it is the real gate.
             factory: Some(info.sender.clone()),
             issuer: issuer.clone(),
             token_denom: init.token_denom.clone(),
@@ -336,7 +347,27 @@ fn exec_create_sink(
     // sink only ever talks to the DEX deployment(s) this factory pins;
     // consumers must construct `sink_init.pool_kind` against the same
     // addresses.
+    //
+    // NOTE: XYK graduation remains code-capable but is UNREACHABLE on the live
+    // SHROOM path — `LaunchpadCore.createLaunch` rejects non-CLMM venues
+    // (`XykGraduationDisabled`), so the keeper/issuer never forward an XYK
+    // `CreateSink`. The XYK seed path has NOT received the committed-ratio
+    // hardening below; do not re-enable it without first re-auditing
+    // `settle_xyk` for the donation-reprice and create-fee paths.
     require_pool_kind_matches_factory(&cfg, &sink_init.pool_kind)?;
+
+    // H-1 / M-1: a factory-created CLMM sink MUST commit its seed amounts so
+    // `Settle` seeds an exact, price-pinned ratio and rejects undershoot. The
+    // seed-the-live-balance fallback (both `expected_*` omitted) is repriceable
+    // by anyone who donates to the sink before settle, so it is confined to the
+    // direct-instantiate debug path (`instantiate_sink`) and forbidden here on
+    // the production factory path. (`instantiate_sink` still enforces the
+    // both-or-neither + non-zero invariants.)
+    if matches!(sink_init.pool_kind, PoolKind::Clmm { .. })
+        && (sink_init.expected_token.is_none() || sink_init.expected_pair.is_none())
+    {
+        return Err(ContractError::CommittedAmountsRequiredForClmm {});
+    }
 
     let label = format!("{}-{}", SINK_LABEL_PREFIX, sink_init.token_denom);
 
@@ -974,7 +1005,10 @@ fn exec_force_refund(
     // Authenticate against the parent factory's admin (the sink has no admin
     // of its own). The direct-instantiate debug path has no factory and so no
     // force-refund — it must wait out the deadline like any other caller.
-    let factory = cfg.factory.clone().ok_or(ContractError::SinkHasNoFactory {})?;
+    let factory = cfg
+        .factory
+        .clone()
+        .ok_or(ContractError::SinkHasNoFactory {})?;
     let fcfg: FactoryConfigResponse = deps
         .querier
         .query_wasm_smart(&factory, &QueryMsg::FactoryConfig {})?;
@@ -1548,7 +1582,10 @@ pub fn migrate(
 /// Parse the leading `major` component of a semver string (e.g. `"2.3.1"` →
 /// `Some(2)`). Returns `None` if the string has no parseable leading integer.
 fn parse_major(version: &str) -> Option<u64> {
-    version.split('.').next().and_then(|s| s.parse::<u64>().ok())
+    version
+        .split('.')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 // ------------------------------------------------------------------------

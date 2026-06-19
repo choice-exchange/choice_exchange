@@ -149,6 +149,26 @@ pub struct LaunchRecord {
     /// against a double-renounce (the second `MsgChangeAdmin` would revert
     /// anyway, but we reject early with a clear error). See finding C-M2.
     pub admin_renounced: bool,
+    /// Audit M-3: snapshot of [`Config::verify_seeder_derivation`] at the moment
+    /// this launch was registered — i.e. whether the sink-address (and CLMM
+    /// locker) Instantiate2 derivation actually ran and matched here. The flag
+    /// is an admin escape hatch that can be toggled off then back on; without
+    /// this snapshot `DeliverToSeeder` would happily ship `cw_held` to a
+    /// `seeder_addr` that was NEVER derivation-checked (registered during an
+    /// off-window) once the flag is flipped back on. `DeliverToSeeder` refuses
+    /// to deliver to an unverified record while verification is required.
+    /// `#[serde(default = …true)]` so a record written by a pre-M-3 build (which
+    /// only ever registered under the secure-default derivation) migrates in as
+    /// verified rather than becoming undeliverable.
+    #[serde(default = "default_seeder_verified")]
+    pub seeder_verified: bool,
+}
+
+/// Serde default for [`LaunchRecord::seeder_verified`]: pre-M-3 records were
+/// written before the snapshot existed; treat them as verified so a migrate
+/// doesn't strand their `DeliverToSeeder`.
+pub fn default_seeder_verified() -> bool {
+    true
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
