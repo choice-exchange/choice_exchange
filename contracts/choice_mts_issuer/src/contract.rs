@@ -6,7 +6,7 @@ use crate::msg::{
 use crate::proto::{
     MsgBurn, MsgChangeAdmin, MsgCreateDenom, MsgCreateTokenPair, ProtoCoin, TokenPair,
 };
-use crate::state::{Config, LaunchRecord, LaunchStatus, CONFIG, LAUNCHES};
+use crate::state::{Config, LaunchRecord, LaunchStatus, CONFIG, DENOM_INDEX, LAUNCHES};
 
 use choice_clmm_common::factory::ExecuteMsg as ClmmFactoryExecuteMsg;
 use choice_clmm_common::types::AssetInfo as ClmmAssetInfo;
@@ -41,6 +41,14 @@ pub const MAX_SUBDENOM_PREFIX_LEN: usize = 12;
 /// Tokenfactory's hard subdenom length cap. The constructed
 /// `{prefix}_{internal_id}[_{salt_suffix}]` must fit within this.
 pub const MAX_SUBDENOM_LEN: usize = 44;
+
+/// Minimum length of the mandatory Layer A `salt_suffix` (anti-squat entropy,
+/// fix for M-2). 8 ASCII-alphanumeric chars ≈ 47 bits of entropy — far beyond
+/// what an attacker could pre-compute to squat a launch's sink/locker address
+/// before its `RegisterLaunch` tx is even in the mempool. Folded into the
+/// subdenom AND the sink/locker `Instantiate2` salts. Bounded above only by the
+/// 44-char subdenom cap (`MAX_SUBDENOM_LEN`), checked after concatenation.
+pub const MIN_SALT_SUFFIX_LEN: usize = 8;
 
 /// Cap registration's decimals at the EVM ERC20 norm. MTS pairing inherits
 /// this on the EVM side, so anything > 18 risks the auto-deployed
@@ -332,15 +340,26 @@ fn execute_register_launch(
     // the operator must give each deployment a distinct `subdenom_prefix` (own
     // issuer instance) OR a per-deployment `salt_suffix`. The keeper-gate +
     // per-authority storage key already prevent any record hijack/overwrite.
-    let subdenom = match &salt_suffix {
-        Some(salt) => {
-            if salt.is_empty() || !salt.chars().all(|c| c.is_ascii_alphanumeric()) {
-                return Err(ContractError::SaltSuffixInvalid { got: salt.clone() });
-            }
-            format!("{}_{}_{}", config.subdenom_prefix, internal_id, salt)
-        }
-        None => format!("{}_{}", config.subdenom_prefix, internal_id),
-    };
+    // Layer A entropy is MANDATORY (fix for M-2 address-squat DoS). Require a
+    // sufficiently-long, keeper-chosen, ASCII-alphanumeric `salt_suffix`: it is
+    // folded into BOTH the subdenom (here) AND the sink/locker `Instantiate2`
+    // salts (the derivation checks below), so the launch denom and the
+    // per-launch sink + locker addresses are all unguessable until this tx
+    // exists. Without it, the sequential `internal_id` + public issuer address
+    // make every future sink/locker address pre-computable, and an attacker can
+    // pre-`Instantiate2` the canonical address so that `RegisterLaunch`'s own
+    // sink/locker creation collides and reverts the whole launch (permanent,
+    // cheap, wholesale DoS). The keeper persists the salt so the denom
+    // round-trips; off-chain consumers read it from the `register_launch` event.
+    let salt = salt_suffix
+        .as_deref()
+        .ok_or(ContractError::SaltSuffixRequired {})?;
+    if salt.len() < MIN_SALT_SUFFIX_LEN || !salt.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(ContractError::SaltSuffixInvalid {
+            got: salt.to_string(),
+        });
+    }
+    let subdenom = format!("{}_{}_{}", config.subdenom_prefix, internal_id, salt);
     if subdenom.len() > MAX_SUBDENOM_LEN {
         return Err(ContractError::SubdenomTooLong {
             subdenom: subdenom.clone(),
@@ -431,6 +450,16 @@ fn execute_register_launch(
             let auth = clmm_pool_auth
                 .as_ref()
                 .ok_or(ContractError::ClmmAuthRequired {})?;
+            // S-3: the pool reservation (Layer B) must NOT expire — a non-zero
+            // TTL would let the `AuthorizeCreation` lapse between RegisterLaunch
+            // and Settle, re-opening the CLMM pool-squat window (M-1) the
+            // reservation exists to close. The launch denom is unique, so a
+            // permanent (ttl=0) reservation can never block a legitimate pool.
+            if auth.ttl_seconds != 0 {
+                return Err(ContractError::ClmmAuthTtlMustBeZero {
+                    got: auth.ttl_seconds,
+                });
+            }
             if auth.fee != *fee_tier {
                 return Err(ContractError::ClmmAuthFeeMismatch {
                     auth_fee: auth.fee,
@@ -465,10 +494,21 @@ fn execute_register_launch(
     // derivation MUST run before the CLMM `AuthorizeCreation` (step 5b) and the
     // `CreateSink` forward (step 6), both of which trust `seeder_addr`.
     if config.verify_seeder_derivation {
+        // Layer A: the forwarded `CreateSink` salt MUST be the canonical entropic
+        // sink salt, so the factory `Instantiate2`s the sink at the unguessable
+        // address rather than a predictable one a squatter could have pre-
+        // occupied. Asserting the exact salt (not just that the derived address
+        // matches `seeder_addr`) is what forces the entropy through to the
+        // address the factory actually creates.
+        let expected_sink_salt = sink_salt_bytes(deps.as_ref(), &env, internal_id, salt)?;
+        if sink_salt.as_slice() != expected_sink_salt.as_slice() {
+            return Err(ContractError::SinkSaltMismatch {});
+        }
         verify_seeder_addr_derivation(deps.as_ref(), &seeder_factory, &seeder_addr, &sink_salt)?;
         // H-1: a CLMM launch additionally pins `position_recipient` to the
         // derived per-launch locker, so the locked-LP position NFT can only ever
-        // mint to a no-withdraw locker — never to a keeper-chosen address.
+        // mint to a no-withdraw locker — never to a keeper-chosen address. The
+        // locker salt shares the same `salt_suffix` entropy as the sink.
         if let Some(ref position_recipient) = clmm_position_recipient {
             verify_locker_addr_derivation(
                 deps.as_ref(),
@@ -476,6 +516,7 @@ fn execute_register_launch(
                 &seeder_factory,
                 position_recipient,
                 internal_id,
+                salt,
             )?;
         }
     }
@@ -504,6 +545,11 @@ fn execute_register_launch(
         seeder_verified: config.verify_seeder_derivation,
     };
     LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
+    // Reverse index for `LaunchByDenom`. The denom is globally unique (it embeds
+    // this issuer + the per-authority id + the Layer A salt), so this never
+    // collides; the duplicate-`internal_id` guard above already rejected a
+    // re-register before we reach here.
+    DENOM_INDEX.save(deps.storage, &denom, &(evm_authority.clone(), internal_id))?;
 
     // Build the message chain in dispatch order — chain semantics require
     // CreateDenom and Mint to land before the CreateTokenPair SubMsg can
@@ -728,6 +774,22 @@ fn execute_deliver_to_seeder(
                 reason: format!(
                     "sink pair_denom `{}` != launch pair_denom `{}`",
                     sink_cfg.pair_denom, record.pair_denom
+                ),
+            });
+        }
+        // S-6: defence-in-depth for the derivation-escape-hatch trust model.
+        // When `verify_seeder_derivation` is OFF, the address derivation never
+        // ran, so the denom-match checks above are the only gate — and a
+        // denom-matching look-alike sink controlled by an attacker would pass.
+        // Also assert the sink names THIS issuer as its `issuer`, so even in the
+        // escape-hatch window `cw_held` can only ship to a sink that was created
+        // to be fed by us.
+        if sink_cfg.issuer != env.contract.address.as_str() {
+            return Err(ContractError::SeederSinkConfigMismatch {
+                addr: record.seeder_addr.to_string(),
+                reason: format!(
+                    "sink issuer `{}` != this issuer `{}`",
+                    sink_cfg.issuer, env.contract.address
                 ),
             });
         }
@@ -1152,9 +1214,10 @@ fn verify_locker_addr_derivation(
     seeder_factory: &Addr,
     position_recipient: &Addr,
     internal_id: u64,
+    salt_suffix: &str,
 ) -> Result<(), ContractError> {
     let (_sink_code_id, checksum) = query_factory_sink_code(deps, seeder_factory)?;
-    let locker_salt = locker_salt_bytes(deps, env, internal_id)?;
+    let locker_salt = locker_salt_bytes(deps, env, internal_id, salt_suffix)?;
     let derived20 = derive_factory_instantiate2_20(deps, &checksum, seeder_factory, &locker_salt)?;
 
     let supplied_canon = deps.api.addr_canonicalize(position_recipient.as_str())?;
@@ -1172,21 +1235,45 @@ fn verify_locker_addr_derivation(
     Ok(())
 }
 
+/// Per-launch sink `Instantiate2` salt, byte-identical to the keeper's
+/// `issuerSalt`: `canonical(issuer) || be_u64(internal_id) || salt_suffix`.
+///
+/// Layer A (anti-squat entropy, fix for M-2): the `salt_suffix` is the same
+/// high-entropy nonce folded into the subdenom. Folding it into the sink salt
+/// makes the per-launch sink address unguessable until this `RegisterLaunch` tx
+/// exists — and since the sink is `Instantiate2`'d *inside* this same tx, an
+/// attacker can no longer pre-squat the canonical sink address (which would
+/// otherwise collide and revert the whole launch). Entropy is mandatory; see
+/// the suffix validation in `execute_register_launch`.
+fn sink_salt_bytes(
+    deps: Deps<InjectiveQueryWrapper>,
+    env: &Env,
+    internal_id: u64,
+    salt_suffix: &str,
+) -> Result<Vec<u8>, ContractError> {
+    let issuer_canon = deps.api.addr_canonicalize(env.contract.address.as_str())?;
+    let mut salt = Vec::with_capacity(issuer_canon.len() + 8 + salt_suffix.len());
+    salt.extend_from_slice(issuer_canon.as_slice());
+    salt.extend_from_slice(&internal_id.to_be_bytes());
+    salt.extend_from_slice(salt_suffix.as_bytes());
+    Ok(salt)
+}
+
 /// Locker `Instantiate2` salt, byte-identical to the keeper's `lockerSalt`:
-/// `b"locker" || canonical(issuer) || be_u64(internal_id)`. The `"locker"`
-/// marker is what distinguishes it from the sink salt (`canonical(issuer) ||
-/// be_u64(internal_id)`) so the two derive to different addresses off the same
-/// factory + code id.
+/// `b"locker" || sink_salt_bytes(...)` =
+/// `b"locker" || canonical(issuer) || be_u64(internal_id) || salt_suffix`. The
+/// `"locker"` marker distinguishes it from the sink salt so the two derive to
+/// different addresses off the same factory + code id; the shared `salt_suffix`
+/// carries the Layer A entropy that makes the locker address un-squattable.
 fn locker_salt_bytes(
     deps: Deps<InjectiveQueryWrapper>,
     env: &Env,
     internal_id: u64,
+    salt_suffix: &str,
 ) -> Result<Vec<u8>, ContractError> {
-    let issuer_canon = deps.api.addr_canonicalize(env.contract.address.as_str())?;
-    let mut salt = Vec::with_capacity(6 + issuer_canon.len() + 8);
+    let mut salt = Vec::with_capacity(6);
     salt.extend_from_slice(b"locker");
-    salt.extend_from_slice(issuer_canon.as_slice());
-    salt.extend_from_slice(&internal_id.to_be_bytes());
+    salt.extend_from_slice(&sink_salt_bytes(deps, env, internal_id, salt_suffix)?);
     Ok(salt)
 }
 
@@ -1401,6 +1488,7 @@ pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> Std
             start_after,
             limit,
         } => to_json_binary(&query_launches(deps, evm_authority, start_after, limit)?),
+        QueryMsg::LaunchByDenom { denom } => to_json_binary(&query_launch_by_denom(deps, denom)?),
     }
 }
 
@@ -1425,6 +1513,24 @@ fn query_launch(
     internal_id: u64,
 ) -> StdResult<LaunchResponse> {
     let evm_authority = deps.api.addr_validate(&evm_authority)?;
+    let record = LAUNCHES
+        .may_load(deps.storage, (&evm_authority, internal_id))?
+        .ok_or_else(|| {
+            cosmwasm_std::StdError::not_found(format!(
+                "launch {} for authority {}",
+                internal_id, evm_authority
+            ))
+        })?;
+    Ok(record.into())
+}
+
+fn query_launch_by_denom(
+    deps: Deps<InjectiveQueryWrapper>,
+    denom: String,
+) -> StdResult<LaunchResponse> {
+    let (evm_authority, internal_id) = DENOM_INDEX
+        .may_load(deps.storage, &denom)?
+        .ok_or_else(|| cosmwasm_std::StdError::not_found(format!("launch for denom {}", denom)))?;
     let record = LAUNCHES
         .may_load(deps.storage, (&evm_authority, internal_id))?
         .ok_or_else(|| {

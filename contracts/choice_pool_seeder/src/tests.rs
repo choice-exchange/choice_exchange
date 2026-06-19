@@ -16,14 +16,21 @@
 
 use cosmwasm_std::testing::{message_info, mock_env, MockApi};
 use cosmwasm_std::{
-    coin, coins, from_json, to_json_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Empty,
-    OwnedDeps, Uint128, WasmMsg,
+    coin, coins, from_json, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Empty, OwnedDeps,
+    Uint128, WasmMsg,
 };
-
+// S-5: these only appear in the `xyk`-feature tests (XYK is disabled in the
+// default build), so gate the imports to keep the default test build clean.
+#[cfg(feature = "xyk")]
 use choice::asset::{AssetInfo, PairInfo};
+#[cfg(feature = "xyk")]
 use choice::factory::ExecuteMsg as FactoryExecuteMsg;
-use choice::mock_querier::{mock_dependencies, WasmMockQuerier};
+#[cfg(feature = "xyk")]
 use choice::pair::ExecuteMsg as PairExecuteMsg;
+#[cfg(feature = "xyk")]
+use cosmwasm_std::Addr;
+
+use choice::mock_querier::{mock_dependencies, WasmMockQuerier};
 use cosmwasm_std::testing::MOCK_CONTRACT_ADDR;
 use cosmwasm_std::testing::{MockApi as TestMockApi, MockQuerier, MockStorage};
 use injective_cosmwasm::query::InjectiveQueryWrapper;
@@ -31,15 +38,19 @@ use std::marker::PhantomData;
 
 use crate::contract::{execute, instantiate, migrate, query};
 use crate::error::ContractError;
+#[cfg(feature = "xyk")]
+use crate::msg::LpDestination;
 use crate::msg::{
-    CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg, LpDestination,
-    MigrateMsg, PoolKind, QueryMsg, RoleResponse, SinkConfigResponse, SinkInit, SinkStateResponse,
+    CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg, MigrateMsg,
+    PoolKind, QueryMsg, RoleResponse, SinkConfigResponse, SinkInit, SinkStateResponse,
 };
 use crate::state::{Role, SinkStatus, ROLE, SINK_STATE};
 
 const TOKEN_DENOM: &str = "factory/inj1issuer000/shroom_1";
 const PAIR_DENOM: &str = "factory/inj1pair000/shroom";
 const CREATE_FEE_DENOM: &str = "inj";
+// S-5: only the XYK create-fee tests reference the fee amount.
+#[cfg(feature = "xyk")]
 const CREATE_FEE: u128 = 100;
 
 // ------------------------------------------------------------------------
@@ -73,7 +84,10 @@ fn make_factory_init(api: &MockApi) -> FactoryInit {
     }
 }
 
-/// Default XYK `pool_kind` keyed to the mock factory's pinned `choice_factory`.
+/// XYK `pool_kind` keyed to the mock factory's pinned `choice_factory`. Only
+/// the `xyk`-feature tests use it — XYK instantiate is `XykDisabled` by default
+/// (S-5).
+#[cfg(feature = "xyk")]
 fn xyk_pool_kind(api: &MockApi) -> PoolKind {
     PoolKind::Xyk {
         choice_factory: api.addr_make("choice_factory").to_string(),
@@ -92,6 +106,13 @@ fn clmm_pool_kind(api: &MockApi) -> PoolKind {
     }
 }
 
+/// Default sink init. S-5: XYK is disabled in the default build, so the generic
+/// sink the venue-agnostic tests (refund / role / admin / query / migrate) lean
+/// on is now a CLMM sink. The direct-instantiate path accepts a CLMM sink with
+/// no committed amounts (the committed-amounts requirement is enforced only on
+/// the factory `CreateSink` path), so refund/route tests keep their original
+/// uncommitted semantics. XYK-specific tests build their own XYK sink via
+/// `make_sink_init_xyk` and are gated behind `--features xyk`.
 fn make_sink_init(api: &MockApi) -> SinkInit {
     SinkInit {
         issuer: api.addr_make("issuer").to_string(),
@@ -99,14 +120,20 @@ fn make_sink_init(api: &MockApi) -> SinkInit {
         pair_denom: PAIR_DENOM.to_string(),
         token_decimals: 18,
         pair_decimals: 18,
-        pool_kind: xyk_pool_kind(api),
+        pool_kind: clmm_pool_kind(api),
         refund_receiver: api.addr_make("refund_receiver").to_string(),
         deadline_seconds: 86_400,
-        // Legacy (uncommitted) default so existing tests keep exercising the
-        // seed-the-live-balance path. Committed-amount behaviour (H-1/M-1) is
-        // covered by the dedicated tests below.
         expected_token: None,
         expected_pair: None,
+    }
+}
+
+/// XYK-flavoured sink init for the `xyk`-feature tests.
+#[cfg(feature = "xyk")]
+fn make_sink_init_xyk(api: &MockApi) -> SinkInit {
+    SinkInit {
+        pool_kind: xyk_pool_kind(api),
+        ..make_sink_init(api)
     }
 }
 
@@ -134,6 +161,22 @@ fn instantiate_sink_default(deps: &mut RichDeps) {
     .unwrap();
 }
 
+/// Instantiate the default XYK sink (only valid under `--features xyk`; the
+/// default build rejects XYK at instantiate with `XykDisabled`, S-5).
+#[cfg(feature = "xyk")]
+fn instantiate_sink_default_xyk(deps: &mut RichDeps) {
+    let init = make_sink_init_xyk(&deps.api);
+    let caller = deps.api.addr_make("factory_caller");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap();
+}
+
+#[cfg(feature = "xyk")]
 fn install_create_fee(deps: &mut RichDeps) {
     deps.querier
         .with_token_factory_denom_create_fee(&[(CREATE_FEE_DENOM, Uint128::new(CREATE_FEE))]);
@@ -142,6 +185,7 @@ fn install_create_fee(deps: &mut RichDeps) {
 /// Pre-populate the mock choice_factory with a pair for `(token_denom,
 /// pair_denom)` — used to drive `Callback::ProvideLiquidity` lookups
 /// directly. The lp denom is fixed for assertion stability.
+#[cfg(feature = "xyk")]
 fn install_pair(deps: &mut RichDeps) -> (String, String) {
     let pair_addr = deps.api.addr_make("pair_inst").to_string();
     let lp_denom = format!("factory/{}/lp", pair_addr);
@@ -196,18 +240,16 @@ fn instantiate_sink_happy_path_sets_pending_state() {
     assert_eq!(state.status, SinkStatus::Pending);
     assert!(state.pair_addr.is_none());
     assert!(state.lp_minted.is_none());
+    // OBSERVABILITY: CLMM artifacts start empty too.
+    assert!(state.pool_addr.is_none());
+    assert!(state.position_token_id.is_none());
 
     let cfg: SinkConfigResponse =
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::SinkConfig {}).unwrap()).unwrap();
     assert_eq!(cfg.token_denom, TOKEN_DENOM);
     assert_eq!(cfg.pair_denom, PAIR_DENOM);
-    assert!(matches!(
-        cfg.pool_kind,
-        PoolKind::Xyk {
-            lp_destination: LpDestination::Burn,
-            ..
-        }
-    ));
+    // Default sink is CLMM (S-5: XYK disabled in the default build).
+    assert!(matches!(cfg.pool_kind, PoolKind::Clmm { .. }));
 }
 
 #[test]
@@ -242,6 +284,43 @@ fn instantiate_sink_rejects_zero_deadline() {
     assert!(matches!(err, ContractError::ZeroDeadline {}));
 }
 
+/// S-1(a): a sub-minimum (but non-zero) deadline is rejected at instantiate so
+/// a permissionless `Refund` can't open early and race a funded `Settle`.
+#[test]
+fn instantiate_sink_rejects_deadline_below_min() {
+    let mut deps = rich_deps(&[]);
+    let mut init = make_sink_init(&deps.api);
+    init.deadline_seconds = 3599; // one second under the 3600 floor
+    let caller = deps.api.addr_make("factory_caller");
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::DeadlineTooShort { got: 3599, min: 3600 }),
+        "expected DeadlineTooShort, got {err:?}"
+    );
+}
+
+/// S-1(a): exactly the floor is accepted.
+#[test]
+fn instantiate_sink_accepts_min_deadline() {
+    let mut deps = rich_deps(&[]);
+    let mut init = make_sink_init(&deps.api);
+    init.deadline_seconds = 3600;
+    let caller = deps.api.addr_make("factory_caller");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap();
+}
+
 // ------------------------------------------------------------------------
 // CreateSink (factory)
 // ------------------------------------------------------------------------
@@ -251,7 +330,11 @@ fn create_sink_emits_instantiate2_with_correct_args() {
     let mut deps = simple_deps();
     instantiate_factory_default(&mut deps);
 
-    let sink_init = make_sink_init(&deps.api);
+    // Default sink is CLMM (S-5); the factory `CreateSink` path requires
+    // committed seed amounts (H-1/M-1), so supply them.
+    let mut sink_init = make_sink_init(&deps.api);
+    sink_init.expected_token = Some(Uint128::new(1_000_000_000_000));
+    sink_init.expected_pair = Some(Uint128::new(800_000_000));
     let salt = Binary::from(b"salt-bytes".to_vec());
     let caller = deps.api.addr_make("issuer_keeper");
     let res = execute(
@@ -292,11 +375,12 @@ fn create_sink_emits_instantiate2_with_correct_args() {
     }
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn create_sink_rejects_choice_factory_mismatch() {
     let mut deps = simple_deps();
     instantiate_factory_default(&mut deps);
-    let mut sink_init = make_sink_init(&deps.api);
+    let mut sink_init = make_sink_init_xyk(&deps.api);
     sink_init.pool_kind = PoolKind::Xyk {
         choice_factory: deps.api.addr_make("other_choice_factory").to_string(),
         lp_destination: LpDestination::Burn,
@@ -348,16 +432,18 @@ fn settle_balances() -> Vec<Coin> {
     ]
 }
 
-/// Standard `info.funds` for a `Settle` call — exactly the chain's
+/// Standard `info.funds` for an XYK `Settle` call — exactly the chain's
 /// create-pair fee. Tests that exercise overpay / underpay vary off this.
+#[cfg(feature = "xyk")]
 fn fee_funds() -> Vec<Coin> {
     vec![coin(CREATE_FEE, CREATE_FEE_DENOM)]
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_emits_full_chain_create_pair_callbacks_no_tip() {
     let mut deps = rich_deps(&settle_balances());
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_create_fee(&mut deps);
 
     let caller = deps.api.addr_make("cranker");
@@ -467,6 +553,22 @@ fn instantiate_sink_committed(deps: &mut RichDeps, expected_token: u128, expecte
     .unwrap();
 }
 
+/// XYK committed sink for the `xyk`-feature settle tests.
+#[cfg(feature = "xyk")]
+fn instantiate_sink_committed_xyk(deps: &mut RichDeps, expected_token: u128, expected_pair: u128) {
+    let mut init = make_sink_init_xyk(&deps.api);
+    init.expected_token = Some(Uint128::new(expected_token));
+    init.expected_pair = Some(Uint128::new(expected_pair));
+    let caller = deps.api.addr_make("factory_caller");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap();
+}
+
 #[test]
 fn instantiate_sink_rejects_half_set_expected_amounts() {
     let mut deps = rich_deps(&[]);
@@ -504,6 +606,7 @@ fn instantiate_sink_rejects_zero_expected_amount() {
 /// H-1: a donation bank-sent to the sink before `Settle` must NOT inflate the
 /// pool seed — the committed amounts are seeded verbatim and the surplus is
 /// swept, so the opening price can't be skewed.
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_committed_ignores_donation_and_seeds_exact() {
     let committed_token = 1_000_000_000_000u128;
@@ -514,7 +617,7 @@ fn settle_committed_ignores_donation_and_seeds_exact() {
         coin(committed_token + donation_token, TOKEN_DENOM),
         coin(committed_pair + donation_pair, PAIR_DENOM),
     ]);
-    instantiate_sink_committed(&mut deps, committed_token, committed_pair);
+    instantiate_sink_committed_xyk(&mut deps, committed_token, committed_pair);
     install_create_fee(&mut deps);
 
     let caller = deps.api.addr_make("cranker");
@@ -546,6 +649,7 @@ fn settle_committed_ignores_donation_and_seeds_exact() {
 
 /// M-1: settling before the full graduation deposit has landed must revert,
 /// rather than lock a pool at a wrong (partial) ratio.
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_committed_reverts_on_partial_deposit() {
     let committed_token = 1_000_000_000_000u128;
@@ -554,7 +658,7 @@ fn settle_committed_reverts_on_partial_deposit() {
         coin(committed_token, TOKEN_DENOM),
         coin(committed_pair - 1, PAIR_DENOM), // pair leg 1 wei short
     ]);
-    instantiate_sink_committed(&mut deps, committed_token, committed_pair);
+    instantiate_sink_committed_xyk(&mut deps, committed_token, committed_pair);
     install_create_fee(&mut deps);
 
     let caller = deps.api.addr_make("cranker");
@@ -571,13 +675,15 @@ fn settle_committed_reverts_on_partial_deposit() {
     );
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_fails_closed_when_factory_exists_but_config_unreadable() {
     // P1-A: the sink's factory address hosts contract code, but no
     // FactoryConfig response is installed → the breaker read fails while the
     // contract exists. Settlement must be BLOCKED (fail-closed), not proceed.
+    // (CLMM equivalent: `clmm_settle_fails_closed_when_factory_unreadable`.)
     let mut deps = rich_deps(&settle_balances());
-    instantiate_sink_default(&mut deps); // cfg.factory = "factory_caller"
+    instantiate_sink_default_xyk(&mut deps); // cfg.factory = "factory_caller"
     install_create_fee(&mut deps);
     deps.querier
         .register_wasm_contract(deps.api.addr_make("factory_caller").as_str());
@@ -593,10 +699,11 @@ fn settle_fails_closed_when_factory_exists_but_config_unreadable() {
     assert!(matches!(err, ContractError::FactoryUnreadable { .. }));
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_rejects_overpaid_create_fee() {
     let mut deps = rich_deps(&settle_balances());
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_create_fee(&mut deps);
     let caller = deps.api.addr_make("cranker");
     // Caller over-pays by 7 wei — must revert, not refund. Letting an
@@ -614,10 +721,11 @@ fn settle_rejects_overpaid_create_fee() {
     assert!(matches!(err, ContractError::CreateFeeOverpaid { .. }));
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_rejects_unexpected_funds_denom() {
     let mut deps = rich_deps(&settle_balances());
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_create_fee(&mut deps);
     let caller = deps.api.addr_make("cranker");
     // Caller attaches the correct create fee PLUS extra of an unrelated
@@ -653,10 +761,11 @@ fn settle_rejects_on_factory_instance() {
     assert!(matches!(err, ContractError::WrongRole { .. }));
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_rejects_zero_pair_balance() {
     let mut deps = rich_deps(&[coin(1_000u128, TOKEN_DENOM)]);
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_create_fee(&mut deps);
     let caller = deps.api.addr_make("cranker");
     let err = execute(
@@ -672,10 +781,11 @@ fn settle_rejects_zero_pair_balance() {
     ));
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_rejects_zero_token_balance() {
     let mut deps = rich_deps(&[coin(1_000u128, PAIR_DENOM)]);
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_create_fee(&mut deps);
     let caller = deps.api.addr_make("cranker");
     let err = execute(
@@ -691,10 +801,11 @@ fn settle_rejects_zero_token_balance() {
     ));
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_rejects_when_caller_omits_create_fee_funds() {
     let mut deps = rich_deps(&settle_balances());
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_create_fee(&mut deps);
     let caller = deps.api.addr_make("cranker");
     // Note: no `info.funds` attached → caller didn't pay the fee.
@@ -712,6 +823,7 @@ fn settle_rejects_when_caller_omits_create_fee_funds() {
 /// re-fixed in BUG 1 (over-pay revert): when `pair_denom == "inj"`, the seed
 /// computation must subtract the caller's exact fee contribution, not double-
 /// count it into the pool deposit.
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_pair_denom_equals_create_fee_denom_deposits_leg_b_only() {
     let leg_b_pair: u128 = 800_000_000u128;
@@ -724,7 +836,7 @@ fn settle_pair_denom_equals_create_fee_denom_deposits_leg_b_only() {
         coin(leg_b_pair + CREATE_FEE, CREATE_FEE_DENOM),
     ]);
     // Instantiate sink with pair_denom = "inj" to force the collision.
-    let mut init = make_sink_init(&deps.api);
+    let mut init = make_sink_init_xyk(&deps.api);
     init.pair_denom = CREATE_FEE_DENOM.to_string();
     let caller = deps.api.addr_make("factory_caller");
     instantiate(
@@ -771,10 +883,11 @@ fn settle_pair_denom_equals_create_fee_denom_deposits_leg_b_only() {
     assert_eq!(provide, expected_deposit);
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn settle_rejects_when_terminal() {
     let mut deps = rich_deps(&settle_balances());
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_create_fee(&mut deps);
     let caller = deps.api.addr_make("cranker");
     execute(
@@ -881,6 +994,69 @@ fn refund_rejects_when_nothing_to_refund() {
     assert!(matches!(err, ContractError::NothingToRefund {}));
 }
 
+/// S-1(b): once past the deadline, a permissionless `Refund` of a COMMITTED
+/// sink that ACTUALLY HOLDS both committed legs must be REFUSED — that sink can
+/// still `Settle` into a healthy pool, so refunding it would permanently deny
+/// graduation. Only the admin `ForceRefund` may override.
+#[test]
+fn refund_refused_when_committed_sink_is_settleable() {
+    let committed_token = 1_000_000_000_000u128;
+    let committed_pair = 800_000_000u128;
+    // Sink holds EXACTLY (here, at least) both committed legs ⇒ settleable.
+    let mut deps = rich_deps(&[
+        coin(committed_token, TOKEN_DENOM),
+        coin(committed_pair, PAIR_DENOM),
+    ]);
+    instantiate_sink_committed(&mut deps, committed_token, committed_pair);
+
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(86_401); // past the deadline
+    let caller = deps.api.addr_make("anyone");
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&caller, &[]),
+        ExecuteMsg::Refund {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SinkIsSettleableUseSettle {}),
+        "expected SinkIsSettleableUseSettle, got {err:?}"
+    );
+}
+
+/// S-1(b): the refund is STILL allowed when a committed leg is short (the full
+/// graduation deposit never landed, so the sink cannot settle) — the refund is
+/// the correct terminal state for a genuinely-failed launch.
+#[test]
+fn refund_allowed_when_committed_sink_has_short_leg() {
+    let committed_token = 1_000_000_000_000u128;
+    let committed_pair = 800_000_000u128;
+    // Pair leg one wei short ⇒ NOT settleable ⇒ refund proceeds.
+    let mut deps = rich_deps(&[
+        coin(committed_token, TOKEN_DENOM),
+        coin(committed_pair - 1, PAIR_DENOM),
+    ]);
+    instantiate_sink_committed(&mut deps, committed_token, committed_pair);
+
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(86_401);
+    let caller = deps.api.addr_make("anyone");
+    let res = execute(
+        deps.as_mut(),
+        env,
+        message_info(&caller, &[]),
+        ExecuteMsg::Refund {},
+    )
+    .unwrap();
+    // token → issuer, short pair → refund_receiver.
+    assert_eq!(res.messages.len(), 2);
+    assert_eq!(
+        SINK_STATE.load(deps.as_ref().storage).unwrap().status,
+        SinkStatus::Refunded
+    );
+}
+
 // ------------------------------------------------------------------------
 // Callbacks
 // ------------------------------------------------------------------------
@@ -900,10 +1076,11 @@ fn callback_rejects_non_self_caller() {
     assert!(matches!(err, ContractError::CallbackUnauthorized {}));
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn callback_provide_liquidity_emits_provide_msg_with_funds() {
     let mut deps = rich_deps(&[]);
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     let (pair_addr, _lp_denom) = install_pair(&mut deps);
 
     let self_addr = mock_env().contract.address;
@@ -954,10 +1131,11 @@ fn callback_provide_liquidity_emits_provide_msg_with_funds() {
     assert_eq!(state.pair_addr.map(|a| a.to_string()), Some(pair_addr));
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn callback_distribute_lp_burns_when_destination_is_burn() {
     let mut deps = rich_deps(&[]);
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     install_pair(&mut deps);
 
     // Pretend ProvideLiquidity already ran: pair_addr recorded + 1e18 LP in
@@ -975,6 +1153,8 @@ fn callback_distribute_lp_burns_when_destination_is_burn() {
                 status: SinkStatus::Settled,
                 pair_addr: Some(Addr::unchecked(pair_addr_str)),
                 lp_minted: None,
+                pool_addr: None,
+                position_token_id: None,
             },
         )
         .unwrap();
@@ -1009,10 +1189,11 @@ fn callback_distribute_lp_burns_when_destination_is_burn() {
     );
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn callback_distribute_lp_sends_when_destination_is_send_to() {
     let mut deps = rich_deps(&[]);
-    let mut init = make_sink_init(&deps.api);
+    let mut init = make_sink_init_xyk(&deps.api);
     let dest = deps.api.addr_make("lp_recipient");
     init.pool_kind = PoolKind::Xyk {
         choice_factory: deps.api.addr_make("choice_factory").to_string(),
@@ -1037,6 +1218,8 @@ fn callback_distribute_lp_sends_when_destination_is_send_to() {
                 status: SinkStatus::Settled,
                 pair_addr: Some(Addr::unchecked(pair_addr_str)),
                 lp_minted: None,
+                pool_addr: None,
+                position_token_id: None,
             },
         )
         .unwrap();
@@ -1066,10 +1249,11 @@ fn callback_distribute_lp_sends_when_destination_is_send_to() {
     }
 }
 
+#[cfg(feature = "xyk")]
 #[test]
 fn callback_distribute_lp_errors_when_no_lp_minted() {
     let mut deps = rich_deps(&[]);
-    instantiate_sink_default(&mut deps);
+    instantiate_sink_default_xyk(&mut deps);
     let (_pair_addr, _lp_denom) = install_pair(&mut deps);
 
     let pair_addr_str = deps.api.addr_make("pair_inst").to_string();
@@ -1080,6 +1264,8 @@ fn callback_distribute_lp_errors_when_no_lp_minted() {
                 status: SinkStatus::Settled,
                 pair_addr: Some(Addr::unchecked(pair_addr_str)),
                 lp_minted: None,
+                pool_addr: None,
+                position_token_id: None,
             },
         )
         .unwrap();
@@ -1255,7 +1441,11 @@ fn set_paused_requires_admin_and_blocks_creates() {
         ExecuteMsg::SetPaused { paused: false },
     )
     .unwrap();
-    let sink_init2 = make_sink_init(&deps.api);
+    // Default sink is CLMM (S-5); supply committed amounts (H-1/M-1) so the
+    // factory `CreateSink` path accepts it after unpause.
+    let mut sink_init2 = make_sink_init(&deps.api);
+    sink_init2.expected_token = Some(Uint128::new(1_000_000_000_000));
+    sink_init2.expected_pair = Some(Uint128::new(800_000_000));
     let res = execute(
         deps.as_mut(),
         mock_env(),
@@ -1406,9 +1596,9 @@ fn sink_config_query_errors_on_factory() {
 
 #[test]
 fn sink_state_query_returns_pending_then_terminal() {
-    let mut deps = rich_deps(&settle_balances());
-    instantiate_sink_default(&mut deps);
-    install_create_fee(&mut deps);
+    // S-5: the default venue is CLMM, so this drives a CLMM settle (no funds).
+    let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), None);
+    instantiate_clmm_sink(&mut deps);
     let s0: SinkStateResponse =
         from_json(query(deps.as_ref(), mock_env(), QueryMsg::SinkState {}).unwrap()).unwrap();
     assert_eq!(s0.status, SinkStatus::Pending);
@@ -1416,7 +1606,7 @@ fn sink_state_query_returns_pending_then_terminal() {
     execute(
         deps.as_mut(),
         mock_env(),
-        message_info(&cranker, &fee_funds()),
+        message_info(&cranker, &[]),
         ExecuteMsg::Settle {},
     )
     .unwrap();
@@ -1769,6 +1959,129 @@ fn clmm_settle_rejects_unsupported_fee_tier() {
         err,
         ContractError::FeeTierNotSupported { fee: 3000 }
     ));
+}
+
+/// OBSERVABILITY: a CLMM settle dispatches the `MintPosition` as a
+/// `ReplyOn::Success` sub-message so the reply can record `pool_addr` /
+/// `position_token_id`. Assert the mint is wired as a submessage with the
+/// expected reply id, and that the settle response leaves the new `SinkState`
+/// fields `None` until the reply lands.
+#[test]
+fn clmm_settle_wires_mint_as_reply_submessage() {
+    use cosmwasm_std::ReplyOn;
+    let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), None);
+    instantiate_clmm_sink(&mut deps);
+    let caller = deps.api.addr_make("cranker");
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap();
+
+    // [1] is the mint — must be ReplyOn::Success with the CLMM-mint reply id.
+    assert_eq!(res.messages[1].reply_on, ReplyOn::Success);
+    assert_eq!(res.messages[1].id, crate::contract::REPLY_CLMM_MINT);
+
+    // Pre-reply, the CLMM observability fields are still unset.
+    let state = SINK_STATE.load(deps.as_ref().storage).unwrap();
+    assert!(state.pool_addr.is_none());
+    assert!(state.position_token_id.is_none());
+}
+
+/// OBSERVABILITY: the `MintPosition` success reply parses the manager-emitted
+/// `token_id` and queries the seeded pool, recording both on `SinkState` and
+/// exposing them via the `SinkState` query.
+#[test]
+fn clmm_mint_reply_records_pool_and_token_id() {
+    use cosmwasm_std::{Event, Reply, SubMsgResponse, SubMsgResult};
+
+    // GetPool now resolves the seeded pool (the reply runs post-create). Use a
+    // MockApi-valid address so the reply's `addr_validate` accepts it.
+    let pool_addr = TestMockApi::default().addr_make("seeded_pool").to_string();
+    let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), Some(pool_addr.clone()));
+    instantiate_clmm_sink(&mut deps);
+
+    // Stage the pending mint context the way `settle_clmm` would, then drive the
+    // public `reply` entry point with a manager-style `token_id` attribute.
+    let clmm_factory = deps.api.addr_make("clmm_factory");
+    crate::state::PENDING_CLMM_MINT
+        .save(
+            deps.as_mut().storage,
+            &crate::state::PendingClmmMint {
+                clmm_factory,
+                token0_denom: "denom0".to_string(),
+                token1_denom: "denom1".to_string(),
+                fee: 3000,
+            },
+        )
+        .unwrap();
+
+    let reply = Reply {
+        id: crate::contract::REPLY_CLMM_MINT,
+        payload: cosmwasm_std::Binary::default(),
+        gas_used: 0,
+        result: SubMsgResult::Ok(
+            #[allow(deprecated)]
+            SubMsgResponse {
+                events: vec![Event::new("wasm")
+                    .add_attribute("action", "mint_position")
+                    .add_attribute("token_id", "7")],
+                data: None,
+                msg_responses: vec![],
+            },
+        ),
+    };
+
+    crate::contract::reply(deps.as_mut(), mock_env(), reply).unwrap();
+
+    // Persisted onto SinkState and surfaced via the query.
+    let s: SinkStateResponse =
+        from_json(query(deps.as_ref(), mock_env(), QueryMsg::SinkState {}).unwrap()).unwrap();
+    assert_eq!(s.position_token_id.as_deref(), Some("7"));
+    assert_eq!(s.pool_addr.as_deref(), Some(pool_addr.as_str()));
+    // Pending context was consumed.
+    assert!(crate::state::PENDING_CLMM_MINT
+        .may_load(deps.as_ref().storage)
+        .unwrap()
+        .is_none());
+}
+
+/// OBSERVABILITY: a reply that carries no `token_id` attribute is a hard error
+/// (reverts the settle tx) rather than silently recording nothing.
+#[test]
+fn clmm_mint_reply_errors_when_token_id_missing() {
+    use cosmwasm_std::{Event, Reply, SubMsgResponse, SubMsgResult};
+    let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), None);
+    instantiate_clmm_sink(&mut deps);
+    let clmm_factory = deps.api.addr_make("clmm_factory");
+    crate::state::PENDING_CLMM_MINT
+        .save(
+            deps.as_mut().storage,
+            &crate::state::PendingClmmMint {
+                clmm_factory,
+                token0_denom: "denom0".to_string(),
+                token1_denom: "denom1".to_string(),
+                fee: 3000,
+            },
+        )
+        .unwrap();
+    let reply = Reply {
+        id: crate::contract::REPLY_CLMM_MINT,
+        payload: cosmwasm_std::Binary::default(),
+        gas_used: 0,
+        result: SubMsgResult::Ok(
+            #[allow(deprecated)]
+            SubMsgResponse {
+                events: vec![Event::new("wasm").add_attribute("action", "mint_position")],
+                data: None,
+                msg_responses: vec![],
+            },
+        ),
+    };
+    let err = crate::contract::reply(deps.as_mut(), mock_env(), reply).unwrap_err();
+    assert!(matches!(err, ContractError::MintReplyMissingTokenId {}));
 }
 
 // ------------------------------------------------------------------------

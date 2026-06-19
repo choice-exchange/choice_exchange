@@ -89,6 +89,21 @@ pub enum ContractError {
     #[error("deadline_seconds must be > 0")]
     ZeroDeadline {},
 
+    #[error(
+        "deadline_seconds {got} is below the minimum {min} (audit S-1): a too-short refund deadline lets a permissionless Refund race a fully-funded Settle"
+    )]
+    DeadlineTooShort { got: u64, min: u64 },
+
+    #[error(
+        "Refund refused (audit S-1b): this sink holds at least the committed seed on both legs, so it can still Settle into a healthy pool. A permissionless post-deadline Refund must not deny graduation; only the factory admin's ForceRefund may override (for genuinely-unsettleable sinks)."
+    )]
+    SinkIsSettleableUseSettle {},
+
+    #[error(
+        "XYK graduation is disabled in this build (audit S-5): the production wasm is compiled without the `xyk` feature. Use a CLMM pool_kind, or build with `--features xyk` for the XYK debug/test path."
+    )]
+    XykDisabled {},
+
     #[error("expected_token and expected_pair must be set together, or both omitted")]
     ExpectedAmountsHalfSet {},
 
@@ -149,6 +164,12 @@ pub enum ContractError {
 
     #[error("Self-callback invoked by an external sender")]
     CallbackUnauthorized {},
+
+    #[error("unexpected reply id {id}")]
+    UnknownReplyId { id: u64 },
+
+    #[error("CLMM mint reply missing the manager's `token_id` attribute (observability)")]
+    MintReplyMissingTokenId {},
 
     #[error("Invalid migration: cannot apply variant `{requested}` from current version `{from}`")]
     InvalidMigration { from: String, requested: String },

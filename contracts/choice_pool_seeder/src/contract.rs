@@ -2,20 +2,26 @@ use crate::clmm::{full_range_ticks, init_sqrt_price_from_amounts};
 use crate::error::ContractError;
 use crate::msg::{
     CallbackMsg, ExecuteMsg, FactoryConfigResponse, FactoryInit, InstantiateMsg,
-    LockerConfigResponse, LockerInit, LpDestination, MigrateMsg, PoolKind, QueryMsg, RoleResponse,
+    LockerConfigResponse, LockerInit, MigrateMsg, PoolKind, QueryMsg, RoleResponse,
     SinkConfigResponse, SinkInit, SinkStateResponse,
 };
+// S-5: `LpDestination` only appears in the XYK arm of `validate_pool_kind`,
+// compiled solely under the `xyk` feature. Gate the import so the default
+// (XYK-disabled) production build carries no unused import.
+#[cfg(feature = "xyk")]
+use crate::msg::LpDestination;
 use crate::state::{
-    FactoryConfig, LockerConfig, LpDestinationStored, PoolKindStored, Role, SinkConfig, SinkState,
-    SinkStatus, FACTORY_CONFIG, LOCKER_CONFIG, ROLE, SINK_CONFIG, SINK_STATE,
+    FactoryConfig, LockerConfig, LpDestinationStored, PendingClmmMint, PoolKindStored, Role,
+    SinkConfig, SinkState, SinkStatus, FACTORY_CONFIG, LOCKER_CONFIG, PENDING_CLMM_MINT, ROLE,
+    SINK_CONFIG, SINK_STATE,
 };
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    coins, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
-    Response, StdError, StdResult, Uint128, Uint256, WasmMsg,
+    coins, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Reply,
+    Response, StdError, StdResult, SubMsg, SubMsgResult, Uint128, Uint256, WasmMsg,
 };
 use cw2::set_contract_version;
 use serde::Deserialize;
@@ -54,6 +60,23 @@ const COLLECT_FEES_PAGE: u32 = 30;
 /// Basis-points denominator for the locker fee split. `creator_fee_share_bps`
 /// is a fraction of the fee out of this, so it can range over `[0, BPS_DENOM]`.
 const BPS_DENOM: u16 = 10_000;
+
+/// S-1: minimum `deadline_seconds` a sink may be instantiated with. Mirrors the
+/// issuer's `MIN_REFUND_DEADLINE_SECONDS` (= 3600 = 1 hour). A too-short
+/// deadline opens the permissionless `Refund` path almost immediately, letting
+/// anyone race a fully-funded sink into a refund before the keeper can `Settle`
+/// it — permanently denying graduation. Combined with the S-1(b)
+/// settleable-sink guard in `exec_refund`, this keeps the refund path confined
+/// to genuinely-failed launches.
+const MIN_DEADLINE_SECONDS: u64 = 3600;
+
+/// OBSERVABILITY: reply id for the CLMM `MintPosition` sub-message. Its
+/// `ReplyOn::Success` handler parses the minted position `token_id` (and records
+/// the seeded pool address) into `SinkState`. `ReplyOn::Success` preserves
+/// atomicity — only the success branch runs, and any earlier failure in the
+/// settle tx still reverts everything. `pub(crate)` so the unit tests can wire
+/// a `Reply` with the matching id.
+pub(crate) const REPLY_CLMM_MINT: u64 = 1;
 
 // ------------------------------------------------------------------------
 // Entry points
@@ -137,6 +160,19 @@ fn instantiate_sink(
     if init.deadline_seconds == 0 {
         return Err(ContractError::ZeroDeadline {});
     }
+    // S-1: enforce a floor on the refund deadline. A too-short deadline opens
+    // the permissionless `Refund` almost immediately, letting anyone race a
+    // fully-funded sink into a refund before the keeper can `Settle`. This gate
+    // lives on `instantiate_sink` (NOT only `exec_create_sink`) so it covers
+    // BOTH the factory `CreateSink` path — whose `Instantiate2` reaches here —
+    // and the direct-instantiate debug path. Mirrors the issuer's
+    // `MIN_REFUND_DEADLINE_SECONDS`.
+    if init.deadline_seconds < MIN_DEADLINE_SECONDS {
+        return Err(ContractError::DeadlineTooShort {
+            got: init.deadline_seconds,
+            min: MIN_DEADLINE_SECONDS,
+        });
+    }
     // H-1 / M-1: committed seed amounts must be supplied together (or both
     // omitted, for the legacy debug path) and, when supplied, be non-zero.
     match (init.expected_token, init.expected_pair) {
@@ -195,6 +231,10 @@ fn instantiate_sink(
             status: SinkStatus::Pending,
             pair_addr: None,
             lp_minted: None,
+            // OBSERVABILITY: populated on a successful CLMM settle (see the
+            // `REPLY_CLMM_MINT` reply handler).
+            pool_addr: None,
+            position_token_id: None,
         },
     )?;
 
@@ -218,6 +258,16 @@ fn validate_pool_kind(
     pool_kind: &PoolKind,
 ) -> Result<PoolKindStored, ContractError> {
     Ok(match pool_kind {
+        // S-5: XYK graduation is feature-gated. In production (default build,
+        // no `xyk` feature) instantiating an XYK sink is rejected here — the
+        // earliest possible point — so a sink with a `PoolKindStored::Xyk`
+        // config can never exist on-chain and the (unaudited-for-committed-
+        // ratio) `settle_xyk` path is unreachable. The XYK arm still COMPILES
+        // (it builds `PoolKindStored::Xyk`) so the code path and its tests can
+        // be exercised under `--features xyk`.
+        #[cfg(not(feature = "xyk"))]
+        PoolKind::Xyk { .. } => return Err(ContractError::XykDisabled {}),
+        #[cfg(feature = "xyk")]
         PoolKind::Xyk {
             choice_factory,
             lp_destination,
@@ -324,6 +374,24 @@ pub fn execute(
         ExecuteMsg::UpdateTreasury { new_treasury } => {
             exec_update_treasury(deps, info, new_treasury)
         }
+    }
+}
+
+/// OBSERVABILITY: reply entry point. Today there is exactly one reply — the
+/// `MintPosition` success reply (`REPLY_CLMM_MINT`) emitted by `settle_clmm`,
+/// which records the seeded pool address + minted position `token_id` onto
+/// `SinkState`. `ReplyOn::Success` means this only ever runs on success, so it
+/// records observability data without ever masking a settle failure (a failed
+/// mint propagates and reverts the whole tx).
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn reply(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    _env: Env,
+    reply: Reply,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    match reply.id {
+        REPLY_CLMM_MINT => reply_clmm_mint(deps, reply),
+        other => Err(ContractError::UnknownReplyId { id: other }),
     }
 }
 
@@ -884,11 +952,9 @@ fn settle_clmm(
     // seed ratio.
     let init_sqrt_price: Uint256 = init_sqrt_price_from_amounts(amount0, amount1)?;
 
-    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
-
     // 1. Create the pool at our price (no funds; reply inside the factory
     //    registers it before the next top-level message runs).
-    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+    let create_pool_msg = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: clmm_factory.to_string(),
         msg: to_json_binary(&ClmmFactoryExecuteMsg::CreatePool {
             token_a: token0.clone(),
@@ -898,7 +964,7 @@ fn settle_clmm(
             max_fee_multiple,
         })?,
         funds: vec![],
-    }));
+    });
 
     // 2. Mint a full-range position to `position_recipient`, attaching both
     //    seed amounts. The manager resolves the pool, computes liquidity, and
@@ -920,7 +986,7 @@ fn settle_clmm(
     ];
     mint_funds.sort_by(|a, b| a.denom.cmp(&b.denom));
 
-    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+    let mint_msg = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: clmm_manager.to_string(),
         msg: to_json_binary(&ClmmManagerExecuteMsg::MintPosition {
             token0: token0.clone(),
@@ -936,13 +1002,39 @@ fn settle_clmm(
             deadline: 0,
         })?,
         funds: mint_funds,
-    }));
+    });
+
+    // OBSERVABILITY: stage the context the `REPLY_CLMM_MINT` success reply needs
+    // to (a) parse the minted `token_id` out of the manager's emitted attributes
+    // and (b) query the just-created pool's address from the factory. Written
+    // before dispatch; removed by the reply. If the settle tx reverts anywhere,
+    // this write rolls back with it.
+    PENDING_CLMM_MINT.save(
+        deps.storage,
+        &PendingClmmMint {
+            clmm_factory: clmm_factory.clone(),
+            token0_denom: token0.key().to_string(),
+            token1_denom: token1.key().to_string(),
+            fee: fee_tier,
+        },
+    )?;
+
+    // OBSERVABILITY: dispatch the mint as a `ReplyOn::Success` sub-message so the
+    // reply can record `pool_addr` + `position_token_id` on `SinkState`.
+    // `ReplyOn::Success` preserves atomicity — the reply runs ONLY if the mint
+    // sub-tree succeeded, and a failing mint (or any later error in this settle
+    // tx) still reverts everything. The sibling `SweepDust` top-level message is
+    // dispatched after the mint's full sub-tree (mint + reply), so ordering is
+    // unchanged: CreatePool → MintPosition (+reply) → SweepDust.
+    let mint_submsg = SubMsg::reply_on_success(mint_msg, REPLY_CLMM_MINT);
 
     // 3. Sweep whatever dust the manager refunded.
-    messages.push(self_callback(&env, CallbackMsg::SweepDust {})?);
+    let sweep_msg = self_callback(&env, CallbackMsg::SweepDust {})?;
 
     Ok(Response::new()
-        .add_messages(messages)
+        .add_message(create_pool_msg)
+        .add_submessage(mint_submsg)
+        .add_message(sweep_msg)
         .add_attribute("action", "settle")
         .add_attribute("pool_kind", "clmm")
         .add_attribute("caller", info.sender)
@@ -957,6 +1049,84 @@ fn settle_clmm(
         .add_attribute("tick_upper", tick_upper.to_string())
         .add_attribute("init_sqrt_price", init_sqrt_price.to_string())
         .add_attribute("position_recipient", position_recipient))
+}
+
+/// OBSERVABILITY: handle the `MintPosition` success reply. Records the minted
+/// position `token_id` (parsed from the manager's emitted `wasm` attributes)
+/// and the seeded pool address (queried from the factory's `GetPool`, now that
+/// the pool exists) onto `SinkState`, then emits both as attributes.
+///
+/// Atomicity: this only runs after the mint succeeded (`ReplyOn::Success`), and
+/// any error returned here reverts the whole settle tx. We therefore treat a
+/// missing `token_id` attribute as a hard error rather than silently skipping —
+/// the data is a required graduation invariant, and the manager always emits it.
+/// `pool_addr` is best-effort: if the post-mint `GetPool` somehow can't be read
+/// we leave it `None` (the pool unquestionably exists by now and is
+/// re-derivable) rather than fail an otherwise-successful graduation.
+fn reply_clmm_mint(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    reply: Reply,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let pending = PENDING_CLMM_MINT.load(deps.storage)?;
+    PENDING_CLMM_MINT.remove(deps.storage);
+
+    // Parse the minted `token_id` out of the sub-execution's emitted events.
+    // The manager attaches `("token_id", <decimal>)` to its `MintPosition`
+    // response (a `wasm` event attribute), which surfaces here in
+    // `reply.result`'s events.
+    let token_id = token_id_from_reply(&reply).ok_or(ContractError::MintReplyMissingTokenId {})?;
+
+    // Resolve the just-created pool address. It exists now (the mint succeeded
+    // against it), so `GetPool` returns it. Best-effort — see fn doc.
+    let token0_ai = ClmmAssetInfo::NativeToken {
+        denom: pending.token0_denom.clone(),
+    };
+    let token1_ai = ClmmAssetInfo::NativeToken {
+        denom: pending.token1_denom.clone(),
+    };
+    let pool_addr = query_clmm_pool(
+        deps.as_ref(),
+        &pending.clmm_factory,
+        &token0_ai,
+        &token1_ai,
+        pending.fee,
+    )?
+    .and_then(|p| deps.api.addr_validate(&p).ok());
+
+    let mut state = SINK_STATE.load(deps.storage)?;
+    state.pool_addr = pool_addr.clone();
+    state.position_token_id = Some(token_id.clone());
+    SINK_STATE.save(deps.storage, &state)?;
+
+    Ok(Response::new()
+        .add_attribute("action", "reply_clmm_mint")
+        .add_attribute("position_token_id", token_id)
+        .add_attribute(
+            "pool_addr",
+            pool_addr.map(|a| a.to_string()).unwrap_or_default(),
+        ))
+}
+
+/// Scan a reply's `wasm` event attributes for the manager-emitted `token_id`.
+/// Returns the LAST `token_id` seen so a (hypothetical) wrapping event can't
+/// shadow the manager's own; in practice the mint emits exactly one.
+fn token_id_from_reply(reply: &Reply) -> Option<String> {
+    let SubMsgResult::Ok(ref resp) = reply.result else {
+        // `ReplyOn::Success` guarantees this arm, but be defensive.
+        return None;
+    };
+    let mut found: Option<String> = None;
+    for event in &resp.events {
+        // Manager attributes land under the `wasm` event (cosmwasm namespaces
+        // contract-emitted attributes there). Accept any event carrying a
+        // `token_id` to stay robust to event-type prefixing across SDK versions.
+        for attr in &event.attributes {
+            if attr.key == "token_id" {
+                found = Some(attr.value.clone());
+            }
+        }
+    }
+    found
 }
 
 /// Permissionless refund, available once `deadline_seconds` past instantiate.
@@ -979,6 +1149,31 @@ fn exec_refund(
         return Err(ContractError::RefundDeadlineNotReached {
             remaining_seconds: deadline - now,
         });
+    }
+
+    // S-1(b): close the post-deadline Settle/Refund race. Once the deadline
+    // passes, `Refund` is permissionless — but a committed sink that ACTUALLY
+    // HOLDS both committed legs can still `Settle` into a healthy pool. Letting
+    // anyone refund it then would permanently deny graduation. So: for a
+    // committed sink (both `expected_*` set), refuse the permissionless refund
+    // when the live balances are `>=` BOTH committed amounts (i.e. it is
+    // settleable). A short leg means the full graduation deposit never landed,
+    // so a refund is the correct terminal state and is allowed (as before).
+    // Only the admin `ForceRefund` (which never calls this function) may
+    // override, for genuinely-unsettleable-but-funded sinks (e.g. an
+    // out-of-range seed ratio that trips `SeedRatioOutOfRange`).
+    if let (Some(exp_token), Some(exp_pair)) = (cfg.expected_token, cfg.expected_pair) {
+        let token_bal = deps
+            .querier
+            .query_balance(&env.contract.address, &cfg.token_denom)?
+            .amount;
+        let pair_bal = deps
+            .querier
+            .query_balance(&env.contract.address, &cfg.pair_denom)?
+            .amount;
+        if token_bal >= exp_token && pair_bal >= exp_pair {
+            return Err(ContractError::SinkIsSettleableUseSettle {});
+        }
     }
 
     do_refund(deps, env, &cfg, state, "refund")
@@ -1517,6 +1712,8 @@ fn query_sink_state(deps: Deps<InjectiveQueryWrapper>) -> StdResult<SinkStateRes
         status: s.status,
         pair_addr: s.pair_addr.map(|a| a.into_string()),
         lp_minted: s.lp_minted,
+        pool_addr: s.pool_addr.map(|a| a.into_string()),
+        position_token_id: s.position_token_id,
     })
 }
 
@@ -1716,8 +1913,24 @@ fn query_fee_tier_spacing(
 }
 
 /// Returns `Some(pool_address)` if a CLMM pool already exists for
-/// `(token0, token1, fee)`, else `None`. The factory's `GetPool` errors when
-/// the pool is absent, so any query error is treated as "does not exist".
+/// `(token0, token1, fee)`, else `None`.
+///
+/// S-4 (fail-closed analysis): the natural hardening would be to let a genuine
+/// query ERROR propagate (abort settle) and map only a structured "absent"
+/// response to `None`. That is only possible if the factory distinguishes
+/// "no pool" from a query failure. It does NOT: `choice_clmm_factory`'s
+/// `GetPool` is `#[returns(String)]` and its handler does `POOLS.load(...)?`,
+/// which returns `StdError::NotFound` on absence — the SAME error channel a
+/// genuine failure (bad schema, wrong address) uses. There is no "absent"
+/// sentinel to key on, so we cannot fail closed here without also blocking the
+/// (common, expected) absent case and bricking every first-time graduation.
+///
+/// We therefore RETAIN the `res.ok()` behaviour (any error ⇒ treated as
+/// absent). The backstop is atomicity: this guard is a courtesy that lets the
+/// keeper triage a pre-priced pool with a clear `ClmmPoolAlreadyExists` error.
+/// If the guard is wrong (a pool exists but the query errored), the subsequent
+/// `clmm_factory.CreatePool` in the SAME atomic settle tx reverts on the
+/// duplicate — the pool is never double-created and no value is lost.
 fn query_clmm_pool(
     deps: Deps<InjectiveQueryWrapper>,
     clmm_factory: &cosmwasm_std::Addr,

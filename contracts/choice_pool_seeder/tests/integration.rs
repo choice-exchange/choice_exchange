@@ -1,4 +1,8 @@
 #![cfg(test)]
+// S-5: the XYK lifecycle tests (and their legacy-pair imports/helpers) are gated
+// behind `--features xyk`; in the default (production) build they compile out, so
+// silence the resulting unused-import/dead-code noise here rather than per-item.
+#![cfg_attr(not(feature = "xyk"), allow(unused_imports, dead_code))]
 //! Integration tests for `choice_pool_seeder` against `injective_test_tube`.
 //!
 //! Requires the optimised wasm artifacts in `artifacts/` — run `make build-all`
@@ -361,6 +365,10 @@ const INJ: &str = "inj";
 const CREATE_PAIR_FEE: u128 = 10_000_000_000_000_000_000;
 const SEED: u128 = 1_000_000_000;
 
+// S-5: XYK seed path — excluded from the default (production, no-`xyk`) build
+// that the deployed wasm uses. CLMM equivalent: `create_clmm_sink_then_settle_full_lifecycle`.
+// Run with `--features xyk`.
+#[cfg(feature = "xyk")]
 #[test]
 fn create_sink_then_settle_full_lifecycle() {
     let app = InjectiveTestApp::new();
@@ -582,6 +590,10 @@ struct SeederEnv {
 /// it. The pinned `choice_factory` is a plain account (these tests never reach
 /// `CreatePair`), but the sink's recorded `factory` is the real seeder factory
 /// contract, which answers `FactoryConfig` for the pause / force-refund checks.
+// S-5: builds an XYK sink — only the `#[cfg(feature = "xyk")]` tests below use it,
+// so it is gated too (refund/pause logic is also covered by the lib unit tests and
+// the CLMM integration lifecycle).
+#[cfg(feature = "xyk")]
 fn setup_seeder_with_sink() -> SeederEnv {
     let app = InjectiveTestApp::new();
     let wasm = Wasm::new(&app);
@@ -659,6 +671,7 @@ fn setup_seeder_with_sink() -> SeederEnv {
     }
 }
 
+#[cfg(feature = "xyk")] // uses the XYK `setup_seeder_with_sink`; refund logic also in lib tests
 #[test]
 fn force_refund_by_admin_bypasses_deadline() {
     let env = setup_seeder_with_sink();
@@ -718,6 +731,7 @@ fn force_refund_by_admin_bypasses_deadline() {
     );
 }
 
+#[cfg(feature = "xyk")] // uses the XYK `setup_seeder_with_sink`; pause logic also in lib tests
 #[test]
 fn paused_factory_blocks_create_and_settle() {
     let env = setup_seeder_with_sink();
@@ -1091,6 +1105,8 @@ fn create_clmm_sink_then_settle_full_lifecycle() {
 // the only SHROOM-specific choices (Burn LP, uncommitted seed) are config, not
 // code. Covers the two production-relevant paths the SHROOM-shaped lifecycle
 // tests don't: `SendTo` LP routing and committed-amount seeding on XYK.
+// S-5: XYK SendTo/committed-seed path — excluded from the production (no-`xyk`) build.
+#[cfg(feature = "xyk")]
 #[test]
 fn second_consumer_sendto_lp_and_committed_seed_xyk() {
     let app = InjectiveTestApp::new();

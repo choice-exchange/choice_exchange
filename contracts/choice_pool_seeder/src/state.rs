@@ -199,9 +199,41 @@ pub struct SinkState {
     pub status: SinkStatus,
     /// Pair created at `Settle` time — `None` until then. Read off
     /// `factory.Pair { asset_infos }` in the `ProvideLiquidity` callback.
+    /// XYK-only; a CLMM settle leaves this `None` (see `pool_addr`).
     pub pair_addr: Option<Addr>,
     /// LP minted at `ProvideLiquidity` — `None` until `DistributeLp` runs.
+    /// XYK-only; a CLMM settle leaves this `None`.
     pub lp_minted: Option<Uint128>,
+    /// OBSERVABILITY: the CLMM pool created at `Settle` time — `None` until a
+    /// successful CLMM settle records it (the `MintPosition` success reply).
+    /// XYK settles leave this `None` (they record `pair_addr` instead). Lets
+    /// consumers read the seeded pool address straight off the sink instead of
+    /// re-deriving it from the factory. `#[serde(default)]` so a sink stored by
+    /// a pre-observability build deserializes as `None` across a migrate.
+    #[serde(default)]
+    pub pool_addr: Option<Addr>,
+    /// OBSERVABILITY: the position NFT `token_id` minted to the locker at CLMM
+    /// `Settle` time — `None` until the `MintPosition` success reply parses it
+    /// out of the manager's emitted `token_id` attribute. XYK settles leave
+    /// this `None`. `#[serde(default)]` for the same migrate-safety reason.
+    #[serde(default)]
+    pub position_token_id: Option<String>,
+}
+
+/// OBSERVABILITY: transient context staged by `settle_clmm` for the
+/// `MintPosition` success reply. Carries the factory address + sorted token
+/// pair + fee so the reply can query the just-created pool's address
+/// (`GetPool`) and record it on `SinkState`. Written immediately before the
+/// mint sub-message dispatch and removed by the reply, so it is only ever
+/// present mid-settle (and would be rolled back with everything else if the
+/// settle tx reverts). `clmm` denoms are stored as `registry_key` strings to
+/// avoid taking a `ClmmAssetInfo` schema dependency in storage.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct PendingClmmMint {
+    pub clmm_factory: Addr,
+    pub token0_denom: String,
+    pub token1_denom: String,
+    pub fee: u32,
 }
 
 pub const ROLE: Item<Role> = Item::new("role");
@@ -209,3 +241,4 @@ pub const FACTORY_CONFIG: Item<FactoryConfig> = Item::new("factory_config");
 pub const SINK_CONFIG: Item<SinkConfig> = Item::new("sink_config");
 pub const SINK_STATE: Item<SinkState> = Item::new("sink_state");
 pub const LOCKER_CONFIG: Item<LockerConfig> = Item::new("locker_config");
+pub const PENDING_CLMM_MINT: Item<PendingClmmMint> = Item::new("pending_clmm_mint");

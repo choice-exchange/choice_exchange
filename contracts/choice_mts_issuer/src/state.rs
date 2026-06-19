@@ -184,3 +184,11 @@ pub const CONFIG: Item<Config> = Item::new("config");
 /// keeper-gate on `RegisterLaunch`, this closes the squat/collision class
 /// (finding C-H1). The key is `(&evm_authority, internal_id)`.
 pub const LAUNCHES: Map<(&Addr, u64), LaunchRecord> = Map::new("launches");
+
+/// Reverse index: fully-qualified launch `denom` → its `(evm_authority,
+/// internal_id)` `LAUNCHES` key. Written once at `RegisterLaunch` (the denom is
+/// globally unique — it embeds this issuer's address + the per-authority id +
+/// the Layer A salt). Lets indexers/integrators resolve a launch from just its
+/// bank denom (the EVM-facing identity is the ERC20, and the salt makes the
+/// denom unguessable, so a denom→record lookup is the only robust reverse path).
+pub const DENOM_INDEX: Map<&str, (Addr, u64)> = Map::new("denom_index");

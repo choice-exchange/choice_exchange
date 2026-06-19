@@ -27,8 +27,17 @@ pub enum ContractError {
     #[error("Subdenom prefix `{got}` is empty or exceeds the {max}-char cap")]
     SubdenomPrefixInvalid { got: String, max: usize },
 
-    #[error("salt_suffix `{got}` must be non-empty and ASCII-alphanumeric")]
+    #[error("salt_suffix is required (Layer A anti-squat entropy): every launch must carry a high-entropy per-launch salt so its denom + sink + locker addresses are unguessable")]
+    SaltSuffixRequired {},
+
+    #[error("salt_suffix `{got}` must be ASCII-alphanumeric and at least the minimum entropy length")]
     SaltSuffixInvalid { got: String },
+
+    #[error("forwarded CreateSink salt is not the canonical entropic sink salt (canonical(issuer) || be_u64(internal_id) || salt_suffix) — refusing to forward a non-entropic or mis-derived sink salt (anti-squat Layer A)")]
+    SinkSaltMismatch {},
+
+    #[error("clmm_pool_auth.ttl_seconds must be 0 (no-expiry reservation); got {got} — a lapsing reservation re-opens the CLMM pool-squat window (audit S-3)")]
+    ClmmAuthTtlMustBeZero { got: u64 },
 
     #[error(
         "Constructed subdenom `{subdenom}` is {len} chars, over the {max}-char tokenfactory cap"

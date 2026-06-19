@@ -16,6 +16,14 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 library = []
+# S-5: XYK graduation is code-present but DISABLED in the live SHROOM path
+# (LaunchpadCore.createLaunch rejects non-CLMM venues). This feature gates the
+# XYK seed path; it is intentionally NOT in `default`, so the production wasm
+# built by `./build_release.sh` (which passes no extra features) omits it and an
+# XYK sink instantiate/settle is rejected at runtime (`XykDisabled`). Enable it
+# only for the XYK unit tests / a deliberate XYK-capable build:
+#   cargo test  -p choice-pool-seeder --lib --features xyk
+xyk = []
 
 [dependencies]
 cw2                  = { version = "2.0.0" }

@@ -385,7 +385,8 @@ pub enum QueryMsg {
     /// Targeted query: errors with `WrongRole` if invoked on a factory.
     SinkConfig {},
     /// Sink-only mutable state: status (`Pending` / `Settled` / `Refunded`)
-    /// plus, if settled, the resulting pair address and LP minted amount.
+    /// plus, if settled, the resulting venue artifacts — `pair_addr` /
+    /// `lp_minted` for XYK, `pool_addr` / `position_token_id` for CLMM.
     SinkState {},
     /// Targeted query: errors with `WrongRole` unless invoked on a locker.
     LockerConfig {},
@@ -443,8 +444,17 @@ pub struct LockerConfigResponse {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SinkStateResponse {
     pub status: SinkStatus,
+    /// XYK-only: the pair created at settle. CLMM settles report `pool_addr`.
     pub pair_addr: Option<String>,
+    /// XYK-only: LP minted at settle.
     pub lp_minted: Option<Uint128>,
+    /// OBSERVABILITY: CLMM pool created at settle — `None` for XYK / pre-settle.
+    #[serde(default)]
+    pub pool_addr: Option<String>,
+    /// OBSERVABILITY: position NFT `token_id` minted to the locker at CLMM
+    /// settle — `None` for XYK / pre-settle.
+    #[serde(default)]
+    pub position_token_id: Option<String>,
 }
 
 /// Migration payload. Same `FromV1` / `Patch` split as

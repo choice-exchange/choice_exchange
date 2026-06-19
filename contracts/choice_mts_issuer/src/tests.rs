@@ -32,7 +32,8 @@ use crate::contract::{
 };
 use crate::error::ContractError;
 use crate::msg::{
-    ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchesResponse, MigrateMsg, QueryMsg,
+    ConfigResponse, ExecuteMsg, InstantiateMsg, LaunchResponse, LaunchesResponse, MigrateMsg,
+    QueryMsg,
 };
 use crate::proto::{
     MsgBurn, MsgChangeAdmin, MsgCreateDenom, MsgCreateTokenPair, MsgCreateTokenPairResponse,
@@ -49,6 +50,10 @@ const PREFIX: &str = "shroom";
 const PAIR_DENOM: &str = "factory/inj1pair/shroom";
 const REFUND_DEADLINE: u64 = 86_400;
 const CREATE_FEE_DENOM: &str = "inj";
+/// A valid Layer A `salt_suffix`: ASCII-alphanumeric and >= `MIN_SALT_SUFFIX_LEN`
+/// (8) chars. Every success-path `RegisterLaunch` must now carry one (the suffix
+/// is mandatory), and the launch denom always embeds it.
+const TEST_SALT: &str = "tstsalt00";
 /// 0.1 INJ — matches Injective mainnet's tokenfactory denom-creation fee.
 const CREATE_FEE: u128 = 100_000_000_000_000_000;
 
@@ -113,6 +118,7 @@ fn register_with_choice_factory(
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
+    // salt_suffix is mandatory now; the sink payload's token_denom must embed it.
     let payload = xyk_sink_payload(deps, internal_id);
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
@@ -125,7 +131,7 @@ fn register_with_choice_factory(
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: payload,
         choice_factory,
-        salt_suffix: None,
+        salt_suffix: Some(TEST_SALT.to_string()),
         clmm_pool_auth: None,
     };
     execute(deps.as_mut(), mock_env(), info, msg)
@@ -150,6 +156,12 @@ fn denom_with_salt(internal_id: u64, salt: &str) -> String {
     )
 }
 
+/// The launch denom for a default `register_default`/`register_with_choice_factory`
+/// launch — these always pass `TEST_SALT`, so the denom embeds it.
+fn default_denom(internal_id: u64) -> String {
+    denom_with_salt(internal_id, TEST_SALT)
+}
+
 /// Stub the seeder sink's `SinkConfig` so `DeliverToSeeder` (P2-B) sees a sink
 /// genuinely configured for launch `internal_id` (matching token/pair denom).
 /// Also marks the address as a hosting contract for the old ghost-check.
@@ -157,7 +169,7 @@ fn install_matching_sink(deps: &mut Deps, seeder: &str, internal_id: u64) {
     let cfg = SinkConfigResponse {
         factory: Some(deps.api.addr_make("seeder_factory").to_string()),
         issuer: mock_env().contract.address.to_string(),
-        token_denom: expected_denom(internal_id),
+        token_denom: default_denom(internal_id),
         pair_denom: PAIR_DENOM.to_string(),
         token_decimals: 18,
         pair_decimals: 18,
@@ -182,7 +194,7 @@ fn install_matching_sink(deps: &mut Deps, seeder: &str, internal_id: u64) {
 fn xyk_sink_payload(deps: &Deps, internal_id: u64) -> Binary {
     sink_payload(
         deps,
-        expected_denom(internal_id),
+        default_denom(internal_id),
         PoolKind::Xyk {
             choice_factory: deps.api.addr_make("choice_factory").to_string(),
             lp_destination: LpDestination::Burn,
@@ -301,7 +313,8 @@ fn instantiate_rejects_decimals_over_18() {
 fn register_launch_emits_expected_message_chain_and_persists_record() {
     let mut deps = setup();
     let res = register_default(&mut deps, 42).unwrap();
-    let denom = expected_denom(42);
+    // register_default carries the mandatory salt, so the denom embeds it.
+    let denom = default_denom(42);
 
     // 1 SubMsg (CreateTokenPair, ReplyOn::Success) + 5 plain messages.
     assert_eq!(res.messages.len(), 5);
@@ -364,7 +377,7 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
         CosmosMsg::Stargate { type_url, value } => {
             assert_eq!(type_url, MsgCreateDenom::TYPE_URL);
             let decoded = MsgCreateDenom::decode(value.as_slice()).unwrap();
-            assert_eq!(decoded.subdenom, format!("{}_{}", PREFIX, 42));
+            assert_eq!(decoded.subdenom, format!("{}_{}_{}", PREFIX, 42, TEST_SALT));
             assert!(
                 decoded.allow_admin_burn,
                 "Path B Leg A requires admin burn-from"
@@ -583,8 +596,9 @@ fn register_launch_with_choice_factory_chains_add_native_token_decimals() {
 
     // Locate the AddNativeTokenDecimals call: it's the WasmExec that targets
     // the choice_factory address (the OTHER WasmExec targets the seeder
-    // factory). Funds must include exactly 1 wei of the launch denom.
-    let denom = format!("factory/{}/{}_{}", mock_env().contract.address, PREFIX, 50);
+    // factory). Funds must include exactly 1 wei of the launch denom (which now
+    // embeds the mandatory salt).
+    let denom = default_denom(50);
     let add_msg = res
         .messages
         .iter()
@@ -650,7 +664,7 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
     let leftover_amt = Uint128::new(50_000_000u128) * Uint128::new(10u128.pow(18));
     deps.querier.with_balance(&[(
         &evm_authority,
-        coins(leftover_amt.u128(), &expected_denom(9)),
+        coins(leftover_amt.u128(), &default_denom(9)),
     )]);
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
@@ -664,7 +678,7 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
         },
     )
     .unwrap();
-    let denom = expected_denom(9);
+    let denom = default_denom(9);
 
     assert_eq!(res.messages.len(), 2);
     #[allow(deprecated)]
@@ -1172,6 +1186,60 @@ fn list_launches_query_returns_them_ordered() {
     assert_eq!(ids, vec![1, 3, 5]);
 }
 
+#[test]
+fn launch_by_denom_resolves_record_and_errors_on_unknown() {
+    let mut deps = setup();
+    register_default(&mut deps, 42).unwrap();
+    let denom = default_denom(42);
+
+    // The reverse index resolves the same record the (authority, id) path would.
+    let by_denom: LaunchResponse = from_json(
+        query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::LaunchByDenom {
+                denom: denom.clone(),
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(by_denom.internal_id, 42);
+    assert_eq!(by_denom.denom, denom);
+    assert_eq!(
+        by_denom.evm_authority,
+        deps.api.addr_make("evm_authority").to_string()
+    );
+
+    let direct: LaunchResponse = from_json(
+        query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::Launch {
+                evm_authority: deps.api.addr_make("evm_authority").to_string(),
+                internal_id: 42,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(by_denom, direct, "denom lookup matches the direct record");
+
+    // An unknown denom errors `not_found` rather than returning a stale record.
+    let err = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::LaunchByDenom {
+            denom: "factory/inj1bogus/never_registered".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, cosmwasm_std::StdError::NotFound { .. }),
+        "expected NotFound, got {err:?}"
+    );
+}
+
 // --------------------------------------------------------------------------
 // C-H1: keeper-gate + per-authority id namespace
 // --------------------------------------------------------------------------
@@ -1216,7 +1284,7 @@ fn two_authorities_share_internal_id_without_record_collision() {
     for auth in [&auth_a, &auth_b] {
         let payload = sink_payload(
             &deps,
-            expected_denom(0),
+            default_denom(0),
             PoolKind::Xyk {
                 choice_factory: deps.api.addr_make("choice_factory").to_string(),
                 lp_destination: LpDestination::Burn,
@@ -1233,7 +1301,7 @@ fn two_authorities_share_internal_id_without_record_collision() {
             seeder_addr: seeder_addr.clone(),
             create_sink_payload: payload.clone(),
             choice_factory: None,
-            salt_suffix: None,
+            salt_suffix: Some(TEST_SALT.to_string()),
             clmm_pool_auth: None,
         };
         execute(
@@ -1302,7 +1370,7 @@ fn renounce_denom_admin_after_delivered_emits_change_admin() {
         CosmosMsg::Stargate { type_url, value } => {
             assert_eq!(type_url, MsgChangeAdmin::TYPE_URL);
             let decoded = MsgChangeAdmin::decode(value.as_slice()).unwrap();
-            assert_eq!(decoded.denom, expected_denom(5));
+            assert_eq!(decoded.denom, default_denom(5));
             assert_eq!(
                 decoded.new_admin,
                 "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49"
@@ -1499,7 +1567,9 @@ fn register_full(
 #[test]
 fn register_launch_salt_suffix_changes_denom() {
     let mut deps = setup();
-    let res = register_full(&mut deps, 42, Some("a1b2c3".to_string()), None).unwrap();
+    // The salt is mandatory and must be >= MIN_SALT_SUFFIX_LEN (8) alnum chars.
+    let salt = "a1b2c3d4";
+    let res = register_full(&mut deps, 42, Some(salt.to_string()), None).unwrap();
 
     // Still the legacy 5-message chain (entropy only changes the denom string).
     assert_eq!(res.messages.len(), 5);
@@ -1509,7 +1579,7 @@ fn register_launch_salt_suffix_changes_denom() {
         mock_env().contract.address,
         PREFIX,
         42,
-        "a1b2c3"
+        salt
     );
     let stored = LAUNCHES
         .load(
@@ -1530,7 +1600,7 @@ fn register_launch_salt_suffix_changes_denom() {
     match plain[0] {
         CosmosMsg::Stargate { value, .. } => {
             let decoded = MsgCreateDenom::decode(value.as_slice()).unwrap();
-            assert_eq!(decoded.subdenom, format!("{}_{}_{}", PREFIX, 42, "a1b2c3"));
+            assert_eq!(decoded.subdenom, format!("{}_{}_{}", PREFIX, 42, salt));
         }
         other => panic!("expected Stargate CreateDenom, got {:?}", other),
     }
@@ -1576,12 +1646,12 @@ fn register_launch_clmm_pool_auth_emits_authorize_creation() {
         fee: 3000,
         ttl_seconds: 0,
     };
-    let res = register_full(&mut deps, 42, None, Some(auth)).unwrap();
+    let res = register_full(&mut deps, 42, Some(TEST_SALT.to_string()), Some(auth)).unwrap();
 
     // The gate adds one extra WasmExec to the legacy 5-message chain.
     assert_eq!(res.messages.len(), 6);
 
-    let denom = expected_denom(42);
+    let denom = denom_with_salt(42, TEST_SALT);
     let seeder_addr = deps.api.addr_make("seeder_addr").to_string();
 
     // Find the AuthorizeCreation message (the WasmExec aimed at the CLMM factory).
@@ -1627,11 +1697,51 @@ fn register_launch_clmm_pool_auth_emits_authorize_creation() {
 #[test]
 fn register_launch_without_clmm_pool_auth_keeps_legacy_chain() {
     let mut deps = setup();
-    let res = register_full(&mut deps, 42, None, None).unwrap();
+    let res = register_full(&mut deps, 42, Some(TEST_SALT.to_string()), None).unwrap();
     assert_eq!(
         res.messages.len(),
         5,
         "no auth message when clmm_pool_auth is None"
+    );
+}
+
+#[test]
+fn register_launch_rejects_nonzero_clmm_auth_ttl() {
+    // S-3: a lapsing pool reservation re-opens the CLMM squat window, so the
+    // issuer requires `ttl_seconds == 0` (no-expiry reservation).
+    let mut deps = setup();
+    let auth = crate::msg::ClmmPoolAuth {
+        clmm_factory: deps.api.addr_make("clmm_factory").to_string(),
+        fee: 3000,
+        ttl_seconds: 3_600,
+    };
+    let err = register_full(&mut deps, 42, Some(TEST_SALT.to_string()), Some(auth)).unwrap_err();
+    assert!(
+        matches!(err, ContractError::ClmmAuthTtlMustBeZero { got: 3_600 }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn register_launch_rejects_missing_salt_suffix() {
+    // salt_suffix is mandatory now (Layer A anti-squat entropy): None is refused.
+    let mut deps = setup();
+    let err = register_full(&mut deps, 1, None, None).unwrap_err();
+    assert!(
+        matches!(err, ContractError::SaltSuffixRequired {}),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn register_launch_rejects_too_short_salt_suffix() {
+    // A salt below MIN_SALT_SUFFIX_LEN (8) chars is rejected even though it's
+    // ASCII-alphanumeric.
+    let mut deps = setup();
+    let err = register_full(&mut deps, 1, Some("a1b2c3".to_string()), None).unwrap_err();
+    assert!(
+        matches!(err, ContractError::SaltSuffixInvalid { .. }),
+        "{err:?}"
     );
 }
 
@@ -1660,7 +1770,9 @@ fn register_raw(
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload,
         choice_factory: None,
-        salt_suffix: None,
+        // salt_suffix is mandatory; callers that want to reach the payload-decode
+        // / auth checks must build their payload's token_denom with TEST_SALT.
+        salt_suffix: Some(TEST_SALT.to_string()),
         clmm_pool_auth,
     };
     execute(deps.as_mut(), mock_env(), info, msg)
@@ -1670,7 +1782,7 @@ fn register_raw(
 fn register_launch_rejects_clmm_payload_without_auth() {
     let mut deps = setup();
     let clmm_factory = deps.api.addr_make("clmm_factory").to_string();
-    let payload = clmm_sink_payload(&deps, expected_denom(1), clmm_factory, 3000);
+    let payload = clmm_sink_payload(&deps, denom_with_salt(1, TEST_SALT), clmm_factory, 3000);
     // CLMM sink but no reservation → squattable slot, must be refused.
     let err = register_raw(&mut deps, 1, payload, None).unwrap_err();
     assert!(matches!(err, ContractError::ClmmAuthRequired {}), "{err:?}");
@@ -1681,7 +1793,7 @@ fn register_launch_rejects_clmm_auth_fee_mismatch() {
     let mut deps = setup();
     let clmm_factory = deps.api.addr_make("clmm_factory").to_string();
     // Sink seeds the 3000 tier but the reservation guards the 500 tier.
-    let payload = clmm_sink_payload(&deps, expected_denom(1), clmm_factory.clone(), 3000);
+    let payload = clmm_sink_payload(&deps, denom_with_salt(1, TEST_SALT), clmm_factory.clone(), 3000);
     let auth = crate::msg::ClmmPoolAuth {
         clmm_factory,
         fee: 500,
@@ -1704,7 +1816,7 @@ fn register_launch_rejects_clmm_auth_fee_mismatch() {
 fn register_launch_rejects_clmm_auth_factory_mismatch() {
     let mut deps = setup();
     let sink_factory = deps.api.addr_make("clmm_factory_a").to_string();
-    let payload = clmm_sink_payload(&deps, expected_denom(1), sink_factory, 3000);
+    let payload = clmm_sink_payload(&deps, denom_with_salt(1, TEST_SALT), sink_factory, 3000);
     let auth = crate::msg::ClmmPoolAuth {
         clmm_factory: deps.api.addr_make("clmm_factory_b").to_string(),
         fee: 3000,
@@ -1774,6 +1886,55 @@ fn deliver_to_seeder_rejects_sink_configured_for_a_different_launch() {
     let seeder = deps.api.addr_make("seeder_addr").to_string();
     // Sink claims token_denom of launch 999, not launch 21.
     install_matching_sink(&mut deps, &seeder, 999);
+    let keeper = deps.api.addr_make("keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::DeliverToSeeder {
+            evm_authority,
+            internal_id: 21,
+            leftover: Uint128::zero(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SeederSinkConfigMismatch { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn deliver_to_seeder_rejects_sink_with_wrong_issuer() {
+    // S-6: even a denom/pair-matching sink must name THIS issuer as its `issuer`,
+    // so `cw_held` can only ship to a sink that was created to be fed by us.
+    let mut deps = setup();
+    register_default(&mut deps, 21).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+
+    // A sink whose denom/pair match launch 21 but whose `issuer` is some other
+    // contract — a denom-matching look-alike under attacker control.
+    let cfg = SinkConfigResponse {
+        factory: Some(deps.api.addr_make("seeder_factory").to_string()),
+        issuer: deps.api.addr_make("other_issuer").to_string(),
+        token_denom: default_denom(21),
+        pair_denom: PAIR_DENOM.to_string(),
+        token_decimals: 18,
+        pair_decimals: 18,
+        pool_kind: PoolKind::Xyk {
+            choice_factory: deps.api.addr_make("choice_factory").to_string(),
+            lp_destination: LpDestination::Burn,
+        },
+        refund_receiver: deps.api.addr_make("refund_receiver").to_string(),
+        deadline_seconds: REFUND_DEADLINE,
+        instantiated_at: 0,
+        expected_token: None,
+        expected_pair: None,
+    };
+    deps.querier
+        .with_smart_query_response(&seeder, to_json_binary(&cfg).unwrap());
+
     let keeper = deps.api.addr_make("keeper");
     let err = execute(
         deps.as_mut(),
@@ -1873,6 +2034,22 @@ fn instantiate_issuer(deps: &mut Deps) {
     instantiate(deps.as_mut(), mock_env(), message_info(&admin, &[]), msg).unwrap();
 }
 
+/// The canonical entropic sink `Instantiate2` salt the contract now requires the
+/// forwarded `CreateSink` to carry (verify ON):
+/// `canonical(issuer) || be_u64(internal_id) || salt_suffix`. Mirrors the
+/// contract's `sink_salt_bytes`. `salt_suffix` must be the same mandatory Layer A
+/// suffix folded into the launch denom.
+fn canonical_sink_salt(api: &MockApi, internal_id: u64, salt_suffix: &str) -> Binary {
+    let issuer_canon = api
+        .addr_canonicalize(mock_env().contract.address.as_str())
+        .unwrap();
+    let mut salt = Vec::new();
+    salt.extend_from_slice(issuer_canon.as_slice());
+    salt.extend_from_slice(&internal_id.to_be_bytes());
+    salt.extend_from_slice(salt_suffix.as_bytes());
+    Binary::new(salt)
+}
+
 /// Recompute the sink `Instantiate2` address exactly as the contract does:
 /// the full 32-byte wasmd hash truncated to Injective's 20-byte width, then
 /// humanized through the same `MockApi`.
@@ -1903,13 +2080,14 @@ fn install_seeder_factory(deps: &mut Deps, salt: &Binary) -> String {
     derive_sink_addr(&deps.api, seeder_factory.as_str(), salt)
 }
 
-/// Build a coherent XYK `CreateSink` payload carrying `salt` for launch `id`.
-fn salted_xyk_payload(deps: &Deps, internal_id: u64, salt: Binary) -> Binary {
+/// Build a coherent XYK `CreateSink` payload carrying the canonical `salt` for
+/// launch `id` whose `token_denom` embeds the mandatory `salt_suffix`.
+fn salted_xyk_payload(deps: &Deps, internal_id: u64, salt_suffix: &str) -> Binary {
     to_json_binary(&SeederExecuteMsg::CreateSink {
-        salt,
+        salt: canonical_sink_salt(&deps.api, internal_id, salt_suffix),
         sink_init: SinkInit {
             issuer: mock_env().contract.address.to_string(),
-            token_denom: expected_denom(internal_id),
+            token_denom: denom_with_salt(internal_id, salt_suffix),
             pair_denom: PAIR_DENOM.to_string(),
             token_decimals: 18,
             pair_decimals: 18,
@@ -1927,16 +2105,18 @@ fn salted_xyk_payload(deps: &Deps, internal_id: u64, salt: Binary) -> Binary {
     .unwrap()
 }
 
-/// `RegisterLaunch` with an explicit `seeder_addr` + `salt` (verification ON).
+/// `RegisterLaunch` with an explicit `seeder_addr` + mandatory `salt_suffix`
+/// (verification ON). The forwarded sink salt is derived canonically from the
+/// suffix so it satisfies the Layer A sink-salt-convention check.
 fn register_with_seeder(
     deps: &mut Deps,
     internal_id: u64,
     seeder_addr: String,
-    salt: Binary,
+    salt_suffix: &str,
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
-    let payload = salted_xyk_payload(deps, internal_id, salt);
+    let payload = salted_xyk_payload(deps, internal_id, salt_suffix);
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
@@ -1947,7 +2127,7 @@ fn register_with_seeder(
         seeder_addr,
         create_sink_payload: payload,
         choice_factory: None,
-        salt_suffix: None,
+        salt_suffix: Some(salt_suffix.to_string()),
         clmm_pool_auth: None,
     };
     execute(deps.as_mut(), mock_env(), info, msg)
@@ -1969,11 +2149,13 @@ fn instantiate_defaults_verify_seeder_derivation_on() {
 fn register_launch_verify_accepts_derived_seeder_addr() {
     let mut deps = new_deps();
     instantiate_issuer(&mut deps);
-    let salt = Binary::from(b"salt-for-launch-77".to_vec());
+    // The forwarded sink salt must be the canonical entropic salt derived from
+    // the mandatory salt_suffix.
+    let salt = canonical_sink_salt(&deps.api, 77, TEST_SALT);
     let sink = install_seeder_factory(&mut deps, &salt);
 
     // The keeper supplies the correctly-derived sink address → accepted.
-    register_with_seeder(&mut deps, 77, sink.clone(), salt).unwrap();
+    register_with_seeder(&mut deps, 77, sink.clone(), TEST_SALT).unwrap();
 
     let rec = LAUNCHES
         .load(&deps.storage, (&deps.api.addr_make("evm_authority"), 77))
@@ -1986,14 +2168,14 @@ fn register_launch_verify_accepts_derived_seeder_addr() {
 fn register_launch_verify_rejects_lookalike_seeder_addr() {
     let mut deps = new_deps();
     instantiate_issuer(&mut deps);
-    let salt = Binary::from(b"salt-for-launch-77".to_vec());
+    let salt = canonical_sink_salt(&deps.api, 77, TEST_SALT);
     let _correct = install_seeder_factory(&mut deps, &salt);
 
     // A fully-compromised keeper points at a denom-matching look-alike sink it
     // controls (any address other than the derived one). With derivation ON the
     // issuer recomputes the real sink and rejects the substitution.
     let lookalike = deps.api.addr_make("attacker_sink").to_string();
-    let err = register_with_seeder(&mut deps, 77, lookalike, salt).unwrap_err();
+    let err = register_with_seeder(&mut deps, 77, lookalike, TEST_SALT).unwrap_err();
     assert!(
         matches!(err, ContractError::SeederAddrDerivationMismatch { .. }),
         "expected SeederAddrDerivationMismatch, got {err:?}"
@@ -2005,10 +2187,11 @@ fn register_launch_verify_errors_when_factory_config_unavailable() {
     let mut deps = new_deps();
     instantiate_issuer(&mut deps);
     // No FactoryConfig/CodeInfo stub → the factory query fails and registration
-    // reverts (rather than silently trusting the keeper address).
-    let salt = Binary::from(b"salt-for-launch-77".to_vec());
+    // reverts (rather than silently trusting the keeper address). The forwarded
+    // sink salt is still canonical, so the salt-convention check passes and the
+    // revert comes from the (unstubbed) factory query, as intended.
     let sink = deps.api.addr_make("seeder_addr").to_string();
-    let err = register_with_seeder(&mut deps, 77, sink, salt).unwrap_err();
+    let err = register_with_seeder(&mut deps, 77, sink, TEST_SALT).unwrap_err();
     assert!(
         matches!(err, ContractError::SeederFactoryConfigQuery { .. }),
         "expected SeederFactoryConfigQuery, got {err:?}"
@@ -2027,9 +2210,11 @@ fn register_launch_rejects_refund_receiver_mismatch() {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     // Payload whose refund_receiver is an attacker address, not the authority.
+    // token_denom must carry the mandatory salt so the launch reaches the
+    // refund_receiver check rather than tripping the token_denom mismatch first.
     let payload = sink_payload(
         &deps,
-        expected_denom(5),
+        denom_with_salt(5, TEST_SALT),
         PoolKind::Xyk {
             choice_factory: deps.api.addr_make("choice_factory").to_string(),
             lp_destination: LpDestination::Burn,
@@ -2046,7 +2231,7 @@ fn register_launch_rejects_refund_receiver_mismatch() {
         seeder_addr: deps.api.addr_make("seeder_addr").to_string(),
         create_sink_payload: payload,
         choice_factory: None,
-        salt_suffix: None,
+        salt_suffix: Some(TEST_SALT.to_string()),
         clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
@@ -2057,8 +2242,9 @@ fn register_launch_rejects_refund_receiver_mismatch() {
 }
 
 /// Recompute the LOCKER `Instantiate2` address the contract pins
-/// `position_recipient` to: salt = `b"locker" || canonical(issuer) || be(id)`.
-fn derive_locker_addr(api: &MockApi, seeder_factory: &str, internal_id: u64) -> String {
+/// `position_recipient` to: salt = `b"locker" || canonical(issuer) || be(id) ||
+/// salt_suffix` (the locker salt now shares the mandatory Layer A suffix).
+fn derive_locker_addr(api: &MockApi, seeder_factory: &str, internal_id: u64, salt_suffix: &str) -> String {
     let issuer_canon = api
         .addr_canonicalize(mock_env().contract.address.as_str())
         .unwrap();
@@ -2066,6 +2252,7 @@ fn derive_locker_addr(api: &MockApi, seeder_factory: &str, internal_id: u64) -> 
     salt.extend_from_slice(b"locker");
     salt.extend_from_slice(issuer_canon.as_slice());
     salt.extend_from_slice(&internal_id.to_be_bytes());
+    salt.extend_from_slice(salt_suffix.as_bytes());
     let creator = api.addr_canonicalize(seeder_factory).unwrap();
     let full = instantiate2_address(&SINK_CHECKSUM, &creator, &salt).unwrap();
     let canon: CanonicalAddr = full.as_slice()[..20].into();
@@ -2073,17 +2260,18 @@ fn derive_locker_addr(api: &MockApi, seeder_factory: &str, internal_id: u64) -> 
 }
 
 /// Build a verify-on CLMM `CreateSink` payload with a chosen `position_recipient`.
+/// The forwarded sink salt is canonical and the token_denom embeds the suffix.
 fn salted_clmm_payload(
     deps: &Deps,
     internal_id: u64,
-    salt: Binary,
+    salt_suffix: &str,
     position_recipient: String,
 ) -> Binary {
     to_json_binary(&SeederExecuteMsg::CreateSink {
-        salt,
+        salt: canonical_sink_salt(&deps.api, internal_id, salt_suffix),
         sink_init: SinkInit {
             issuer: mock_env().contract.address.to_string(),
-            token_denom: expected_denom(internal_id),
+            token_denom: denom_with_salt(internal_id, salt_suffix),
             pair_denom: PAIR_DENOM.to_string(),
             token_decimals: 18,
             pair_decimals: 18,
@@ -2107,12 +2295,12 @@ fn register_clmm_verify(
     deps: &mut Deps,
     internal_id: u64,
     seeder_addr: String,
-    salt: Binary,
+    salt_suffix: &str,
     position_recipient: String,
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
-    let payload = salted_clmm_payload(deps, internal_id, salt, position_recipient);
+    let payload = salted_clmm_payload(deps, internal_id, salt_suffix, position_recipient);
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
@@ -2123,7 +2311,7 @@ fn register_clmm_verify(
         seeder_addr,
         create_sink_payload: payload,
         choice_factory: None,
-        salt_suffix: None,
+        salt_suffix: Some(salt_suffix.to_string()),
         clmm_pool_auth: Some(crate::msg::ClmmPoolAuth {
             clmm_factory: deps.api.addr_make("clmm_factory").to_string(),
             fee: 3000,
@@ -2140,21 +2328,28 @@ fn register_clmm_verify(
 fn register_launch_verify_pins_clmm_position_recipient() {
     let mut deps = new_deps();
     instantiate_issuer(&mut deps);
-    let salt = Binary::from(b"clmm-launch-88".to_vec());
-    let sink = install_seeder_factory(&mut deps, &salt);
     let seeder_factory = deps.api.addr_make("seeder_factory").to_string();
-    let locker = derive_locker_addr(&deps.api, &seeder_factory, 88);
+
+    // The canonical sink salt embeds the internal_id, so each launch derives its
+    // own sink. Stub the factory and derive the per-launch sink + locker.
+    let salt_88 = canonical_sink_salt(&deps.api, 88, TEST_SALT);
+    let sink_88 = install_seeder_factory(&mut deps, &salt_88);
+    let locker_88 = derive_locker_addr(&deps.api, &seeder_factory, 88, TEST_SALT);
 
     // Correct derived locker → accepted.
-    register_clmm_verify(&mut deps, 88, sink.clone(), salt.clone(), locker).unwrap();
+    register_clmm_verify(&mut deps, 88, sink_88, TEST_SALT, locker_88).unwrap();
     let rec = LAUNCHES
         .load(&deps.storage, (&deps.api.addr_make("evm_authority"), 88))
         .unwrap();
     assert_eq!(rec.status, LaunchStatus::Registered);
 
-    // Attacker-owned recipient at the same (valid) sink → rejected.
+    // Attacker-owned recipient at the (valid, correctly-derived) sink for id 89 →
+    // the locker pin rejects it (sink salt + addr still canonical so we reach the
+    // locker check, not an earlier guard).
+    let salt_89 = canonical_sink_salt(&deps.api, 89, TEST_SALT);
+    let sink_89 = install_seeder_factory(&mut deps, &salt_89);
     let attacker = deps.api.addr_make("attacker").to_string();
-    let err = register_clmm_verify(&mut deps, 89, sink, salt, attacker).unwrap_err();
+    let err = register_clmm_verify(&mut deps, 89, sink_89, TEST_SALT, attacker).unwrap_err();
     assert!(
         matches!(err, ContractError::LockerAddrDerivationMismatch { .. }),
         "expected LockerAddrDerivationMismatch, got {err:?}"
@@ -2264,8 +2459,8 @@ fn set_verify_seeder_derivation_admin_only_and_toggles() {
     assert!(!cfg.verify_seeder_derivation);
 
     // With the check OFF, a look-alike `seeder_addr` is accepted (v1 trust model)
-    // — confirms the toggle actually gates the derivation path.
-    let salt = Binary::from(b"whatever".to_vec());
+    // — confirms the toggle actually gates the derivation path. The salt_suffix is
+    // still mandatory and the payload's token_denom must embed it.
     let lookalike = deps.api.addr_make("any_sink").to_string();
-    register_with_seeder(&mut deps, 88, lookalike, salt).unwrap();
+    register_with_seeder(&mut deps, 88, lookalike, TEST_SALT).unwrap();
 }
