@@ -906,6 +906,19 @@ fn settle_clmm(
         return Err(ContractError::UnexpectedFundsForClmmSettle {});
     }
 
+    // S-x (this session): a CLMM sink MUST have committed seed amounts, else the
+    // `resolve_seed` fallback would seed the whole live balance — donation-
+    // repriceable by anyone who bank-sends to the sink before settle. The factory
+    // `CreateSink` path already requires committed amounts for CLMM; this guards
+    // the direct-instantiate (`instantiate_sink`) path too, so the uncommitted
+    // donation-repriceable settle branch no longer exists for CLMM. An
+    // uncommitted CLMM sink can still be instantiated but can only ever `Refund`,
+    // never seed a mispriced pool. (XYK keeps its uncommitted legacy path behind
+    // the `xyk` feature gate.)
+    if cfg.expected_token.is_none() || cfg.expected_pair.is_none() {
+        return Err(ContractError::CommittedAmountsRequiredForClmm {});
+    }
+
     let ClmmSettleParams {
         clmm_factory,
         clmm_manager,

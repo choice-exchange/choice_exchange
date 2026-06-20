@@ -505,20 +505,30 @@ fn execute_register_launch(
             return Err(ContractError::SinkSaltMismatch {});
         }
         verify_seeder_addr_derivation(deps.as_ref(), &seeder_factory, &seeder_addr, &sink_salt)?;
-        // H-1: a CLMM launch additionally pins `position_recipient` to the
-        // derived per-launch locker, so the locked-LP position NFT can only ever
-        // mint to a no-withdraw locker — never to a keeper-chosen address. The
-        // locker salt shares the same `salt_suffix` entropy as the sink.
-        if let Some(ref position_recipient) = clmm_position_recipient {
-            verify_locker_addr_derivation(
-                deps.as_ref(),
-                &env,
-                &seeder_factory,
-                position_recipient,
-                internal_id,
-                salt,
-            )?;
-        }
+    }
+
+    // H-1 / LOW-1 (this session): pin a CLMM launch's `position_recipient` to the
+    // derived per-launch locker UNCONDITIONALLY — even during a
+    // `verify_seeder_derivation` escape-hatch window — so the locked-LP position
+    // NFT can only ever mint to a no-withdraw locker, never to a keeper-chosen
+    // address. The locker salt shares the same `salt_suffix` entropy as the sink.
+    //
+    // Why outside the `verify_seeder_derivation` block (unlike before, like the
+    // `refund_receiver` pin above): the EVM-side sink-derivation arming pins the
+    // sink ADDRESS but cannot see this CW-side `position_recipient` field, so an
+    // unpinned recipient is an LP-theft vector a compromised keeper can reach even
+    // with the EVM core armed. Fund-safety here outweighs the escape hatch's
+    // ability to bypass a broken locker derivation — if the (shared) factory-
+    // checksum derivation were itself broken you would redeploy, not run launches.
+    if let Some(ref position_recipient) = clmm_position_recipient {
+        verify_locker_addr_derivation(
+            deps.as_ref(),
+            &env,
+            &seeder_factory,
+            position_recipient,
+            internal_id,
+            salt,
+        )?;
     }
 
     // Persist the record up front. `erc20_address` lands in the reply

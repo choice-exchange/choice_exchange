@@ -1639,20 +1639,26 @@ fn register_launch_rejects_overlong_subdenom() {
 
 #[test]
 fn register_launch_clmm_pool_auth_emits_authorize_creation() {
-    let mut deps = setup();
+    // LOW-1 (this session): the CLMM locker `position_recipient` pin now runs
+    // UNCONDITIONALLY (no longer gated on `verify_seeder_derivation`), so this
+    // CLMM register must go through the verify-ON harness — stub the factory
+    // queries + supply the correctly-derived sink/locker — rather than the
+    // `setup()` (verify-OFF) placeholder path it used before.
+    let mut deps = new_deps();
+    instantiate_issuer(&mut deps);
     let clmm_factory = deps.api.addr_make("clmm_factory");
-    let auth = crate::msg::ClmmPoolAuth {
-        clmm_factory: clmm_factory.to_string(),
-        fee: 3000,
-        ttl_seconds: 0,
-    };
-    let res = register_full(&mut deps, 42, Some(TEST_SALT.to_string()), Some(auth)).unwrap();
+    let seeder_factory = deps.api.addr_make("seeder_factory").to_string();
+
+    let salt = canonical_sink_salt(&deps.api, 42, TEST_SALT);
+    let seeder_addr = install_seeder_factory(&mut deps, &salt);
+    let locker = derive_locker_addr(&deps.api, &seeder_factory, 42, TEST_SALT);
+
+    let res = register_clmm_verify(&mut deps, 42, seeder_addr.clone(), TEST_SALT, locker).unwrap();
 
     // The gate adds one extra WasmExec to the legacy 5-message chain.
     assert_eq!(res.messages.len(), 6);
 
     let denom = denom_with_salt(42, TEST_SALT);
-    let seeder_addr = deps.api.addr_make("seeder_addr").to_string();
 
     // Find the AuthorizeCreation message (the WasmExec aimed at the CLMM factory).
     let found = res.messages.iter().find_map(|sm| match &sm.msg {

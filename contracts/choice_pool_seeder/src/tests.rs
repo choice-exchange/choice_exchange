@@ -108,11 +108,13 @@ fn clmm_pool_kind(api: &MockApi) -> PoolKind {
 
 /// Default sink init. S-5: XYK is disabled in the default build, so the generic
 /// sink the venue-agnostic tests (refund / role / admin / query / migrate) lean
-/// on is now a CLMM sink. The direct-instantiate path accepts a CLMM sink with
-/// no committed amounts (the committed-amounts requirement is enforced only on
-/// the factory `CreateSink` path), so refund/route tests keep their original
-/// uncommitted semantics. XYK-specific tests build their own XYK sink via
-/// `make_sink_init_xyk` and are gated behind `--features xyk`.
+/// on is now a CLMM sink. The direct-instantiate path still ACCEPTS a CLMM sink
+/// with no committed amounts — the committed requirement is enforced at the
+/// factory `CreateSink` path and, now, at `settle_clmm` (an uncommitted CLMM sink
+/// can be created but never settled). So the venue-agnostic tests, which never
+/// settle, keep their uncommitted semantics; CLMM settle tests commit their seed
+/// amounts via `instantiate_clmm_sink_committed`. XYK-specific tests build their
+/// own XYK sink via `make_sink_init_xyk` and are gated behind `--features xyk`.
 fn make_sink_init(api: &MockApi) -> SinkInit {
     SinkInit {
         issuer: api.addr_make("issuer").to_string(),
@@ -1735,9 +1737,15 @@ fn default_tiers() -> Vec<FeeTierEntry> {
     ]
 }
 
-fn instantiate_clmm_sink(deps: &mut ClmmDeps) {
+/// Instantiate a CLMM sink committed to exactly (`expected_token`,
+/// `expected_pair`). `settle_clmm` now REJECTS an uncommitted CLMM sink (the
+/// donation-repriceable whole-balance seed path is gone for CLMM), so every CLMM
+/// settle test commits its seed amounts.
+fn instantiate_clmm_sink_committed(deps: &mut ClmmDeps, expected_token: u128, expected_pair: u128) {
     let mut init = make_sink_init(&deps.api);
     init.pool_kind = clmm_pool_kind(&deps.api);
+    init.expected_token = Some(Uint128::new(expected_token));
+    init.expected_pair = Some(Uint128::new(expected_pair));
     let caller = deps.api.addr_make("factory_caller");
     instantiate(
         deps.as_mut(),
@@ -1746,6 +1754,13 @@ fn instantiate_clmm_sink(deps: &mut ClmmDeps) {
         InstantiateMsg::Sink(init),
     )
     .unwrap();
+}
+
+/// CLMM sink committed to the standard `settle_balances()` amounts. With
+/// committed == available the committed-seed path seeds the whole balance, so
+/// the settle tests below keep their original (uncommitted-era) seed assertions.
+fn instantiate_clmm_sink(deps: &mut ClmmDeps) {
+    instantiate_clmm_sink_committed(deps, 1_000_000_000_000u128, 800_000_000u128);
 }
 
 #[test]
@@ -1870,6 +1885,120 @@ fn clmm_settle_emits_create_pool_mint_and_sweep() {
 }
 
 #[test]
+fn clmm_settle_committed_ignores_donation_and_seeds_exact() {
+    // The committed-amount CLMM settle path on the DEFAULT (no-xyk) build. A fat
+    // donation lands on BOTH legs after instantiation; the mint must draw EXACTLY
+    // the committed amounts and leave the surplus for SweepDust — so a donation
+    // bank-sent to the sink can't reprice the graduated pool. (The XYK analogue
+    // `settle_committed_ignores_donation_and_seeds_exact` is `--features xyk`-gated;
+    // this is the regression test for the production CLMM venue.)
+    let committed_token = 1_000_000_000_000u128;
+    let committed_pair = 800_000_000u128;
+    let balances = vec![
+        coin(committed_token + 500_000_000_000, TOKEN_DENOM),
+        coin(committed_pair + 250_000_000, PAIR_DENOM),
+    ];
+    let mut deps = clmm_settle_deps(balances, default_tiers(), None);
+    instantiate_clmm_sink_committed(&mut deps, committed_token, committed_pair);
+
+    let caller = deps.api.addr_make("cranker");
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap();
+
+    // [1] is the MintPosition; its attached funds must equal the committed amounts
+    // on BOTH legs, ignoring the donation.
+    let funds = match &res.messages[1].msg {
+        CosmosMsg::Wasm(WasmMsg::Execute { funds, .. }) => funds.clone(),
+        other => panic!("expected MintPosition exec, got {:?}", other),
+    };
+    let total_token: Uint128 = funds
+        .iter()
+        .filter(|c| c.denom == TOKEN_DENOM)
+        .map(|c| c.amount)
+        .sum();
+    let total_pair: Uint128 = funds
+        .iter()
+        .filter(|c| c.denom == PAIR_DENOM)
+        .map(|c| c.amount)
+        .sum();
+    assert_eq!(
+        total_token,
+        Uint128::new(committed_token),
+        "token leg must be the committed amount, not the donated balance"
+    );
+    assert_eq!(
+        total_pair,
+        Uint128::new(committed_pair),
+        "pair leg must be the committed amount, not the donated balance"
+    );
+}
+
+#[test]
+fn clmm_settle_committed_reverts_on_partial_deposit() {
+    // If the full graduation deposit hasn't landed (a committed leg is short of
+    // its commitment) the CLMM settle refuses rather than seed a skewed pool.
+    let committed_token = 1_000_000_000_000u128;
+    let committed_pair = 800_000_000u128;
+    let balances = vec![
+        coin(committed_token, TOKEN_DENOM),
+        coin(committed_pair - 1, PAIR_DENOM), // pair leg one unit short
+    ];
+    let mut deps = clmm_settle_deps(balances, default_tiers(), None);
+    instantiate_clmm_sink_committed(&mut deps, committed_token, committed_pair);
+
+    let caller = deps.api.addr_make("cranker");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&caller, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SeedBelowCommitted { ref which, .. } if which == "pair"),
+        "expected SeedBelowCommitted(pair), got {err:?}"
+    );
+}
+
+#[test]
+fn settle_clmm_rejects_uncommitted_sink() {
+    // Item-6 hardening: a CLMM sink with no committed seed amounts can still be
+    // instantiated (the direct-instantiate debug path), but can NEVER settle — the
+    // donation-repriceable whole-balance seed branch no longer exists for CLMM.
+    let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), None);
+    // `make_sink_init` leaves expected_* = None; instantiation succeeds.
+    let mut init = make_sink_init(&deps.api);
+    init.pool_kind = clmm_pool_kind(&deps.api);
+    let factory_caller = deps.api.addr_make("factory_caller");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&factory_caller, &[]),
+        InstantiateMsg::Sink(init),
+    )
+    .unwrap();
+
+    // Settle is rejected for the uncommitted CLMM sink.
+    let cranker = deps.api.addr_make("cranker");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&cranker, &[]),
+        ExecuteMsg::Settle {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::CommittedAmountsRequiredForClmm {}),
+        "expected CommittedAmountsRequiredForClmm, got {err:?}"
+    );
+}
+
+#[test]
 fn clmm_settle_rejects_attached_funds() {
     // Funds are rejected before any factory query, so tiers/pool are moot.
     let mut deps = clmm_settle_deps(settle_balances(), default_tiers(), None);
@@ -1915,9 +2044,11 @@ fn settle_clmm_extreme_ratio_errors_instead_of_mispricing() {
     // `amount*_min = 0` mint would draw one side only and refund the rest. It
     // must now error so the keeper can triage instead.
     let extreme_balances = vec![coin(u128::MAX, TOKEN_DENOM), coin(1u128, PAIR_DENOM)];
-    // No pre-existing pool, so the price guard is the thing that fires.
+    // No pre-existing pool, so the price guard is the thing that fires. Commit to
+    // the extreme amounts so the committed-seed guard passes and the ratio guard
+    // (not SeedBelowCommitted) is what fires.
     let mut deps = clmm_settle_deps(extreme_balances, default_tiers(), None);
-    instantiate_clmm_sink(&mut deps);
+    instantiate_clmm_sink_committed(&mut deps, u128::MAX, 1u128);
 
     let caller = deps.api.addr_make("cranker");
     let err = execute(
