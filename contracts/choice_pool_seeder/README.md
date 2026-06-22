@@ -1,11 +1,10 @@
 # `choice_pool_seeder`
 
 Generic per-launch liquidity-bootstrap **factory + sink** for legacy XYK
-Choice pools. The second of two reusable Choice code-ids that ship under
-the SHROOM launchpad's rev-3 design ([`trippy_inj/shroom_launchpad/design_brainstorm.md`
-§5](../../../trippy_inj/shroom_launchpad/design_brainstorm.md)); the first
-is [`choice_mts_issuer`](../choice_mts_issuer/). Both are dApp-agnostic —
-SHROOM is the first consumer, not the owner.
+Choice pools. The second of two reusable Choice code-ids that back the
+token-launchpad graduation on-ramp; the first is
+[`choice_mts_issuer`](../choice_mts_issuer/). Both are dApp-agnostic
+infrastructure — a launchpad is the first consumer, not the owner.
 
 ## Topology — single code-id, role-via-instantiate
 
@@ -76,9 +75,9 @@ goes into the pool. What the caller must get right depends on the venue:
    handles this in its own `RegisterLaunch` flow when called with
    `choice_factory: Some(...)` — the issuer is the denom owner and the
    only entity authorized to sign that registration. For the pair denom
-   (SHROOM, INJ, …) this is the consumer dApp's responsibility; usually a
-   no-op because the pair denom is already registered from existing pools.
-   (CLMM pools don't go through `AddNativeTokenDecimals`.)
+   (the pair asset, e.g. INJ) this is the consumer dApp's responsibility;
+   usually a no-op because the pair denom is already registered from existing
+   pools. (CLMM pools don't go through `AddNativeTokenDecimals`.)
 2. **The create-pair fee in `info.funds` on the `Settle` tx itself** — NOT
    pre-funded into the sink. The amount is venue-specific:
    - **XYK** — attach **exactly** the live tokenfactory denom-creation fee
@@ -103,8 +102,8 @@ sink's bank balance:
 - `token_denom` → `issuer` (which has `RefundFailedLaunch` to burn it
   cleanly, leaving no zombie supply on the CW side).
 - `pair_denom` → `refund_receiver` (the consumer dApp's EVM-side refund
-  authority; for SHROOM, `LaunchpadCore` runs proportional refunds to
-  curve participants).
+  authority, which typically runs proportional refunds back to curve
+  participants).
 
 If both balances are zero, `Refund` errors with `NothingToRefund` — no-op
 on already-drained sinks.
@@ -114,7 +113,7 @@ on already-drained sinks.
 Immutable per-sink. v1 set:
 
 - `Burn` — `BankMsg::Burn` the freshly-minted LP. Once burned, the pool's
-  initial liquidity is permanently unwithdrawable. SHROOM's v1 default.
+  initial liquidity is permanently unwithdrawable. The common v1 default.
 - `SendTo(Addr)` — `BankMsg::Send` LP to an address. Useful for
   treasuries, future locker contracts, or LP-incentive farms.
 
@@ -194,10 +193,10 @@ instance becomes a consumer by:
    sink, attach nothing. The fee rides on the `Settle` tx — the sink is
    never pre-funded with it.
 
-The SHROOM launchpad is the first consumer. Genericity is validated on-chain
-by `tests/integration.rs::second_consumer_sendto_lp_and_committed_seed_xyk`
-— a consumer with a non-SHROOM economic model (treasury-owned LP via `SendTo`
-+ committed seed amounts) driven through a full XYK graduation.
+Genericity is validated on-chain by
+`tests/integration.rs::second_consumer_sendto_lp_and_committed_seed_xyk`
+— a second consumer with a different economic model (treasury-owned LP via
+`SendTo` + committed seed amounts) driven through a full XYK graduation.
 
 The full cross-contract walkthrough (3-leg value flow, lifecycle, keeper
 duties, constraints) lives in

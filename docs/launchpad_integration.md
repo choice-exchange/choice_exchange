@@ -11,9 +11,9 @@ two reusable Choice CosmWasm code-ids:
   reserves into a seeded Choice pool (XYK or CLMM) with optional permanently
   locked liquidity.
 
-**Both are dApp-agnostic infrastructure.** They contain no SHROOM-specific
-addresses or logic — SHROOM is the first *consumer*, not the owner. A second
-consumer just deploys its own instances and points them at its own launch
+**Both are dApp-agnostic infrastructure.** They contain no launchpad-specific
+addresses or logic — a launchpad is just the first *consumer*, not the owner. A
+second consumer just deploys its own instances and points them at its own launch
 controller. The issuer even keys launches by `(evm_authority, internal_id)`
 specifically so **one issuer instance can serve several consumers** at once.
 
@@ -38,10 +38,9 @@ not every field.
 
 The issuer/seeder **never observe EVM events**. Everything the EVM side "tells"
 the contracts goes through keeper-relayed CW messages. The authority contract +
-keeper are entirely your domain; SHROOM's
-[`LaunchpadCore`](../../../trippy_inj/shroom_launchpad/contracts/src/LaunchpadCore.sol) +
-[`Phase3Settler`](../../../trippy_inj/shroom_launchpad/contracts/src/settlers/Phase3Settler.sol)
-and its TypeScript keeper are a complete worked reference.
+keeper are entirely your domain: a typical implementation is an EVM launch/curve
+contract that emits a "launch created" and a "bootstrap-ready" event, plus an
+off-chain keeper that maps those onto the issuer/seeder calls in §4.
 
 ---
 
@@ -206,8 +205,8 @@ your users:
    permissionless (even post-deadline only the admin joins the keeper) — a
    wide-open refund would let anyone terminally refund a slow-but-valid launch.
 6. **You run the off-chain layer.** The keeper and authority contract are
-   yours; the contracts only define the CW message contract above. SHROOM's
-   keeper is a reference, not a shared service.
+   yours; the contracts only define the CW message contract above. There is no
+   shared keeper service — each consumer operates its own.
 7. **`refund_receiver` is pinned to `evm_authority`.** `RegisterLaunch` rejects
    any launch whose `sink_init.refund_receiver != evm_authority`
    (`RefundReceiverMismatch`) — otherwise a compromised keeper could route
@@ -230,11 +229,17 @@ your users:
 
 ---
 
-## 8. Reference implementation
+## 8. Worked example
 
-The SHROOM launchpad (`trippy_inj/shroom_launchpad/`) is the first end-to-end
-consumer: `LaunchpadCore` + `Phase3Settler` (EVM authority + settler), a
-TypeScript keeper/watchdog, and a frontend. Read it as the canonical example of
-everything in §4. The cross-contract genericity is exercised by
-`contracts/choice_mts_issuer/tests/integration.rs` and
-`contracts/choice_pool_seeder/tests/integration.rs`.
+The end-to-end flow described in §4 — `RegisterLaunch` → `DeliverToSeeder` →
+`Settle`, plus the failure/refund path — is exercised against a real on-chain
+DEX stack in the integration suites:
+
+- `contracts/choice_mts_issuer/tests/integration.rs`
+- `contracts/choice_pool_seeder/tests/integration.rs`
+
+These also prove the cross-contract genericity: `choice_pool_seeder`'s
+`second_consumer_sendto_lp_and_committed_seed_xyk` drives a second consumer with
+a different economic model (treasury-owned LP) through a full XYK graduation,
+confirming the contracts carry no consumer-specific assumptions. Read them as the
+canonical reference for a consumer integration.

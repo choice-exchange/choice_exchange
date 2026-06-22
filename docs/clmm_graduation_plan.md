@@ -1,7 +1,7 @@
 # CLMM Graduation Plan — Seed CLMM Pools from the Launchpad + Locked-Liquidity Fee Collector
 
 **Status:** Contracts implemented + unit-tested (60 unit tests green, clippy clean) · integration test stubbed pending a CLMM test-tube harness · keeper wiring (Phase 6) not done · still gated on the CLMM stack reaching mainnet (see [clmm_extensions_plan.md](./clmm_extensions_plan.md))
-**Goal:** Let a SHROOM-style launch *graduate to a CLMM pool* instead of (or in addition to) the legacy XYK pair, and lock the seeded liquidity permanently behind a thin wrapper that can still collect trading fees forever.
+**Goal:** Let a launchpad-style launch *graduate to a CLMM pool* instead of (or in addition to) the legacy XYK pair, and lock the seeded liquidity permanently behind a thin wrapper that can still collect trading fees forever.
 **Scope:** Concentrated in `choice_pool_seeder` (new CLMM seeding mode + a `Locker` role). `choice_mts_issuer` is unchanged — it relays the seeder payload opaquely. No changes to the CLMM contracts themselves.
 
 ---
@@ -183,7 +183,7 @@ fn full_range_ticks(tick_spacing: i32) -> (i32, i32);
 - [ ] **Pre-existing-pool guard**: `Settle` bails (or validates) when the pool already exists at a different price.
 - [ ] Unit tests from Phase 4.
 
-> Build note: integration artifacts need `build_release.sh`, not `make build-all`, due to bulk-memory (see [[project_choice_clmm_v4_extensions]]).
+> Build note: integration artifacts need `build_release.sh`, not `make build-all`, due to bulk-memory (see [clmm_extensions_plan.md](./clmm_extensions_plan.md)).
 
 ---
 

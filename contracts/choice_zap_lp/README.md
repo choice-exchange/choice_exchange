@@ -189,7 +189,7 @@ For each `(input_asset, pair)` royalty stream:
    - Native input: plain `MsgSend`.
    - CW20 input: `cw20.Transfer { recipient: zap, amount }` on the CW20
      contract.
-4. **Deploy the [`zap_keeper_bot`](../../../choice-zap-keeper/README.md)**
+4. **Deploy the [`zap_keeper_bot`](https://github.com/choice-exchange/zap_keeper_bot)**
    pointed at this contract address.
 
 Run one zap contract instance + one keeper bot per royalty stream. Per-stream

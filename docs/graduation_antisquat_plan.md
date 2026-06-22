@@ -4,8 +4,7 @@
 on-ramp (`choice_mts_issuer` + `choice_pool_seeder` + `choice_clmm_factory`) against
 pool / sink / locker front-running.
 
-**Companion docs:** `clmm_graduation_plan.md` (the graduation flow as built),
-`choice_pool_seeder/SECURITY_AUDIT_PROMPT.md` (where M-1/M-2 were found).
+**Companion doc:** `clmm_graduation_plan.md` (the graduation flow as built).
 
 ---
 
@@ -15,21 +14,21 @@ The on-ramp lets any EVM project graduate into a Choice CLMM pool. The
 denom and the sink are **born at the start of the launch, not at graduation** —
 this timing is the crux of the whole problem, so spell it out:
 
-1. EVM `createLaunch` → `LaunchReserved` (sequential `launchId`).
-2. The keeper, at the `Observed` stage, immediately calls
+1. The consumer's EVM contract reserves a launch (a sequential launch id).
+2. The keeper, as soon as the launch is observed, immediately calls
    `choice_mts_issuer.RegisterLaunch`. This single tx mints the tokenfactory
    launch denom (`MsgCreateDenom`), MTS-links it to an auto-deployed ERC20
    (`MsgCreateTokenPair`), and spawns the `choice_pool_seeder` **sink** (via
    `Instantiate2`). **From here the denom and sink address are public.**
-3. `bindLaunchToken` → the bonding curve trades (potentially hours/days).
-4. `CurveFilled` → `triggerGraduation` → `BootstrapReady`.
+3. The launch token is bound and the bonding curve trades (potentially hours/days).
+4. The curve fills and the consumer triggers graduation (bootstrap-ready).
 5. The keeper `Settle`s the sink — **only now** is the CLMM pool created (at the
    seed ratio) and a full-range position minted to a **locker**.
 
 So the denom and sink exist, public, for the **entire curve lifetime** (steps
 3–4) before the pool is created at step 5. This is a **reusable product**, so any
 weakness here is inherited by *every* future graduation, not just the first
-consumer (SHROOM).
+consumer.
 
 Two front-running vectors, both rooted in **predictability** — but note they open
 at *different* points in the timeline above:
@@ -215,7 +214,7 @@ doesn't own:
 
 - **Choice CLMM** gains a *generic* primitive: "a tokenfactory namespace owner
   may designate the authorized creator of pools for its denoms." It imports
-  nothing about launchpads, the issuer, the seeder, or SHROOM.
+  nothing about launchpads, the issuer, or the seeder.
 - **The on-ramp** (issuer/seeder) is one *consumer* of that primitive. Any EVM
   project plugs in through its own issuer namespace. Swap the launchpad and
   Choice is unchanged.

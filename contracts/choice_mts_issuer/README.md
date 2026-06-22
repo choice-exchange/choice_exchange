@@ -5,10 +5,11 @@ dApps that need to launch a paired EVM/CW token and later seed it into a
 Choice pool. Per-dApp instantiated against a single Choice-published code-id;
 no shared state, no protocol fees.
 
-This is one of two reusable Choice code-ids that ship under the SHROOM
-launchpad's rev-3 design ([`trippy_inj/shroom_launchpad/design_brainstorm.md`
-§5](../../../trippy_inj/shroom_launchpad/design_brainstorm.md)). The other is
-`choice_pool_seeder` (factory + per-launch sink), built separately.
+This is one of two reusable Choice code-ids that back the token-launchpad
+graduation on-ramp. The other is `choice_pool_seeder` (factory + per-launch
+sink), built separately. Both are dApp-agnostic infrastructure — a launchpad
+is the first *consumer*, not the owner. The full cross-contract walkthrough
+lives in [`docs/launchpad_integration.md`](../../docs/launchpad_integration.md).
 
 ## What it does
 
@@ -56,14 +57,13 @@ the messages in this exact sequence:
    Pre-existing issuer balance is untouched (only the over-pay deltas
    refund), so the issuer leaves no stranded INJ in the success case.
 
-`DeliverToSeeder { internal_id, leftover }` (keeper-relayed after the EVM
-authority emits `BootstrapReady(internal_id, leftover)`):
+`DeliverToSeeder { internal_id, leftover }` (keeper-relayed once the EVM
+authority signals bootstrap-ready, carrying the unsold `leftover`):
 
 * **`MsgBurn`** (Stargate) burning `leftover` from `evm_authority.bech32` —
   works because the denom was created with `allow_admin_burn=true` and no
   permissions namespace, so the issuer (as tokenfactory admin) can burn-from
-  any holder. See [`feedback_inj_tokenfactory_admin_burn`] memory; confirmed
-  on testnet 2026-05-26.
+  any holder (confirmed on Injective testnet 2026-05-26).
 * **`BankMsg::Send`** `cw_held` of the new denom to the per-launch sink. The
   sink later runs `factory.CreatePair` + `provide_liquidity` against its own
   bank balance once the pair-asset leg also lands (forwarded EVM-side, out
@@ -114,10 +114,11 @@ Any EVM dApp can become a consumer by:
    launch lifecycle and signals three transitions to its keeper: launch
    created, bootstrap-ready (carrying the unsold `leftover` to burn), and
    failure. *How* it signals is the consumer's choice — the issuer never
-   sees EVM events, only the keeper-relayed CW messages below. SHROOM does
-   it with `LaunchpadCore.LaunchCreated` + `Phase3Settler.BootstrapReady`
-   (see those contracts for the exact, richer signatures); the failure path
-   is keeper- or deadline-driven, not a dedicated event.
+   sees EVM events, only the keeper-relayed CW messages below. A typical
+   consumer emits a "launch created" event and a "bootstrap-ready" event
+   (carrying the unsold `leftover` to burn) from its own launch/curve
+   contract, and the keeper maps those onto the issuer calls below; the
+   failure path is keeper- or deadline-driven, not a dedicated event.
 4. Running a keeper that maps those transitions onto this issuer:
    `RegisterLaunch` (created) → `DeliverToSeeder` (bootstrap-ready) →
    `RenounceDenomAdmin`, with `RefundFailedLaunch` on the failure path.
@@ -125,5 +126,5 @@ Any EVM dApp can become a consumer by:
 That is the entire surface the issuer cares about: keeper-relayed CW
 messages. The full cross-contract walkthrough (3-leg value flow, lifecycle,
 keeper duties, constraints) lives in
-[`docs/launchpad_integration.md`](../../docs/launchpad_integration.md).
-SHROOM is the first consumer, not the owner.
+[`docs/launchpad_integration.md`](../../docs/launchpad_integration.md). Any
+launchpad that drives this surface is a consumer, not the owner.

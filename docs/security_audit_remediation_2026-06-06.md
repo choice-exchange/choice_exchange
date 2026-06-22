@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-06
 **Scope:** `choice_clmm_pool`, `choice_clmm_math`, `choice_clmm_factory`, `choice_clmm_manager`, `choice_mts_issuer`, `choice_pool_seeder` (all pre-mainnet, uncommitted working tree).
-**Companion doc:** Shroom/EVM-side findings live in `trippy_inj/shroom_launchpad/security_audit_remediation_2026-06-06.md`. The EVM launchpad and these CW contracts share the launch handshake — fixes here (esp. C-H1) are cross-referenced there.
+**Companion scope:** A consuming launchpad's EVM side and these CW contracts share the launch handshake, so the EVM-side findings are tracked separately by that consumer. Fixes here (esp. C-H1) concern the shared CW↔EVM boundary.
 
 ## Audit verdict (context)
 
@@ -51,7 +51,7 @@ Shared infra: `packages/choice/mock_querier.rs` gained `register_wasm_contract` 
         return Err(ContractError::Unauthorized {});
     }
     ```
-  - [ ] Namespace launches by `(evm_authority, internal_id)` (or fold `evm_authority` into the storage key) so a LaunchpadCore redeploy whose counter resets to 0 cannot collide with a prior instance. This also retires the long-standing global-`internal_id` footgun (see memory `feedback_shroom_issuer_internal_id_global`).
+  - [ ] Namespace launches by `(evm_authority, internal_id)` (or fold `evm_authority` into the storage key) so a consumer's EVM launch-controller redeploy whose counter resets to 0 cannot collide with a prior instance. This also retires the long-standing global-`internal_id` footgun.
   - [ ] If permissionless registration is ever a hard requirement instead, bind `evm_authority`/`seeder_addr` to values the issuer derives on-chain (instantiate2 of a trusted seeder factory with an issuer-computed salt) rather than free-form message fields.
 - **Tests to add:**
   - [ ] `register_launch_rejects_non_keeper_sender`
@@ -80,7 +80,7 @@ Shared infra: `packages/choice/mock_querier.rs` gained `register_wasm_contract` 
 - **Impact:** Rug vector if the admin/migrate key is compromised. Medium.
 - **Fix:**
   - [ ] Add a keeper/admin-gated `FinalizeDenom { internal_id }` (callable only once a launch is `Delivered`) that:
-    - `MsgChangeAdmin` the tokenfactory denom → the 20-zero-byte burn-address convention (`inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49`, see memory `feedback_inj_tokenfactory_admin_revoke_burn_bech32`), and
+    - `MsgChangeAdmin` the tokenfactory denom → the 20-zero-byte burn-address convention (`inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49`), and
     - transfers/renounces the auto-deployed `MintBurnBankERC20` ownership.
   - [ ] Enforce in-code (or document loudly + verify at deploy) that `admin` and the wasm-admin are `choice_admin_timelock`, not a hot key.
 - **Tests to add:**

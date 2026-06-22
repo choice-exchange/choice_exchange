@@ -72,7 +72,7 @@ it never graduates:
     filled / bootstrap aborted). Asserts the deadline gate (non-keeper before
     `refund_deadline_seconds` is rejected), then keeper `RefundFailedLaunch`
     burns `cw_held` (status → Refunded) while `evm_supply` stays untouched
-    (EVM-side participant refunds are LaunchpadCore's job), and the state is
+    (EVM-side participant refunds are the consumer's job), and the state is
     terminal (no later `DeliverToSeeder`).
   * `sink_refund_returns_legs` — a funded sink that never settled. Asserts the
     deadline gate, then (after `increase_time`) permissionless `Refund` routes
