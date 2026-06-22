@@ -847,30 +847,29 @@ fn settle_xyk(
         },
     ];
 
-    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
-
-    messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: choice_factory.to_string(),
-        msg: to_json_binary(&FactoryExecuteMsg::CreatePair { assets })?,
-        funds: create_fee,
-    }));
-
     // Callback chain: each step is a self-`WasmMsg::Execute`, processed
     // depth-first in CW so messages emitted by `ProvideLiquidity` run before
     // `DistributeLp` starts. The full pair balance seeds the pool — the cranker
     // takes no tip (P1-B).
-    messages.push(self_callback(
-        &env,
-        CallbackMsg::ProvideLiquidity {
-            token_amount: seed_token,
-            pair_amount: seed_pair,
-        },
-    )?);
-    messages.push(self_callback(&env, CallbackMsg::DistributeLp {})?);
-    // H-1/M-1: route any committed-seed surplus (donation above the committed
-    // amount, plus the pair contract's own one-sided refund) out of the
-    // terminal sink so nothing strands.
-    messages.push(self_callback(&env, CallbackMsg::SweepDust {})?);
+    let messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![
+        CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: choice_factory.to_string(),
+            msg: to_json_binary(&FactoryExecuteMsg::CreatePair { assets })?,
+            funds: create_fee,
+        }),
+        self_callback(
+            &env,
+            CallbackMsg::ProvideLiquidity {
+                token_amount: seed_token,
+                pair_amount: seed_pair,
+            },
+        )?,
+        self_callback(&env, CallbackMsg::DistributeLp {})?,
+        // H-1/M-1: route any committed-seed surplus (donation above the committed
+        // amount, plus the pair contract's own one-sided refund) out of the
+        // terminal sink so nothing strands.
+        self_callback(&env, CallbackMsg::SweepDust {})?,
+    ];
 
     Ok(Response::new()
         .add_messages(messages)
@@ -1658,8 +1657,8 @@ fn query_role(deps: Deps<InjectiveQueryWrapper>) -> StdResult<RoleResponse> {
     match role {
         Role::Factory => Ok(RoleResponse::Factory(query_factory_config(deps)?)),
         Role::Sink => Ok(RoleResponse::Sink {
-            config: query_sink_config(deps)?,
-            state: query_sink_state(deps)?,
+            config: Box::new(query_sink_config(deps)?),
+            state: Box::new(query_sink_state(deps)?),
         }),
         Role::Locker => Ok(RoleResponse::Locker(query_locker_config(deps)?)),
     }

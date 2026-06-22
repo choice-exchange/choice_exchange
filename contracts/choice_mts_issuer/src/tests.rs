@@ -199,7 +199,7 @@ fn xyk_sink_payload(deps: &Deps, internal_id: u64) -> Binary {
             choice_factory: deps.api.addr_make("choice_factory").to_string(),
             lp_destination: LpDestination::Burn,
         },
-        &deps.api.addr_make("evm_authority").to_string(),
+        deps.api.addr_make("evm_authority").as_ref(),
     )
 }
 
@@ -220,7 +220,7 @@ fn clmm_sink_payload(
             position_recipient: deps.api.addr_make("locker").to_string(),
             max_fee_multiple: None,
         },
-        &deps.api.addr_make("evm_authority").to_string(),
+        deps.api.addr_make("evm_authority").as_ref(),
     )
 }
 
@@ -662,10 +662,8 @@ fn deliver_to_seeder_happy_path_emits_burn_and_send() {
     // launch denom (capped at evm_supply), not the relayed `leftover`. Seed the
     // authority with the unsold supply so the burn leg is emitted.
     let leftover_amt = Uint128::new(50_000_000u128) * Uint128::new(10u128.pow(18));
-    deps.querier.with_balance(&[(
-        &evm_authority,
-        coins(leftover_amt.u128(), &default_denom(9)),
-    )]);
+    deps.querier
+        .with_balance(&[(&evm_authority, coins(leftover_amt.u128(), default_denom(9)))]);
     let keeper = deps.api.addr_make("keeper");
     let res = execute(
         deps.as_mut(),
@@ -1546,7 +1544,7 @@ fn register_full(
         deps,
         token_denom,
         pool_kind,
-        &deps.api.addr_make("evm_authority").to_string(),
+        deps.api.addr_make("evm_authority").as_ref(),
     );
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id,
@@ -2230,7 +2228,7 @@ fn register_launch_rejects_refund_receiver_mismatch() {
             choice_factory: deps.api.addr_make("choice_factory").to_string(),
             lp_destination: LpDestination::Burn,
         },
-        &deps.api.addr_make("attacker").to_string(),
+        deps.api.addr_make("attacker").as_ref(),
     );
     let msg = ExecuteMsg::RegisterLaunch {
         internal_id: 5,

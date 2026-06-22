@@ -396,9 +396,12 @@ pub enum QueryMsg {
 #[serde(rename_all = "snake_case")]
 pub enum RoleResponse {
     Factory(FactoryConfigResponse),
+    // Boxed to keep this enum small — the inline `Sink` payload is ~3x the
+    // next-largest variant (clippy::large_enum_variant). `Box` is transparent
+    // to serde + schemars, so the JSON wire format and schema are unchanged.
     Sink {
-        config: SinkConfigResponse,
-        state: SinkStateResponse,
+        config: Box<SinkConfigResponse>,
+        state: Box<SinkStateResponse>,
     },
     Locker(LockerConfigResponse),
 }
