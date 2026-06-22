@@ -14,9 +14,7 @@ use std::path::PathBuf;
 
 use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 
-use choice_clmm_common::manager::{
-    ExecuteMsg, InstantiateMsg, PositionWithFeesResponse, QueryMsg,
-};
+use choice_clmm_common::manager::{ExecuteMsg, InstantiateMsg, PositionWithFeesResponse, QueryMsg};
 
 fn main() {
     // Sibling contract's schema dir (this example runs from the factory crate).

@@ -248,7 +248,9 @@ pub enum QueryMsg {
     /// denom unguessable, so off-chain consumers can't recompute the
     /// `(evm_authority, internal_id)` key — this is the robust denom→record path
     /// for indexers/integrators. Errors `not_found` if the denom is unknown.
-    LaunchByDenom { denom: String },
+    LaunchByDenom {
+        denom: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

@@ -8,7 +8,7 @@ use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 
 use choice_clmm_common::pool::{
     DynamicFeeResponse, ExecuteMsg, FeeGrowthInsideResponse, InstantiateMsg, PositionInfoResponse,
-    ProtocolFeesResponse, QuoteResponse, QueryMsg, TotalLiquidityResponse,
+    ProtocolFeesResponse, QueryMsg, QuoteResponse, TotalLiquidityResponse,
 };
 
 fn main() {

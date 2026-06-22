@@ -302,7 +302,13 @@ fn instantiate_sink_rejects_deadline_below_min() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, ContractError::DeadlineTooShort { got: 3599, min: 3600 }),
+        matches!(
+            err,
+            ContractError::DeadlineTooShort {
+                got: 3599,
+                min: 3600
+            }
+        ),
         "expected DeadlineTooShort, got {err:?}"
     );
 }

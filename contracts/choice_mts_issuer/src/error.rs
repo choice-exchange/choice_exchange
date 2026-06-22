@@ -30,7 +30,9 @@ pub enum ContractError {
     #[error("salt_suffix is required (Layer A anti-squat entropy): every launch must carry a high-entropy per-launch salt so its denom + sink + locker addresses are unguessable")]
     SaltSuffixRequired {},
 
-    #[error("salt_suffix `{got}` must be ASCII-alphanumeric and at least the minimum entropy length")]
+    #[error(
+        "salt_suffix `{got}` must be ASCII-alphanumeric and at least the minimum entropy length"
+    )]
     SaltSuffixInvalid { got: String },
 
     #[error("forwarded CreateSink salt is not the canonical entropic sink salt (canonical(issuer) || be_u64(internal_id) || salt_suffix) — refusing to forward a non-entropic or mis-derived sink salt (anti-squat Layer A)")]

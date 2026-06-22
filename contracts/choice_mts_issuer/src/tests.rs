@@ -1799,7 +1799,12 @@ fn register_launch_rejects_clmm_auth_fee_mismatch() {
     let mut deps = setup();
     let clmm_factory = deps.api.addr_make("clmm_factory").to_string();
     // Sink seeds the 3000 tier but the reservation guards the 500 tier.
-    let payload = clmm_sink_payload(&deps, denom_with_salt(1, TEST_SALT), clmm_factory.clone(), 3000);
+    let payload = clmm_sink_payload(
+        &deps,
+        denom_with_salt(1, TEST_SALT),
+        clmm_factory.clone(),
+        3000,
+    );
     let auth = crate::msg::ClmmPoolAuth {
         clmm_factory,
         fee: 500,
@@ -2250,7 +2255,12 @@ fn register_launch_rejects_refund_receiver_mismatch() {
 /// Recompute the LOCKER `Instantiate2` address the contract pins
 /// `position_recipient` to: salt = `b"locker" || canonical(issuer) || be(id) ||
 /// salt_suffix` (the locker salt now shares the mandatory Layer A suffix).
-fn derive_locker_addr(api: &MockApi, seeder_factory: &str, internal_id: u64, salt_suffix: &str) -> String {
+fn derive_locker_addr(
+    api: &MockApi,
+    seeder_factory: &str,
+    internal_id: u64,
+    salt_suffix: &str,
+) -> String {
     let issuer_canon = api
         .addr_canonicalize(mock_env().contract.address.as_str())
         .unwrap();

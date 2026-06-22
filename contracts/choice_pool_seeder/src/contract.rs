@@ -20,8 +20,8 @@ use crate::state::{
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    coins, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Reply,
-    Response, StdError, StdResult, SubMsg, SubMsgResult, Uint128, Uint256, WasmMsg,
+    coins, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
+    Reply, Response, StdError, StdResult, SubMsg, SubMsgResult, Uint128, Uint256, WasmMsg,
 };
 use cw2::set_contract_version;
 use serde::Deserialize;
