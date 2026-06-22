@@ -1,0 +1,362 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecuteMsg",
+  "oneOf": [
+    {
+      "description": "Creates a new pool using Instantiate2 (Deterministic address)",
+      "type": "object",
+      "required": [
+        "create_pool"
+      ],
+      "properties": {
+        "create_pool": {
+          "type": "object",
+          "required": [
+            "fee",
+            "init_sqrt_price",
+            "token_a",
+            "token_b"
+          ],
+          "properties": {
+            "fee": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "init_sqrt_price": {
+              "$ref": "#/definitions/Uint256"
+            },
+            "max_fee_multiple": {
+              "description": "Dynamic-fee ceiling as a multiple of the tier's base fee: `max_fee_ppm = fee * multiple` (capped just below 100%). `None` defaults to 2 — the conservative setting for ordinary pools. Launchpad graduations pass a higher multiple (up to 10) so the volatility fee can actually price post-graduation frenzies. Valid range 2..=10; immutable after creation (it is baked into the pool's `FeeConfig` and does not change the pool's address, which stays keyed on `(token0, token1, fee)`).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "token_a": {
+              "$ref": "#/definitions/AssetInfo"
+            },
+            "token_b": {
+              "$ref": "#/definitions/AssetInfo"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Updates mutable factory config. NOTE: `owner` and `pool_code_id` are deliberately NOT settable here — they are the system's root of trust and each moves only through an explicit two-step propose/accept handshake (`ProposeOwner`/`AcceptOwner`, `ProposePoolCodeId`/`AcceptPoolCodeId`). This struct is kept for forward compatibility / future mutable fields.",
+      "type": "object",
+      "required": [
+        "update_config"
+      ],
+      "properties": {
+        "update_config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Step 1 of the two-step owner handover (owner-only). Records `new_owner` as `pending_owner`; the current owner keeps all powers until the proposed owner calls `AcceptOwner`. A typo'd-but-valid address is therefore recoverable (just re-propose) instead of bricking the factory and every pool's protocol-fee controls. See audit C-L2.",
+      "type": "object",
+      "required": [
+        "propose_owner"
+      ],
+      "properties": {
+        "propose_owner": {
+          "type": "object",
+          "required": [
+            "new_owner"
+          ],
+          "properties": {
+            "new_owner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Step 2 of the two-step owner handover. Callable ONLY by the address set as `pending_owner`; promotes it to `owner` and clears `pending_owner`.",
+      "type": "object",
+      "required": [
+        "accept_owner"
+      ],
+      "properties": {
+        "accept_owner": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Step 1 of the two-step `pool_code_id` repoint (owner-only). Records `code_id` as `pending_pool_code_id`. `pool_code_id` is the manager's trust anchor (every future `CreatePool` instantiates this code and the manager trusts its reply attributes), so changing it is gated behind an explicit accept. See audit C-L3.",
+      "type": "object",
+      "required": [
+        "propose_pool_code_id"
+      ],
+      "properties": {
+        "propose_pool_code_id": {
+          "type": "object",
+          "required": [
+            "code_id"
+          ],
+          "properties": {
+            "code_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Step 2 of the two-step `pool_code_id` repoint (owner-only). Applies the pending code id and emits old→new for observability.",
+      "type": "object",
+      "required": [
+        "accept_pool_code_id"
+      ],
+      "properties": {
+        "accept_pool_code_id": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Enable a new fee tier (e.g. 100 pips, spacing 1)",
+      "type": "object",
+      "required": [
+        "enable_fee_amount"
+      ],
+      "properties": {
+        "enable_fee_amount": {
+          "type": "object",
+          "required": [
+            "fee",
+            "tick_spacing"
+          ],
+          "properties": {
+            "fee": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "tick_spacing": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Reserve the canonical pool slot `(token0, token1, fee)` for `creator`. Until consumed (or expired), only `creator` may `CreatePool` for that slot; every other slot stays permissionless. Authorizer must own the tokenfactory namespace of one side (`factory/{sender}/…`) or be the factory owner. `ttl_seconds == 0` means no expiry. Anti-squat gate for the graduation on-ramp; see `docs/graduation_antisquat_plan.md`.",
+      "type": "object",
+      "required": [
+        "authorize_creation"
+      ],
+      "properties": {
+        "authorize_creation": {
+          "type": "object",
+          "required": [
+            "creator",
+            "fee",
+            "token_a",
+            "token_b",
+            "ttl_seconds"
+          ],
+          "properties": {
+            "creator": {
+              "type": "string"
+            },
+            "fee": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "token_a": {
+              "$ref": "#/definitions/AssetInfo"
+            },
+            "token_b": {
+              "$ref": "#/definitions/AssetInfo"
+            },
+            "ttl_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Release a reservation early. Same authorizer rule as `AuthorizeCreation`.",
+      "type": "object",
+      "required": [
+        "cancel_creation_auth"
+      ],
+      "properties": {
+        "cancel_creation_auth": {
+          "type": "object",
+          "required": [
+            "fee",
+            "token_a",
+            "token_b"
+          ],
+          "properties": {
+            "fee": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "token_a": {
+              "$ref": "#/definitions/AssetInfo"
+            },
+            "token_b": {
+              "$ref": "#/definitions/AssetInfo"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Add `borrower` to the flash-loan allowlist (owner-only). Pools created by this factory live-query the allowlist when their `Flash {}` is called, so only allowlisted contracts (e.g. the dex aggregator) may flash-borrow.",
+      "type": "object",
+      "required": [
+        "authorize_flash_borrower"
+      ],
+      "properties": {
+        "authorize_flash_borrower": {
+          "type": "object",
+          "required": [
+            "borrower"
+          ],
+          "properties": {
+            "borrower": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Remove `borrower` from the flash-loan allowlist (owner-only).",
+      "type": "object",
+      "required": [
+        "revoke_flash_borrower"
+      ],
+      "properties": {
+        "revoke_flash_borrower": {
+          "type": "object",
+          "required": [
+            "borrower"
+          ],
+          "properties": {
+            "borrower": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Escape hatch (owner-only): when `open` is `true`, pools skip the flash-borrower gate and `Flash {}` is permissionless again.",
+      "type": "object",
+      "required": [
+        "set_flash_unrestricted"
+      ],
+      "properties": {
+        "set_flash_unrestricted": {
+          "type": "object",
+          "required": [
+            "open"
+          ],
+          "properties": {
+            "open": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "AssetInfo": {
+      "description": "Represents a token type: either a native bank denom or a CW20 contract.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "native_token"
+          ],
+          "properties": {
+            "native_token": {
+              "type": "object",
+              "required": [
+                "denom"
+              ],
+              "properties": {
+                "denom": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "token"
+          ],
+          "properties": {
+            "token": {
+              "type": "object",
+              "required": [
+                "contract_addr"
+              ],
+              "properties": {
+                "contract_addr": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Uint256": {
+      "description": "An implementation of u256 that is using strings for JSON encoding/decoding, such that the full u256 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances out of primitive uint types or `new` to provide big endian bytes:\n\n``` # use cosmwasm_std::Uint256; let a = Uint256::from(258u128); let b = Uint256::new([ 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, ]); assert_eq!(a, b); ```",
+      "type": "string"
+    }
+  }
+}

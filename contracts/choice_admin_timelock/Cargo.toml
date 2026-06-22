@@ -1,0 +1,42 @@
+[package]
+name = "choice-admin-timelock"
+version = "1.2.0"
+authors = ["Dan Van Eijck"]
+edition = "2018"
+description = "Timelock contract that holds wasm-admin powers for Choice farm + factory contracts. Queues either MsgMigrateContract or arbitrary MsgExecuteContract via Propose/Apply with a configurable delay, so users have an exit window before code or state changes under them."
+license = "Apache-2.0"
+
+exclude = [
+  "contract.wasm",
+  "hash.txt",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+library = []
+
+[dependencies]
+cw2               = { version = "2.0.0" }
+cosmwasm-std      = { version = "2.2.2", features = [
+    "abort",
+    "cosmwasm_1_2",
+    "cosmwasm_1_3",
+    "cosmwasm_1_4",
+    "cosmwasm_2_0",
+    "iterator",
+    "stargate"
+] }
+cw-storage-plus   = { version = "2.0.0" }
+cosmwasm-schema   = { version = "2.2.2" }
+
+# Workspace dependency-feature unification: cosmwasm-crypto's ed25519
+# `batch` path requires the `alloc` feature on ed25519-zebra. Other crates in
+# this workspace pull it in via injective-cosmwasm; since this contract has
+# no Injective-specific surface, depend on ed25519-zebra directly with the
+# right feature so a standalone `cargo build -p choice-admin-timelock` works.
+ed25519-zebra     = { version = "4.1.0", default-features = false, features = ["alloc"] }
+
+schemars          = "0.8.22"
+serde             = { version = "1.0.219", default-features = false, features = ["derive"] }

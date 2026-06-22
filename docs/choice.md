@@ -1,61 +1,144 @@
-# Choice Exchange
+# Choice Exchange — Legacy AMM
 
-**Choice Exchange** is an AMM protocol forked from Terraswap. It has been updated to use the latest CosmWasm libraries and tailored specifically for Injective. In addition to the core swap functionality, Choice adds a unique fee distribution mechanism via the **send_to_auction** contract.
+Constant-product (x*y=k) AMM forked from TerraSwap, updated to CosmWasm v2 for Injective.
 
-## Contract Overview
+## Contracts
 
-### Factory Contract
-- **Purpose:**  
-  Creates new pair contracts (liquidity pools) and acts as a directory for all pairs.
-- **Key Parameters:**  
-  - `pair_code_id`: Code ID for the pair contract.
-  - `burn_address`: The deployed **send_to_auction** contract address.
-  - `fee_wallet_address`: Address where 0.05% of swap fees are sent (Choice fee wallet).
-- **Token Registration:**  
-  Registers native tokens (including IBC tokens) with their decimals. The contract must hold at least 1 token to verify decimals. CW20 tokens must be registered via the CW20 adapter contract for swaps to work.
+### choice_pair (`contracts/choice_pair/`)
 
-### Pair Contract
-- **Purpose:**  
-  Manages liquidity pools and swap operations.
-- **LP Tokens:**  
-  LP tokens are created as native Injective denominations using the token factory module.  
-  - **Fee:** A fee is charged for pair creation (1 INJ on testnet; 0.1 INJ on mainnet).  
-  - **LP Denom Format:** If the pair contract is `inj123`, then the LP token denom will be `factory/inj123/lp`.
-- **Advantage:**  
-  Using native LP denoms eliminates the need for deploying a separate CW20 token contract for liquidity provision.
+Core trading pool. Each pair holds two assets and mints native LP tokens via Injective's token factory.
 
-### Router Contract
-- **Purpose:**  
-  Provides simulation and execution of swap operations by interacting with the factory and pair contracts.
+**Files:** `contract.rs` (entry points + swap math), `state.rs`, `error.rs`
 
-### Send_to_auction Contract
-- **Purpose:**  
-  A new addition in Choice that leverages the Injective CW20 adapter to send 0.05% of swap fees to the Injective burn action basket (or subaccount).  
-- **Fee Distribution:**  
-  This mechanism ensures that part of the swap fees are sent to the burn action basket, supporting the ecosystem's tokenomics.
+**Storage:**
+```rust
+PAIR_INFO: Item<PairInfoRaw>  // asset_infos, contract_addr, liquidity_token, decimals, burn/fee addresses
+```
 
-## Deployment Steps
+**Swap math:**
+```
+return_amount = (ask_pool * offer_amount) / (offer_pool + offer_amount)
+spread_amount = (offer_amount * ask_pool / offer_pool) - return_amount
+commission    = return_amount * 0.003  (0.3%)
+```
 
-1. **Upload Contracts:**  
-   Upload the compiled binaries for the **factory**, **router**, **pair**, and **send_to_auction** contracts to the network and record their code IDs.
+Fee split (of the 0.3% commission):
+- 4/6 (0.20%) — stays in pool (LPs)
+- 1/6 (0.05%) — sent to fee_wallet_address
+- 1/6 (0.05%) — sent to burn_address (send_to_auction contract)
 
-2. **Instantiate Send_to_auction:**  
-   Deploy the send_to_auction contract first.
+**Decimal normalization:** All math upscales both assets to `10^max(decimal_0, decimal_1)`, computes, then downscales the result.
 
-3. **Instantiate Factory:**  
-   When instantiating the factory contract, use:
-   - The send_to_auction contract address as the `burn_address`
-   - Your designated fee wallet address as `fee_wallet_address`
+**Liquidity provision:**
+- Initial: `LP = sqrt(deposit_0 * deposit_1) - 1000` (1000 locked forever as minimum liquidity)
+- Subsequent: `LP = min(deposit_0 * total_share / pool_0, deposit_1 * total_share / pool_1)`. Excess refunded.
 
-4. **Instantiate Router:**  
-   Provide the factory contract’s address during the router instantiation.
+**LP token denom:** `factory/{pair_contract_address}/lp` (native Injective token factory denom, not CW20)
 
-5. **Register Token Denoms:**  
-   For each native token (including IBC tokens), send 1 unit of the token to the factory contract and invoke `add_native_token_decimals` to register its decimals.
+**Messages (`packages/choice/src/pair.rs`):**
 
-6. **Create a New Pair:**  
-   Use the factory contract to create a new pair.  
-   The pair contract will automatically generate the LP token as a native Injective denom (format: `factory/{pair_contract_address}/lp`).
+| Execute | Description |
+|---------|-------------|
+| `ProvideLiquidity { assets, receiver, deadline, slippage_tolerance }` | Deposit both assets, receive LP tokens |
+| `WithdrawLiquidity { amount, min_assets, deadline }` | Burn LP tokens, receive proportional assets |
+| `Swap { offer_asset, belief_price, max_spread, to, deadline }` | Swap one asset for the other |
 
-7. **Add Liquidity & Start Swapping:**  
-   Once a pair is created, add liquidity and perform swaps via the router contract.
+| Query | Returns |
+|-------|---------|
+| `Pair {}` | PairInfo (asset_infos, contract_addr, lp denom, decimals) |
+| `Pool {}` | PoolResponse (assets, total_share) |
+| `Simulation { offer_asset }` | return_amount, spread_amount, commission_amount |
+| `ReverseSimulation { ask_asset }` | offer_amount, spread_amount, commission_amount |
+
+**Errors (`error.rs`):** InvalidZeroAmount, MaxSpreadAssertion, MaxSlippageAssertion, AssetMismatch, ExpiredDeadline, MinAmountAssertion, MinimumLiquidityAmountError, InvalidLiquidityFunds
+
+---
+
+### choice_factory (`contracts/choice_factory/`)
+
+Creates and registers pair contracts. Stores native token decimal mappings.
+
+**Files:** `contract.rs`, `state.rs`
+
+**Storage:**
+```rust
+CONFIG: Item<Config>                     // owner, pair_code_id, burn_address, fee_wallet_address, proposed_owner
+TMP_PAIR_INFO: Item<TmpPairInfo>         // transient state during pair creation (reply pattern)
+PAIRS: Map<&[u8], PairInfoRaw>           // pair_key -> pair info
+ALLOW_NATIVE_TOKENS: Map<&[u8], u8>     // denom bytes -> decimals
+```
+
+**Pair key:** Sorted asset_info byte concatenation.
+
+**Messages (`packages/choice/src/factory.rs`):**
+
+| Execute | Description |
+|---------|-------------|
+| `CreatePair { assets }` | Instantiate a new pair contract |
+| `AddNativeTokenDecimals { denom, decimals }` | Register native/IBC token decimals (must hold balance > 0) |
+| `UpdateConfig { params }` | Update pair_code_id, burn_address, fee_wallet_address |
+| `MigratePair { contract, code_id }` | Upgrade a pair contract |
+| `ProposeNewOwner / AcceptOwnership / CancelOwnershipProposal` | Ownership transfer |
+
+| Query | Returns |
+|-------|---------|
+| `Config {}` | owner, pair_code_id, burn_address, fee_wallet_address |
+| `Pair { asset_infos }` | PairInfo for the given pair |
+| `Pairs { start_after, limit }` | Paginated pair list (max 30) |
+| `NativeTokenDecimals { denom }` | Registered decimals for a native token |
+
+---
+
+### choice_router (`contracts/choice_router/`)
+
+Multi-hop swap execution and simulation.
+
+**Files:** `contract.rs`, `testing/`
+
+**Messages (`packages/choice/src/router.rs`):**
+
+| Execute | Description |
+|---------|-------------|
+| `ExecuteSwapOperations { operations, minimum_receive, to, deadline }` | Execute a sequence of swaps |
+| `SimulateSwapOperations { offer_amount, operations }` | Simulate multi-hop output |
+| `ReverseSimulateSwapOperations { ask_amount, operations }` | Simulate required input |
+
+Each operation: `SwapOperation::Choice { offer_asset_info, ask_asset_info }`
+
+Validation: The chain of operations must have exactly one final output token. Each operation's output is the next operation's input.
+
+---
+
+### choice_send_to_auction (`contracts/choice_send_to_auction/`)
+
+Routes the 0.05% burn fee to Injective's burn auction basket.
+
+**Flow:**
+1. Receives native or CW20 tokens
+2. For CW20: converts via Injective CW20 adapter to `factory/{adapter}/{cw20_address}` denom
+3. Deposits to contract's Injective subaccount
+4. Transfers to burn_auction_subaccount via ExternalTransfer
+
+---
+
+## Shared Package: `packages/choice/`
+
+Common types used across legacy contracts.
+
+| File | Key Types |
+|------|-----------|
+| `asset.rs` | `Asset`, `AssetInfo` (Token/NativeToken), `AssetRaw`, `PairInfo`, `PairInfoRaw` |
+| `pair.rs` | `InstantiateMsg`, `ExecuteMsg`, `QueryMsg`, `Cw20HookMsg`, response types |
+| `factory.rs` | Factory messages and query responses |
+| `router.rs` | Router messages, `SwapOperation` |
+| `querier.rs` | Query helpers for pairs, pools, simulations |
+| `testing.rs` | Mock querier for unit tests |
+
+## Deployment Order
+
+1. Upload all contract binaries, record code IDs
+2. Instantiate send_to_auction
+3. Instantiate factory (with send_to_auction as `burn_address`)
+4. Instantiate router (with factory address)
+5. Register native token decimals on factory (`AddNativeTokenDecimals`)
+6. Create pairs via factory (`CreatePair`)

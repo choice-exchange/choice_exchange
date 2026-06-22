@@ -1,0 +1,319 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecuteMsg",
+  "oneOf": [
+    {
+      "type": "string",
+      "enum": [
+        "accept_ownership",
+        "cancel_ownership_proposal"
+      ]
+    },
+    {
+      "description": "Handles receiving CW20 tokens.",
+      "type": "object",
+      "required": [
+        "receive"
+      ],
+      "properties": {
+        "receive": {
+          "$ref": "#/definitions/Cw20ReceiveMsg"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Handles receiving native LP tokens. This is the new entry point for native deposits.",
+      "type": "object",
+      "required": [
+        "deposit"
+      ],
+      "properties": {
+        "deposit": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Withdraws a user's pending LP tokens that have not yet been converted to shares.",
+      "type": "object",
+      "required": [
+        "withdraw_pending"
+      ],
+      "properties": {
+        "withdraw_pending": {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "description": "The amount of LP tokens to withdraw from the pending balance. If None, it withdraws the entire pending balance.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Withdraws a user's funds by redeeming active, value-accruing shares.",
+      "type": "object",
+      "required": [
+        "withdraw_shares"
+      ],
+      "properties": {
+        "withdraw_shares": {
+          "type": "object",
+          "required": [
+            "shares_to_burn"
+          ],
+          "properties": {
+            "shares_to_burn": {
+              "description": "The number of shares to burn in exchange for the underlying LP tokens.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Triggers the auto-compounding of rewards.\n\n`belief_prices` is the caller's expected `offer_pool / ask_pool` for each swap in the compound flow, in order. Length must equal the number of swaps the contract will perform (`route.len() + 1` when a route is configured, else `1`). Combined with the configured `slippage_tolerance`, these are what prevent a sandwicher from manipulating the AMM price during the compound tx.\n\n`minimum_lp_to_receive`, if set, reverts the tx when the liquidity provision mints less than this many LP tokens for the vault.",
+      "type": "object",
+      "required": [
+        "compound"
+      ],
+      "properties": {
+        "compound": {
+          "type": "object",
+          "required": [
+            "belief_prices"
+          ],
+          "properties": {
+            "belief_prices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Decimal"
+              }
+            },
+            "minimum_lp_to_receive": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Keeper-only function to activate pending deposits for a batch of users.",
+      "type": "object",
+      "required": [
+        "activate_pending_deposits"
+      ],
+      "properties": {
+        "activate_pending_deposits": {
+          "type": "object",
+          "required": [
+            "users"
+          ],
+          "properties": {
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Lets any user activate their own pending deposit without waiting on the keeper. Subject to the same dilution guard as `ActivatePendingDeposits` — pending farm rewards must be below the compound threshold before activation proceeds.",
+      "type": "object",
+      "required": [
+        "activate_my_deposit"
+      ],
+      "properties": {
+        "activate_my_deposit": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Allows the owner to update the fee configuration. Compounder rotation is intentionally excluded — use `ProposeCompounder`/`ApplyCompounderRotation` which enforce a timelock.",
+      "type": "object",
+      "required": [
+        "update_config"
+      ],
+      "properties": {
+        "update_config": {
+          "type": "object",
+          "properties": {
+            "fee_percentage": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fee_recipient": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "minimum_reward_to_compound": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Uint128"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "slippage_tolerance": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Owner-only. Clears `fee_recipient` so future compounds skip the fee transfer entirely. `UpdateConfig` can only *set* the recipient; this is the only way to fully remove it (zeroing `fee_percentage` is a separate workaround).",
+      "type": "string",
+      "enum": [
+        "clear_fee_recipient"
+      ]
+    },
+    {
+      "description": "Owner proposes a new compounder. The swap cannot take effect until `COMPOUNDER_ROTATION_DELAY_SECONDS` have elapsed. Proposing again resets the timer.",
+      "type": "object",
+      "required": [
+        "propose_compounder"
+      ],
+      "properties": {
+        "propose_compounder": {
+          "type": "object",
+          "required": [
+            "new_compounder"
+          ],
+          "properties": {
+            "new_compounder": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Owner-only. Finalizes a pending compounder rotation once the timelock has expired.",
+      "type": "string",
+      "enum": [
+        "apply_compounder_rotation"
+      ]
+    },
+    {
+      "description": "Owner-only. Clears any pending compounder rotation.",
+      "type": "string",
+      "enum": [
+        "cancel_compounder_proposal"
+      ]
+    },
+    {
+      "type": "object",
+      "required": [
+        "propose_new_owner"
+      ],
+      "properties": {
+        "propose_new_owner": {
+          "type": "object",
+          "required": [
+            "new_owner"
+          ],
+          "properties": {
+            "new_owner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "Binary": {
+      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>. See also <https://github.com/CosmWasm/cosmwasm/blob/main/docs/MESSAGE_TYPES.md>.",
+      "type": "string"
+    },
+    "Cw20ReceiveMsg": {
+      "description": "Cw20ReceiveMsg should be de/serialized under `Receive()` variant in a ExecuteMsg",
+      "type": "object",
+      "required": [
+        "amount",
+        "msg",
+        "sender"
+      ],
+      "properties": {
+        "amount": {
+          "$ref": "#/definitions/Uint128"
+        },
+        "msg": {
+          "$ref": "#/definitions/Binary"
+        },
+        "sender": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Decimal": {
+      "description": "A fixed-point decimal value with 18 fractional digits, i.e. Decimal(1_000_000_000_000_000_000) == 1.0\n\nThe greatest possible value that can be represented is 340282366920938463463.374607431768211455 (which is (2^128 - 1) / 10^18)",
+      "type": "string"
+    },
+    "Uint128": {
+      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
+      "type": "string"
+    }
+  }
+}

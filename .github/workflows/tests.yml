@@ -23,7 +23,9 @@ jobs:
           profile: minimal
       - run: cargo fetch --verbose
       - run: cargo build
-      - run: cargo test --verbose --all
+      # Unit tests only — see the note in rust.yml. The integration tests under
+      # `tests/` need prebuilt wasm artifacts and run outside this gate.
+      - run: cargo test --workspace --lib --verbose
         env:
           RUST_BACKTRACE: 1
 

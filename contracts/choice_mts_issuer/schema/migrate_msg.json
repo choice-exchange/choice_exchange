@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MigrateMsg",
+  "description": "Migration payload. `FromV1` is the legacy on-ramp once a v1 is published; `Patch` is the in-major bump that explicitly cannot touch the (`admin`, `keeper`, `subdenom_prefix`, `decimals`) tuple — same discipline as `choice_zap_lp` to block silent route mutations via `MsgMigrateContract`.",
+  "oneOf": [
+    {
+      "description": "Reserved for the eventual v1 → v2 migration path. Empty until a v1 exists in the wild; defined now so callers can compile against a stable migrate-msg shape.",
+      "type": "object",
+      "required": [
+        "from_v1"
+      ],
+      "properties": {
+        "from_v1": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "patch"
+      ],
+      "properties": {
+        "patch": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

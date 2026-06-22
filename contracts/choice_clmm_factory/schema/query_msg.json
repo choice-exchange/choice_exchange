@@ -1,0 +1,258 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "get_pool"
+      ],
+      "properties": {
+        "get_pool": {
+          "type": "object",
+          "required": [
+            "fee",
+            "token_a",
+            "token_b"
+          ],
+          "properties": {
+            "fee": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "token_a": {
+              "$ref": "#/definitions/AssetInfo"
+            },
+            "token_b": {
+              "$ref": "#/definitions/AssetInfo"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_all_pools"
+      ],
+      "properties": {
+        "get_all_pools": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              ],
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_config"
+      ],
+      "properties": {
+        "get_config": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_fee_tiers"
+      ],
+      "properties": {
+        "get_fee_tiers": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns the active creation reservation for a slot, if any.",
+      "type": "object",
+      "required": [
+        "get_creation_auth"
+      ],
+      "properties": {
+        "get_creation_auth": {
+          "type": "object",
+          "required": [
+            "fee",
+            "token_a",
+            "token_b"
+          ],
+          "properties": {
+            "fee": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "token_a": {
+              "$ref": "#/definitions/AssetInfo"
+            },
+            "token_b": {
+              "$ref": "#/definitions/AssetInfo"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Whether `borrower` may call a pool's `Flash {}` (explicitly allowlisted, or flash is unrestricted). Pools query this during flash.",
+      "type": "object",
+      "required": [
+        "is_flash_borrower"
+      ],
+      "properties": {
+        "is_flash_borrower": {
+          "type": "object",
+          "required": [
+            "borrower"
+          ],
+          "properties": {
+            "borrower": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Lists allowlisted flash borrowers (paginated) plus the unrestricted flag.",
+      "type": "object",
+      "required": [
+        "flash_borrowers"
+      ],
+      "properties": {
+        "flash_borrowers": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "start_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "AssetInfo": {
+      "description": "Represents a token type: either a native bank denom or a CW20 contract.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "native_token"
+          ],
+          "properties": {
+            "native_token": {
+              "type": "object",
+              "required": [
+                "denom"
+              ],
+              "properties": {
+                "denom": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "token"
+          ],
+          "properties": {
+            "token": {
+              "type": "object",
+              "required": [
+                "contract_addr"
+              ],
+              "properties": {
+                "contract_addr": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

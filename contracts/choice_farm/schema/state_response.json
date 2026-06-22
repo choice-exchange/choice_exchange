@@ -5,7 +5,8 @@
   "required": [
     "global_reward_index",
     "last_distributed",
-    "total_bond_amount"
+    "total_bond_amount",
+    "undistributed_rewards"
   ],
   "properties": {
     "global_reward_index": {
@@ -17,6 +18,9 @@
       "minimum": 0.0
     },
     "total_bond_amount": {
+      "$ref": "#/definitions/Uint128"
+    },
+    "undistributed_rewards": {
       "$ref": "#/definitions/Uint128"
     }
   },

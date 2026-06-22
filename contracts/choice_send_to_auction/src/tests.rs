@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use std::marker::PhantomData;
 
@@ -59,7 +60,7 @@ mod tests {
         // Assert the stored values are correct
         assert_eq!(
             config.owner,
-            deps.api.addr_canonicalize(&admin_addr.to_string()).unwrap()
+            deps.api.addr_canonicalize(admin_addr.as_ref()).unwrap()
         );
         assert_eq!(config.adapter_contract, adapter_contract_addr.to_string());
         assert_eq!(
@@ -213,7 +214,7 @@ mod tests {
         let config: Config = from_json(&res).unwrap();
         assert_eq!(
             config.owner,
-            deps.api.addr_canonicalize(&admin_addr.to_string()).unwrap()
+            deps.api.addr_canonicalize(admin_addr.as_ref()).unwrap()
         );
         assert_eq!(config.adapter_contract, adapter_contract_addr.to_string());
         assert_eq!(

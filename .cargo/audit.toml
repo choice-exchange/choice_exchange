@@ -1,0 +1,34 @@
+# cargo-audit configuration (read automatically by `cargo audit`).
+#
+# Triage policy for this repo: the only thing that ships on-chain is the
+# contract WASM, whose dependency tree is `cosmwasm-std` / `cosmwasm-crypto` /
+# `cw20` / `cw721` / `ark-*` / `k256` / `ed25519-zebra`. Everything below is
+# reachable ONLY through `injective-test-tube` (a dev-dependency that embeds a
+# full Cosmos-SDK app, gRPC and a TLS/RPC stack) or is a compile-time
+# proc-macro — none of it is linked into any deployed contract. We therefore
+# ignore the advisories individually (with justification) so the gate stays
+# GREEN on this known-benign baseline and turns RED the moment a NEW advisory
+# appears — in particular one touching the real on-chain crates above.
+#
+# Re-audit when bumping `injective-test-tube`: several of these clear once its
+# `cosmrs`/`tendermint`/`reqwest` tree is updated. Verify a crate is still
+# dev-only with `cargo tree -i <crate>` before adding it here.
+
+[advisories]
+ignore = [
+    # --- vulnerabilities, all via injective-test-tube (dev-only test harness) ---
+    "RUSTSEC-2026-0007", # bytes <1.11.1 integer overflow — test-tube → h2/hyper/reqwest
+    "RUSTSEC-2024-0344", # curve25519-dalek timing — test-tube signing (cosmrs), not wasm crypto
+    "RUSTSEC-2026-0104", # rustls-webpki CRL panic — test-tube → rustls 0.21 (reqwest 0.11)
+    "RUSTSEC-2026-0098", # rustls-webpki name-constraint (URI) — test-tube → rustls 0.21
+    "RUSTSEC-2026-0099", # rustls-webpki name-constraint (wildcard) — test-tube → rustls 0.21
+    "RUSTSEC-2026-0009", # time <0.3.47 DoS — test-tube → tendermint
+
+    # --- unmaintained / unsound warnings (non-failing by default; listed for intent) ---
+    "RUSTSEC-2024-0375", # atty unmaintained — test-tube build-dep (bindgen → clap)
+    "RUSTSEC-2021-0145", # atty unaligned read — same; build-dep only
+    "RUSTSEC-2024-0388", # derivative unmaintained — proc-macro under ark-ec (compile-time only)
+    "RUSTSEC-2024-0436", # paste unmaintained — proc-macro under ark-ff (compile-time only)
+    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained — test-tube → reqwest
+    "RUSTSEC-2026-0097", # rand unsound (custom-logger edge case) — test-tube tree
+]

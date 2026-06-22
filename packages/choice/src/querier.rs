@@ -61,9 +61,8 @@ pub fn query_token_factory_denom_total_supply(
     denom: String,
 ) -> StdResult<Uint128> {
     let querier: InjectiveQuerier<'_> = InjectiveQuerier::new(querier);
-    let query_msg: TokenFactoryDenomSupplyResponse = querier
-        .query_token_factory_denom_total_supply(&denom)
-        .unwrap();
+    let query_msg: TokenFactoryDenomSupplyResponse =
+        querier.query_token_factory_denom_total_supply(&denom)?;
     let total_share: Uint128 = query_msg.total_supply;
     Ok(total_share)
 }
@@ -73,7 +72,7 @@ pub fn query_token_factory_denom_create_fee(
 ) -> StdResult<Vec<Coin>> {
     let querier: InjectiveQuerier<'_> = InjectiveQuerier::new(querier);
     let query_msg: TokenFactoryCreateDenomFeeResponse =
-        querier.query_token_factory_creation_fee().unwrap();
+        querier.query_token_factory_creation_fee()?;
     let fee: Vec<Coin> = query_msg.fee;
     Ok(fee)
 }

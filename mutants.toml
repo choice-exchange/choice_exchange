@@ -1,0 +1,37 @@
+# cargo-mutants configuration for the Choice CLMM.
+#
+# IMPORTANT: mutation testing here runs ONLY against the NATIVE host target
+# (`cargo test`). It must NEVER build the wasm artifacts or invoke the
+# cosmwasm/optimizer Docker image or wasm-opt — source mutations are invisible
+# to compiled bytecode and rebuilding wasm per mutant is prohibitively slow.
+#
+# Always invoke with an explicit `--package` so cargo-mutants does not fall back
+# to a whole-workspace `cargo test`, which would pull in the injective-test-tube
+# integration tests (declared in choice_clmm_common) and require wasm artifacts.
+#
+# Canonical commands (see README "Native test tooling"):
+#   Math (pure, fast):
+#     cargo mutants --package choice-clmm-math -f 'packages/choice_clmm_math/src/**/*.rs'
+#   Pool core (exclude the slow native fuzzers so per-mutant time stays sane):
+#     cargo mutants --package choice_clmm_pool \
+#       -f 'contracts/choice_clmm_pool/src/core/**/*.rs' \
+#       -f 'contracts/choice_clmm_pool/src/actions/swap.rs' \
+#       -- --lib -- --skip adversarial_fuzz --skip solvency_fuzz
+
+# Native math/swap kernels can be a touch slow under cargo-mutants' debug build;
+# give a generous multiplier over the measured baseline before calling a timeout.
+timeout_multiplier = 5.0
+minimum_test_timeout = 60
+
+# Never *mutate* test scaffolding, fuzz harnesses, or visualization helpers.
+# (They are still free to RUN and kill mutants — this only stops them being
+#  the thing that gets mutated.)
+exclude_globs = [
+    "**/tests.rs",
+    "**/test.rs",
+    "**/*_fuzz.rs",
+    "**/regime_tests.rs",
+    "**/visualization.rs",
+    "**/fuzz/**",
+    "tests/**",
+]

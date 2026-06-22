@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InstantiateMsg",
+  "type": "object",
+  "required": [
+    "fee_config",
+    "initial_sqrt_price",
+    "tick_spacing",
+    "token0",
+    "token1"
+  ],
+  "properties": {
+    "fee_config": {
+      "$ref": "#/definitions/FeeConfig"
+    },
+    "initial_sqrt_price": {
+      "$ref": "#/definitions/Uint256"
+    },
+    "tick_spacing": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "token0": {
+      "$ref": "#/definitions/AssetInfo"
+    },
+    "token1": {
+      "$ref": "#/definitions/AssetInfo"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "AssetInfo": {
+      "description": "Represents a token type: either a native bank denom or a CW20 contract.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "native_token"
+          ],
+          "properties": {
+            "native_token": {
+              "type": "object",
+              "required": [
+                "denom"
+              ],
+              "properties": {
+                "denom": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "token"
+          ],
+          "properties": {
+            "token": {
+              "type": "object",
+              "required": [
+                "contract_addr"
+              ],
+              "properties": {
+                "contract_addr": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "FeeConfig": {
+      "type": "object",
+      "required": [
+        "base_fee_ppm",
+        "max_fee_change_per_second_ppm",
+        "max_fee_ppm",
+        "max_volatility_accumulator",
+        "variable_fee_control",
+        "volatility_decay_seconds"
+      ],
+      "properties": {
+        "base_fee_ppm": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_fee_change_per_second_ppm": {
+          "description": "Maximum fee change per second in ppm. The dynamic fee returned to the swap loop is clamped to `|new_fee - prev_fee| <= value * seconds_elapsed` — so a single-block manipulated price cannot jerk the fee to `max_fee_ppm` for the next block's victim. A value of 0 disables the cap (legacy behavior).\n\nExample: 100 ppm/sec ≈ 65-90 ppm per ~0.65-0.9s Injective block. To reach the 1% max_fee from 0.3% base takes (10000 - 3000) / 100 = 70 seconds of sustained volatility. Short enough to react to genuine volatility, long enough to make single-block griefing unprofitable.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_fee_ppm": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_volatility_accumulator": {
+          "description": "Cap on the volatility accumulator `v_a`, in ticks. Bounds `v_a^2` so the `control * v_a^2` product stays well inside the u128 intermediate and the fee saturates predictably. The factory uses 2000 (≈ a 22% move), well past the point where the variable fee saturates `max_fee_ppm`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "variable_fee_control": {
+          "description": "Scales the convex volatility component: the variable fee is `variable_fee_control * v_a^2 / VFEE_SCALE` ppm, where `v_a` is the decaying volatility accumulator (in ticks) maintained by the oracle and `VFEE_SCALE = 1_000_000` (see `core::oracle`). The signal is raw ticks (1 tick ≈ 1 bp of price), so this constant is tier-independent — the factory uses 8800: a single ~6% move (~583 ticks) adds ~2990 ppm. `0` disables the volatility component → constant `base_fee_ppm`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "volatility_decay_seconds": {
+          "description": "Full-forget decay window in seconds: the accumulator linearly decays to 0 over this much idle time. Tunes ONLY fee persistence (the price reference is always the last observed tick, so there is no coupled anchor-adaptation constant). The factory uses 600 (a 10-minute window): an elevated fee persists across a move then relaxes to base as trading calms, regardless of the new price level.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Uint256": {
+      "description": "An implementation of u256 that is using strings for JSON encoding/decoding, such that the full u256 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances out of primitive uint types or `new` to provide big endian bytes:\n\n``` # use cosmwasm_std::Uint256; let a = Uint256::from(258u128); let b = Uint256::new([ 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, ]); assert_eq!(a, b); ```",
+      "type": "string"
+    }
+  }
+}

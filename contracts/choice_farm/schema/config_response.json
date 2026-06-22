@@ -4,6 +4,7 @@
   "type": "object",
   "required": [
     "distribution_schedule",
+    "owner",
     "reward_token",
     "staking_token"
   ],
@@ -30,6 +31,9 @@
         "maxItems": 3,
         "minItems": 3
       }
+    },
+    "owner": {
+      "type": "string"
     },
     "reward_token": {
       "type": "string"

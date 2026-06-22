@@ -1,7 +1,8 @@
 use cosmwasm_std::testing::{MockApi, MockQuerier, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    from_json, to_json_binary, Binary, Coin, ContractResult, Empty, OwnedDeps, Querier,
-    QuerierResult, QueryRequest, SystemError, SystemResult, Uint128, WasmQuery,
+    from_json, to_json_binary, Addr, Binary, Checksum, CodeInfoResponse, Coin, ContractResult,
+    Empty, OwnedDeps, Querier, QuerierResult, QueryRequest, SystemError, SystemResult, Uint128,
+    WasmQuery,
 };
 use injective_cosmwasm::tokenfactory::response::TokenFactoryCreateDenomFeeResponse;
 use injective_cosmwasm::{
@@ -10,7 +11,6 @@ use injective_cosmwasm::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::panic;
 
 use crate::asset::{AssetInfo, PairInfo};
 use crate::factory::{NativeTokenDecimalsResponse, QueryMsg as FactoryQueryMsg};
@@ -45,6 +45,21 @@ pub struct WasmMockQuerier {
     token_factory_denom_total_supply_handler: Option<Box<dyn HandlesDenomSupplyQuery>>,
     token_factory_denom_creation_fee_handler: Option<Box<dyn HandlesFeeQuery>>,
     inj: InjWasmMockQuerier,
+    /// Addresses that should answer `WasmQuery::ContractInfo` as if they host
+    /// contract code. Empty by default → such a query errors `NoSuchContract`,
+    /// matching the real chain for an EOA/ghost address.
+    wasm_contracts: std::collections::HashSet<String>,
+    /// Raw `WasmQuery::Smart` overrides keyed by contract address. When set, any
+    /// smart query to that address returns the stored bytes verbatim, ahead of
+    /// the typed dispatch below. Lets a test stub a cross-contract response
+    /// (e.g. a seeder `SinkConfig`) whose type lives in a crate this package
+    /// can't import without a dependency cycle.
+    smart_query_overrides: std::collections::HashMap<String, cosmwasm_std::Binary>,
+    /// `WasmQuery::CodeInfo` answers keyed by `code_id` → wasm-blob checksum.
+    /// Lets a test stub the code-hash an on-chain `instantiate2_address`
+    /// derivation reads (e.g. the seeder `sink_code_id`). Unset code-ids error
+    /// `NoSuchCode`, matching the real chain.
+    code_infos: std::collections::HashMap<u64, [u8; 32]>,
 }
 
 #[derive(Clone, Default)]
@@ -132,146 +147,191 @@ impl WasmMockQuerier {
     pub fn handle_query(&self, request: &QueryRequest<InjectiveQueryWrapper>) -> QuerierResult {
         let deps = mock_dependencies(&[]);
         match &request {
-            QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => match from_json(msg) {
-                Ok(FactoryQueryMsg::Pair { asset_infos }) => {
-                    let key = [asset_infos[0].to_string(), asset_infos[1].to_string()].join("");
-                    let mut sort_key: Vec<char> = key.chars().collect();
-                    sort_key.sort_by(|a, b| b.cmp(a));
-                    match self
-                        .choice_factory_querier
-                        .pairs
-                        .get(&String::from_iter(sort_key.iter()))
-                    {
-                        Some(v) => SystemResult::Ok(ContractResult::Ok(to_json_binary(v).unwrap())),
-                        None => SystemResult::Err(SystemError::InvalidRequest {
-                            error: "No pair info exists".to_string(),
-                            request: msg.as_slice().into(),
-                        }),
-                    }
+            QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => {
+                if let Some(resp) = self.smart_query_overrides.get(contract_addr) {
+                    return SystemResult::Ok(ContractResult::Ok(resp.clone()));
                 }
-                Ok(FactoryQueryMsg::NativeTokenDecimals { denom }) => {
-                    match self
-                        .choice_factory_querier
-                        .native_token_decimals
-                        .get(&denom)
-                    {
-                        Some(decimals) => SystemResult::Ok(ContractResult::Ok(
-                            to_json_binary(&NativeTokenDecimalsResponse {
-                                decimals: *decimals,
-                            })
-                            .unwrap(),
-                        )),
-                        None => SystemResult::Err(SystemError::InvalidRequest {
-                            error: "No decimal info exist".to_string(),
-                            request: msg.as_slice().into(),
-                        }),
-                    }
-                }
-                _ => match from_json(msg) {
-                    Ok(PairQueryMsg::Pair {}) => {
-                        let pair_addr = deps.api.addr_make("pair0000").to_string();
-                        let liquidity_token = deps.api.addr_make("liquidity0000").to_string();
-                        let burn_address = deps.api.addr_make("burnaddr0000").to_string();
-                        let fee_wallet_address = deps.api.addr_make("feeaddr0000").to_string();
-
-                        SystemResult::Ok(ContractResult::from(to_json_binary(&PairInfo {
-                            asset_infos: [
-                                AssetInfo::NativeToken {
-                                    denom: "inj".to_string(),
-                                },
-                                AssetInfo::NativeToken {
-                                    denom: "inj".to_string(),
-                                },
-                            ],
-                            asset_decimals: [6u8, 6u8],
-                            contract_addr: pair_addr,
-                            liquidity_token,
-                            burn_address,
-                            fee_wallet_address,
-                        })))
-                    }
-                    Ok(PairQueryMsg::Simulation { offer_asset }) => SystemResult::Ok(
-                        ContractResult::from(to_json_binary(&SimulationResponse {
-                            return_amount: offer_asset.amount,
-                            commission_amount: Uint128::zero(),
-                            spread_amount: Uint128::zero(),
-                        })),
-                    ),
-                    Ok(PairQueryMsg::ReverseSimulation { ask_asset }) => SystemResult::Ok(
-                        ContractResult::from(to_json_binary(&ReverseSimulationResponse {
-                            offer_amount: ask_asset.amount,
-                            commission_amount: Uint128::zero(),
-                            spread_amount: Uint128::zero(),
-                        })),
-                    ),
-                    _ => match from_json(msg).unwrap() {
-                        Cw20QueryMsg::TokenInfo {} => {
-                            let balances: &HashMap<String, Uint128> =
-                                match self.token_querier.balances.get(contract_addr) {
-                                    Some(balances) => balances,
-                                    None => {
-                                        return SystemResult::Err(SystemError::InvalidRequest {
-                                            error: format!(
-                                                "No balance info exists for the contract {}",
-                                                contract_addr
-                                            ),
-                                            request: msg.as_slice().into(),
-                                        })
-                                    }
-                                };
-
-                            let mut total_supply = Uint128::zero();
-
-                            for balance in balances {
-                                total_supply += *balance.1;
+                match from_json(msg) {
+                    Ok(FactoryQueryMsg::Pair { asset_infos }) => {
+                        let key = [asset_infos[0].to_string(), asset_infos[1].to_string()].join("");
+                        let mut sort_key: Vec<char> = key.chars().collect();
+                        sort_key.sort_by(|a, b| b.cmp(a));
+                        match self
+                            .choice_factory_querier
+                            .pairs
+                            .get(&String::from_iter(sort_key.iter()))
+                        {
+                            Some(v) => {
+                                SystemResult::Ok(ContractResult::Ok(to_json_binary(v).unwrap()))
                             }
-
-                            SystemResult::Ok(ContractResult::Ok(
-                                to_json_binary(&TokenInfoResponse {
-                                    name: "mAAPL".to_string(),
-                                    symbol: "mAAPL".to_string(),
-                                    decimals: 8,
-                                    total_supply,
+                            None => SystemResult::Err(SystemError::InvalidRequest {
+                                error: "No pair info exists".to_string(),
+                                request: msg.as_slice().into(),
+                            }),
+                        }
+                    }
+                    Ok(FactoryQueryMsg::NativeTokenDecimals { denom }) => {
+                        match self
+                            .choice_factory_querier
+                            .native_token_decimals
+                            .get(&denom)
+                        {
+                            Some(decimals) => SystemResult::Ok(ContractResult::Ok(
+                                to_json_binary(&NativeTokenDecimalsResponse {
+                                    decimals: *decimals,
                                 })
                                 .unwrap(),
-                            ))
+                            )),
+                            None => SystemResult::Err(SystemError::InvalidRequest {
+                                error: "No decimal info exist".to_string(),
+                                request: msg.as_slice().into(),
+                            }),
                         }
-                        Cw20QueryMsg::Balance { address } => {
-                            let balances: &HashMap<String, Uint128> =
-                                match self.token_querier.balances.get(contract_addr) {
-                                    Some(balances) => balances,
+                    }
+                    _ => match from_json(msg) {
+                        Ok(PairQueryMsg::Pair {}) => {
+                            let pair_addr = deps.api.addr_make("pair0000").to_string();
+                            let liquidity_token = deps.api.addr_make("liquidity0000").to_string();
+                            let burn_address = deps.api.addr_make("burnaddr0000").to_string();
+                            let fee_wallet_address = deps.api.addr_make("feeaddr0000").to_string();
+
+                            SystemResult::Ok(ContractResult::from(to_json_binary(&PairInfo {
+                                asset_infos: [
+                                    AssetInfo::NativeToken {
+                                        denom: "inj".to_string(),
+                                    },
+                                    AssetInfo::NativeToken {
+                                        denom: "inj".to_string(),
+                                    },
+                                ],
+                                asset_decimals: [6u8, 6u8],
+                                contract_addr: pair_addr,
+                                liquidity_token,
+                                burn_address,
+                                fee_wallet_address,
+                            })))
+                        }
+                        Ok(PairQueryMsg::Simulation { offer_asset }) => SystemResult::Ok(
+                            ContractResult::from(to_json_binary(&SimulationResponse {
+                                return_amount: offer_asset.amount,
+                                commission_amount: Uint128::zero(),
+                                spread_amount: Uint128::zero(),
+                            })),
+                        ),
+                        Ok(PairQueryMsg::ReverseSimulation { ask_asset }) => SystemResult::Ok(
+                            ContractResult::from(to_json_binary(&ReverseSimulationResponse {
+                                offer_amount: ask_asset.amount,
+                                commission_amount: Uint128::zero(),
+                                spread_amount: Uint128::zero(),
+                            })),
+                        ),
+                        _ => match from_json::<Cw20QueryMsg>(msg) {
+                            Ok(Cw20QueryMsg::TokenInfo {}) => {
+                                let balances: &HashMap<String, Uint128> =
+                                    match self.token_querier.balances.get(contract_addr) {
+                                        Some(balances) => balances,
+                                        None => {
+                                            return SystemResult::Err(SystemError::InvalidRequest {
+                                                error: format!(
+                                                    "No balance info exists for the contract {}",
+                                                    contract_addr
+                                                ),
+                                                request: msg.as_slice().into(),
+                                            })
+                                        }
+                                    };
+
+                                let mut total_supply = Uint128::zero();
+
+                                for balance in balances {
+                                    total_supply += *balance.1;
+                                }
+
+                                SystemResult::Ok(ContractResult::Ok(
+                                    to_json_binary(&TokenInfoResponse {
+                                        name: "mAAPL".to_string(),
+                                        symbol: "mAAPL".to_string(),
+                                        decimals: 8,
+                                        total_supply,
+                                    })
+                                    .unwrap(),
+                                ))
+                            }
+                            Ok(Cw20QueryMsg::Balance { address }) => {
+                                let balances: &HashMap<String, Uint128> =
+                                    match self.token_querier.balances.get(contract_addr) {
+                                        Some(balances) => balances,
+                                        None => {
+                                            return SystemResult::Err(SystemError::InvalidRequest {
+                                                error: format!(
+                                                    "No balance info exists for the contract {}",
+                                                    contract_addr
+                                                ),
+                                                request: msg.as_slice().into(),
+                                            })
+                                        }
+                                    };
+
+                                let balance = match balances.get(&address) {
+                                    Some(v) => *v,
                                     None => {
-                                        return SystemResult::Err(SystemError::InvalidRequest {
-                                            error: format!(
-                                                "No balance info exists for the contract {}",
-                                                contract_addr
-                                            ),
-                                            request: msg.as_slice().into(),
-                                        })
+                                        return SystemResult::Ok(ContractResult::Ok(
+                                            to_json_binary(&Cw20BalanceResponse {
+                                                balance: Uint128::zero(),
+                                            })
+                                            .unwrap(),
+                                        ));
                                     }
                                 };
 
-                            let balance = match balances.get(&address) {
-                                Some(v) => *v,
-                                None => {
-                                    return SystemResult::Ok(ContractResult::Ok(
-                                        to_json_binary(&Cw20BalanceResponse {
-                                            balance: Uint128::zero(),
-                                        })
-                                        .unwrap(),
-                                    ));
-                                }
-                            };
+                                SystemResult::Ok(ContractResult::Ok(
+                                    to_json_binary(&Cw20BalanceResponse { balance }).unwrap(),
+                                ))
+                            }
 
-                            SystemResult::Ok(ContractResult::Ok(
-                                to_json_binary(&Cw20BalanceResponse { balance }).unwrap(),
-                            ))
-                        }
-
-                        _ => panic!("DO NOT ENTER HERE"),
+                            // Unrecognised wasm smart query. A real chain returns
+                            // an error for a contract that doesn't handle the
+                            // message (or an address that isn't this contract type);
+                            // mirror that instead of aborting the test, so callers
+                            // that tolerate a query error (e.g. an optional
+                            // cross-contract pause/config lookup) behave as on-chain.
+                            _ => SystemResult::Err(SystemError::InvalidRequest {
+                                error: "unhandled wasm smart query".to_string(),
+                                request: msg.as_slice().into(),
+                            }),
+                        },
                     },
-                },
-            },
+                }
+            }
+            QueryRequest::Wasm(WasmQuery::CodeInfo { code_id }) => {
+                match self.code_infos.get(code_id) {
+                    Some(checksum) => {
+                        let resp = CodeInfoResponse::new(
+                            *code_id,
+                            Addr::unchecked("mock_code_creator"),
+                            Checksum::from(*checksum),
+                        );
+                        SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                    }
+                    None => SystemResult::Err(SystemError::NoSuchCode { code_id: *code_id }),
+                }
+            }
+            QueryRequest::Wasm(WasmQuery::ContractInfo { contract_addr }) => {
+                if self.wasm_contracts.contains(contract_addr) {
+                    let resp = cosmwasm_std::ContractInfoResponse::new(
+                        1,
+                        Addr::unchecked(contract_addr.clone()),
+                        None,
+                        false,
+                        None,
+                    );
+                    SystemResult::Ok(ContractResult::Ok(to_json_binary(&resp).unwrap()))
+                } else {
+                    SystemResult::Err(SystemError::NoSuchContract {
+                        addr: contract_addr.clone(),
+                    })
+                }
+            }
             QueryRequest::Custom(custom) => {
                 match custom {
                     // Match on our token factory total supply query variant
@@ -419,7 +479,30 @@ impl WasmMockQuerier {
             token_factory_denom_total_supply_handler: None,
             token_factory_denom_creation_fee_handler: None,
             inj: InjWasmMockQuerier::default(),
+            wasm_contracts: std::collections::HashSet::new(),
+            smart_query_overrides: std::collections::HashMap::new(),
+            code_infos: std::collections::HashMap::new(),
         }
+    }
+
+    /// Mark `addr` as hosting contract code so `WasmQuery::ContractInfo`
+    /// against it succeeds (others still error `NoSuchContract`).
+    pub fn register_wasm_contract(&mut self, addr: &str) {
+        self.wasm_contracts.insert(addr.to_string());
+    }
+
+    /// Stub every `WasmQuery::Smart` to `addr` with `response` (returned
+    /// verbatim). Also marks `addr` as a hosting contract for `ContractInfo`.
+    pub fn with_smart_query_response(&mut self, addr: &str, response: cosmwasm_std::Binary) {
+        self.smart_query_overrides
+            .insert(addr.to_string(), response);
+        self.wasm_contracts.insert(addr.to_string());
+    }
+
+    /// Stub `WasmQuery::CodeInfo { code_id }` to report `checksum` as the code's
+    /// wasm-blob hash (what an `instantiate2_address` derivation reads).
+    pub fn with_code_info(&mut self, code_id: u64, checksum: [u8; 32]) {
+        self.code_infos.insert(code_id, checksum);
     }
 
     // configure the mint whitelist mock querier
@@ -552,16 +635,26 @@ mod mock_exception {
     }
 
     #[test]
-    #[should_panic]
-    fn none_tokens_minter_will_panic() {
+    fn unhandled_wasm_smart_query_returns_error() {
+        // The mock previously aborted on any query it didn't recognise; it now
+        // returns a `SystemError` instead, mirroring how a real chain answers a
+        // contract that doesn't handle the message. This lets callers that
+        // tolerate a query error (e.g. an optional cross-contract config lookup)
+        // behave as they would on-chain rather than crashing the test.
         let deps = mock_dependencies(&[]);
 
         let msg = to_json_binary(&Cw20QueryMsg::Minter {}).unwrap();
 
-        deps.querier
+        let res = deps
+            .querier
             .handle_query(&QueryRequest::Wasm(WasmQuery::Smart {
                 contract_addr: "token0000".to_string(),
                 msg,
             }));
+        assert!(
+            matches!(res, SystemResult::Err(SystemError::InvalidRequest { .. })),
+            "expected an InvalidRequest error, got: {:?}",
+            res
+        );
     }
 }

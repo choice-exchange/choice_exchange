@@ -1,0 +1,33 @@
+[package]
+name = "choice-clmm-math"
+version = "1.1.2"
+authors = ["Dan Van Eijck"]
+edition = "2018"
+description = "Choice CLMM math"
+license = "Apache-2.0"
+repository = "https://github.com/choice-exchange/choice_exchange"
+homepage = "https://choice.exchange"
+documentation = ""
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+# for quicker tests, cargo test --lib
+# for more explicit tests, cargo test --features=backtraces
+
+[dependencies]
+cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
+
+uint = "0.10.0"
+
+schemars = "0.8.22"
+serde = { version = "1.0.219", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+# Native (host-target) test builds only. ed25519-zebra 4.1.0 (forced by malicious_cw20)
+# gates its `batch` module behind the `alloc` feature, which `default`/`std` no longer
+# imply; cosmwasm-crypto 2.2.2 needs it. Without this, `cargo test`/`llvm-cov`/`mutants`
+# on the host target fail to compile. Dev-dep only -> the wasm cdylib build is untouched.
+# Same workaround family as malicious_cw20 / cw20_base_build. Do NOT remove.
+ed25519-zebra = { version = "4.1.0", features = ["alloc"] }
+

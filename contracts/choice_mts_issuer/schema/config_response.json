@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConfigResponse",
+  "type": "object",
+  "required": [
+    "admin",
+    "decimals",
+    "forwarder",
+    "keeper",
+    "paused",
+    "refund_deadline_seconds",
+    "subdenom_prefix",
+    "verify_seeder_derivation"
+  ],
+  "properties": {
+    "admin": {
+      "type": "string"
+    },
+    "decimals": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "forwarder": {
+      "type": "string"
+    },
+    "keeper": {
+      "type": "string"
+    },
+    "paused": {
+      "type": "boolean"
+    },
+    "pending_admin": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "refund_deadline_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "subdenom_prefix": {
+      "type": "string"
+    },
+    "verify_seeder_derivation": {
+      "description": "P1: whether `RegisterLaunch` derives + verifies the sink's Instantiate2 address on-chain (vs. trusting the keeper-supplied `seeder_addr`).",
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}

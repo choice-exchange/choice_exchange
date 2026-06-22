@@ -69,6 +69,15 @@
         }
       ]
     },
+    "max_slippage_tolerance": {
+      "description": "Upper bound on operational `slippage_tolerance`. Tightening is instant; raising requires the timelocked propose/apply flow (see `MAX_SLIPPAGE_RAISE_DELAY_SECONDS`). Defaults via `#[serde(default)]` so pre-governance stored configs read the initial ceiling without a migration.",
+      "default": "0.25",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Decimal"
+        }
+      ]
+    },
     "minimum_reward_to_compound": {
       "$ref": "#/definitions/Uint128"
     },
@@ -87,6 +96,52 @@
           "$ref": "#/definitions/Addr"
         }
       ]
+    },
+    "paused": {
+      "description": "H-4: when true, every entry path (deposit, compound, activation) rejects. Exit paths (`WithdrawPending`, `WithdrawShares`) are *not* gated so users can always unwind. `#[serde(default)]` so pre-H-4 stored configs read as unpaused without a migration step.",
+      "default": false,
+      "type": "boolean"
+    },
+    "pending_compounder": {
+      "description": "A compounder rotation that has been proposed but cannot take effect until the timelock expires. Gives users a window to exit if they distrust the incoming operator.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Addr"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pending_compounder_effective_at": {
+      "description": "Unix timestamp (seconds) at which `pending_compounder` may be applied.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "pending_max_slippage": {
+      "description": "Pending raise of `max_slippage_tolerance`; applies after `pending_max_slippage_effective_at`. Lets depositors exit in the 48h window before a cap raise takes effect.",
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Decimal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pending_max_slippage_effective_at": {
+      "default": null,
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
     },
     "proposed_owner": {
       "description": "A new owner address that has been proposed but not yet accepted.",

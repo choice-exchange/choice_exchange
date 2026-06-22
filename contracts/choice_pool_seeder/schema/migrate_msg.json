@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MigrateMsg",
+  "description": "Migration payload. Same `FromV1` / `Patch` split as [`choice_zap_lp`'s](../../choice_zap_lp) — `Patch` is constrained to in-major bumps so an admin can't silently rewrite `choice_factory` or `sink_code_id` via a v2 → v2 `MsgMigrateContract` with a v1-shaped payload. `FromV1` is wired so callers can compile against a stable migrate-msg shape before a real v1 → v2 schema delta exists.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "from_v1"
+      ],
+      "properties": {
+        "from_v1": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "patch"
+      ],
+      "properties": {
+        "patch": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

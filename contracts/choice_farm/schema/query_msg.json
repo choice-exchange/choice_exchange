@@ -66,6 +66,34 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "description": "Pending owner rotation, if any.",
+      "type": "object",
+      "required": [
+        "pending_owner_rotation"
+      ],
+      "properties": {
+        "pending_owner_rotation": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Pending migrate_staking proposal, if any.",
+      "type": "object",
+      "required": [
+        "pending_migration"
+      ],
+      "properties": {
+        "pending_migration": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }

@@ -1,5 +1,6 @@
 pub mod asset;
 pub mod factory;
+pub mod farm_factory;
 pub mod pair;
 pub mod querier;
 pub mod router;

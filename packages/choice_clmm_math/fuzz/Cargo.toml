@@ -1,0 +1,75 @@
+[package]
+name = "choice-clmm-math-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Keep this crate OUT of the parent virtual workspace so the wasm/optimizer
+# build never sees it. cargo-fuzz builds for the HOST target with libFuzzer +
+# ASan; it must never invoke the cosmwasm/optimizer or wasm-opt.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+cosmwasm-std = { version = "2.2.2", features = ["abort", "iterator", "stargate"] }
+
+[dependencies.choice-clmm-math]
+path = ".."
+
+# Host build of cosmwasm-crypto needs ed25519-zebra's `alloc` feature (4.1.0
+# no longer implies it via std). Same workaround as the crates' dev-deps.
+[dependencies.ed25519-zebra]
+version = "4.1.0"
+features = ["alloc"]
+
+# Keep overflow-checks on: the math relies on explicit checked_* and intentional
+# wraparound; we want a real arithmetic overflow to abort, not wrap silently.
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "full_math"
+path = "fuzz_targets/full_math.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bit_math"
+path = "fuzz_targets/bit_math.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tick_math"
+path = "fuzz_targets/tick_math.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqrt_price_math"
+path = "fuzz_targets/sqrt_price_math.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "swap_step"
+path = "fuzz_targets/swap_step.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "liquidity_math"
+path = "fuzz_targets/liquidity_math.rs"
+test = false
+doc = false
+bench = false

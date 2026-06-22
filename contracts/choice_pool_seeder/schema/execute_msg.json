@@ -1,0 +1,605 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecuteMsg",
+  "oneOf": [
+    {
+      "description": "**Factory-only.** Spawns a per-launch sink at `instantiate2(this_factory, sink_code_id, salt)`. The `choice_mts_issuer.RegisterLaunch` flow forwards an opaque `create_sink_payload` Binary to this handler; that payload is exactly `to_json_binary(&ExecuteMsg::CreateSink { salt, sink_init })`.\n\nPermissionless — the security model is that the resulting sink is addressable only by the salt the caller supplied. A caller who instantiates a sink with a salt no issuer ever computed creates a sink that no Leg B will ever feed; it self-destructs via `Refund` past the deadline.",
+      "type": "object",
+      "required": [
+        "create_sink"
+      ],
+      "properties": {
+        "create_sink": {
+          "type": "object",
+          "required": [
+            "salt",
+            "sink_init"
+          ],
+          "properties": {
+            "salt": {
+              "description": "Caller-supplied salt for [`cosmwasm_std::WasmMsg::Instantiate2`]. Convention from `choice_mts_issuer`: `encode(issuer_addr, internal_id)`. The factory does not interpret it; addresses are derived deterministically downstream.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Binary"
+                }
+              ]
+            },
+            "sink_init": {
+              "$ref": "#/definitions/SinkInit"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Factory-only.** Spawns a `Locker` at `instantiate2(this_factory, sink_code_id, salt)` (the seeder binary serves all three roles, so the same code-id is used). Permissionless, same security model as `CreateSink`: the locker is addressable only by the salt the caller supplied. The keeper computes the locker address from a launch-specific salt and passes it as a `Clmm` sink's `position_recipient`, so the position NFT mints straight into it.",
+      "type": "object",
+      "required": [
+        "create_locker"
+      ],
+      "properties": {
+        "create_locker": {
+          "type": "object",
+          "required": [
+            "locker_init",
+            "salt"
+          ],
+          "properties": {
+            "locker_init": {
+              "$ref": "#/definitions/LockerInit"
+            },
+            "salt": {
+              "$ref": "#/definitions/Binary"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Sink-only, permissionless.** Single-shot. Reads the sink's own bank balances of `token_denom` and `pair_denom`, then submits `factory.CreatePair` followed by `pair.ProvideLiquidity` and routes the minted LP per `lp_destination`. Atomic across all sub-messages. The cranker receives no tip — the entire balance seeds the pool.\n\nPrerequisites the caller MUST ensure: * Both denoms are pre-registered on the target `choice_factory` via `AddNativeTokenDecimals`. For the launch denom, `choice_mts_issuer` handles this in its `RegisterLaunch` flow (the issuer is the denom-factory admin and can sign the registration). For the pair denom, this is the consumer dApp's responsibility — usually a no-op because the pair denom (SHROOM, INJ, etc.) is already registered from existing pools. * The create-pair fee rides in `info.funds` on the `Settle` tx itself (NOT pre-funded into the sink balance): an `Xyk` sink must attach EXACTLY the live tokenfactory denom-creation fee (queried at runtime; the chain debits it to mint `factory/<pair>/lp`), while a `Clmm` sink must attach NOTHING — pool creation is free and any attached funds are rejected (`UnexpectedFundsForClmmSettle`).",
+      "type": "object",
+      "required": [
+        "settle"
+      ],
+      "properties": {
+        "settle": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Sink-only, permissionless after `deadline_seconds`.** Routes:\n\n* `token_denom` back to the configured `issuer` (which has `RefundFailedLaunch` to burn it cleanly, leaving no zombie supply on the CW side). * `pair_denom` to `refund_receiver` (the consumer dApp's EVM-side refund authority).\n\nSingle-shot, mutually exclusive with `Settle`.",
+      "type": "object",
+      "required": [
+        "refund"
+      ],
+      "properties": {
+        "refund": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Factory admin.** Step 1 of a two-step admin rotation: park `new_admin` as the pending admin. It does NOT take effect until the pending key calls [`ExecuteMsg::AcceptAdmin`], so a rotation to a typo'd / uncontrolled address cannot brick governance. Passing the current admin (or re-calling) overwrites any prior pending nomination.",
+      "type": "object",
+      "required": [
+        "update_admin"
+      ],
+      "properties": {
+        "update_admin": {
+          "type": "object",
+          "required": [
+            "new_admin"
+          ],
+          "properties": {
+            "new_admin": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Pending admin only.** Step 2 of the rotation: the address parked by `UpdateAdmin` claims the admin role. Errors if there is no pending nomination or the caller is not it.",
+      "type": "object",
+      "required": [
+        "accept_admin"
+      ],
+      "properties": {
+        "accept_admin": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Factory admin.** Swap in a new sink code-id (presumably a v2 audited build). Future `CreateSink` calls instantiate against the new code-id; existing sinks are unaffected — they were instantiated against the old one and are immutable post-instantiate.",
+      "type": "object",
+      "required": [
+        "update_sink_code_id"
+      ],
+      "properties": {
+        "update_sink_code_id": {
+          "type": "object",
+          "required": [
+            "new_sink_code_id"
+          ],
+          "properties": {
+            "new_sink_code_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Factory admin.** Flip the factory circuit breaker. While `paused`, `CreateSink` / `CreateLocker` are refused and every sink that consults this factory freezes its `Settle`. The incident-response halt for a discovered DEX / seeding bug; lift it to resume.",
+      "type": "object",
+      "required": [
+        "set_paused"
+      ],
+      "properties": {
+        "set_paused": {
+          "type": "object",
+          "required": [
+            "paused"
+          ],
+          "properties": {
+            "paused": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Factory admin.** Re-point the XYK `choice_factory` after an XYK redeploy. Affects only FUTURE sinks — already-spawned sinks carry their own snapshot. Avoids a full factory redeploy when the DEX moves.",
+      "type": "object",
+      "required": [
+        "update_choice_factory"
+      ],
+      "properties": {
+        "update_choice_factory": {
+          "type": "object",
+          "required": [
+            "new_choice_factory"
+          ],
+          "properties": {
+            "new_choice_factory": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Factory admin.** Re-point the CLMM factory + manager after a CLMM redeploy (the addresses most likely to churn during active development). All-or-nothing: pass BOTH to enable/repoint CLMM graduation, or BOTH `None` to disable it. Future sinks only.",
+      "type": "object",
+      "required": [
+        "update_clmm_addresses"
+      ],
+      "properties": {
+        "update_clmm_addresses": {
+          "type": "object",
+          "properties": {
+            "clmm_factory": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "clmm_manager": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Sink-only, factory-admin-gated.** Emergency termination of a `Pending` sink that cannot (or should not) settle — e.g. a seed ratio that trips `SeedRatioOutOfRange`, an unsupported fee tier, or a sink caught up in a paused incident. Identical fund routing to `Refund` (token → issuer, pair → refund_receiver) but BYPASSES the `deadline_seconds` wait. Authenticated against the parent factory's `admin` (looked up via [`crate::state::SinkConfig::factory`]).",
+      "type": "object",
+      "required": [
+        "force_refund"
+      ],
+      "properties": {
+        "force_refund": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Sink internal sub-step.** Only callable by the sink itself; gated by `info.sender == env.contract.address`. Wraps the post-`CreatePair` chain so the sink can query the new pair address out of factory storage between steps.",
+      "type": "object",
+      "required": [
+        "callback"
+      ],
+      "properties": {
+        "callback": {
+          "$ref": "#/definitions/CallbackMsg"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Locker-only, permissionless.** Collects accrued fees on the held position NFT(s) into the locker itself, then chains a `Callback(DistributeFees)` that splits every collected denom between the `treasury` and `creator` legs per `creator_fee_share_bps`. With `token_id` `None`, collects every NFT the locker owns (first page of the manager's `Tokens` enumeration); with `Some`, collects exactly that one. There is intentionally no path here to decrease or burn liquidity — principal stays locked.",
+      "type": "object",
+      "required": [
+        "collect_fees"
+      ],
+      "properties": {
+        "collect_fees": {
+          "type": "object",
+          "properties": {
+            "token_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "**Locker admin.** Rotate the `treasury` leg of the fee split. Errors if the locker was instantiated with no admin (immutable treasury). The `creator` leg is immutable and cannot be rotated through any path.",
+      "type": "object",
+      "required": [
+        "update_treasury"
+      ],
+      "properties": {
+        "update_treasury": {
+          "type": "object",
+          "required": [
+            "new_treasury"
+          ],
+          "properties": {
+            "new_treasury": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "Binary": {
+      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>. See also <https://github.com/CosmWasm/cosmwasm/blob/main/docs/MESSAGE_TYPES.md>.",
+      "type": "string"
+    },
+    "CallbackMsg": {
+      "oneOf": [
+        {
+          "description": "Step 2 of `Settle`: queries `factory.Pair { asset_infos }` to get the freshly-created pair address, then emits `pair.ProvideLiquidity` with `token_amount` + `pair_amount` attached as funds.",
+          "type": "object",
+          "required": [
+            "provide_liquidity"
+          ],
+          "properties": {
+            "provide_liquidity": {
+              "type": "object",
+              "required": [
+                "pair_amount",
+                "token_amount"
+              ],
+              "properties": {
+                "pair_amount": {
+                  "$ref": "#/definitions/Uint128"
+                },
+                "token_amount": {
+                  "$ref": "#/definitions/Uint128"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Step 3 of `Settle`: queries the sink's bank balance of the pair's `liquidity_token` denom (which is `factory/<pair_addr>/lp`) and routes it per `lp_destination`. Asserts `lp_minted > 0`; defends against a bug where the pair's `share == 0` branch silently produced no LP.",
+          "type": "object",
+          "required": [
+            "distribute_lp"
+          ],
+          "properties": {
+            "distribute_lp": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Final step of the `Clmm` `Settle`: after `manager.MintPosition` has run and refunded any one-sided surplus back to this sink, sweep whatever `token_denom` / `pair_denom` dust remains to `refund_receiver` so no value strands in a terminal sink. A no-op (no messages) when nothing is left.",
+          "type": "object",
+          "required": [
+            "sweep_dust"
+          ],
+          "properties": {
+            "sweep_dust": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "**Locker step 2 of `CollectFees`.** After `manager.Collect` has routed the position's accrued fees into this locker, split every nonzero bank balance between the `treasury` and `creator` legs per `creator_fee_share_bps`. Treasury absorbs the rounding remainder so no dust strands. Denom-agnostic: handles both pool tokens (and any stray balance) without needing to know the position's token0/token1 up front.",
+          "type": "object",
+          "required": [
+            "distribute_fees"
+          ],
+          "properties": {
+            "distribute_fees": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LockerInit": {
+      "description": "Locker role config. The locker owns a CLMM position NFT and can only collect its fees — never withdraw principal. Collected fees are split between a `treasury` leg and a `creator` leg per `creator_fee_share_bps`, mirroring the launch's bonding-curve fee split.",
+      "type": "object",
+      "required": [
+        "creator",
+        "creator_fee_share_bps",
+        "manager",
+        "treasury"
+      ],
+      "properties": {
+        "admin": {
+          "description": "Optional admin allowed to rotate the `treasury` leg. `None` makes the treasury immutable too — a fully trust-minimized locker. The creator leg is immutable regardless of this field.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "creator": {
+          "description": "Creator leg — gets `creator_fee_share_bps` of every collected fee. Immutable for the life of the locker (never rotated). The keeper sets this to the launch creator's bech32 at graduation.",
+          "type": "string"
+        },
+        "creator_fee_share_bps": {
+          "description": "Creator's share of each collected fee, in bps of the fee (`≤ 10_000`). The keeper sources this from the launch's `creatorFeeShareBps` snapshot on `LaunchpadCore` so the graduated split equals the bonding-curve one.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "manager": {
+          "description": "The `choice_clmm_manager` the held position NFT lives in. `CollectFees` calls `Collect` here; the locker must be the NFT owner.",
+          "type": "string"
+        },
+        "treasury": {
+          "description": "Treasury leg of the fee split — gets `10_000 - creator_fee_share_bps` of every collected fee. Rotatable by `admin`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LpDestination": {
+      "oneOf": [
+        {
+          "description": "`BankMsg::Burn` the freshly-minted LP. Once burned, the pool's initial liquidity is permanently unwithdrawable — the launch-token holders trade against a floor of locked liquidity. SHROOM's v1 default.",
+          "type": "string",
+          "enum": [
+            "burn"
+          ]
+        },
+        {
+          "description": "`BankMsg::Send` the LP to an address. Useful for treasuries, future locker contracts, or LP-incentive farms. The address is validated at `CreateSink` time.",
+          "type": "object",
+          "required": [
+            "send_to"
+          ],
+          "properties": {
+            "send_to": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PoolKind": {
+      "description": "Graduation venue + its config. The factory validates the embedded addresses against its own pinned values at `CreateSink` time, so a sink's stored `pool_kind` always names the exact DEX deployment it will touch.",
+      "oneOf": [
+        {
+          "description": "Legacy constant-product graduation.",
+          "type": "object",
+          "required": [
+            "xyk"
+          ],
+          "properties": {
+            "xyk": {
+              "type": "object",
+              "required": [
+                "choice_factory",
+                "lp_destination"
+              ],
+              "properties": {
+                "choice_factory": {
+                  "description": "MUST equal `FactoryConfig.choice_factory`. The XYK factory this sink calls `CreatePair` against.",
+                  "type": "string"
+                },
+                "lp_destination": {
+                  "description": "What happens to the LP minted by the initial `ProvideLiquidity`: `Burn` (permanently locked floor) or `SendTo` (treasury / farm).",
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/LpDestination"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Concentrated-liquidity graduation. `Settle` creates a CLMM pool at the seed ratio, then mints a single full-range position NFT (via the manager) to `position_recipient`. Pairing a `Locker` recipient with a pool whose principal is never decreased = permanently locked liquidity that still earns fees.",
+          "type": "object",
+          "required": [
+            "clmm"
+          ],
+          "properties": {
+            "clmm": {
+              "type": "object",
+              "required": [
+                "clmm_factory",
+                "clmm_manager",
+                "fee_tier",
+                "position_recipient"
+              ],
+              "properties": {
+                "clmm_factory": {
+                  "description": "MUST equal `FactoryConfig.clmm_factory`. The CLMM factory this sink calls `CreatePool` against.",
+                  "type": "string"
+                },
+                "clmm_manager": {
+                  "description": "MUST equal `FactoryConfig.clmm_manager`. The NFT position manager this sink mints liquidity through.",
+                  "type": "string"
+                },
+                "fee_tier": {
+                  "description": "Fee tier (pips) for the pool — must be an enabled tier on the CLMM factory (e.g. 100/500/3000/10000). Decides the tick spacing the full-range bounds snap to.",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "max_fee_multiple": {
+                  "description": "Dynamic-fee ceiling as a multiple of `fee_tier`, forwarded verbatim to the CLMM factory's `CreatePool` (valid 2..=10 there). `None` = factory default (2x). Graduation pools typically want a high multiple (e.g. 10x) so the locked position's volatility fee can actually price a post-graduation frenzy.",
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "position_recipient": {
+                  "description": "Owner of the minted position NFT. Usually a `Locker` whose address the launch derived deterministically; any address that can later call `manager.Collect` works.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SinkInit": {
+      "type": "object",
+      "required": [
+        "deadline_seconds",
+        "issuer",
+        "pair_decimals",
+        "pair_denom",
+        "pool_kind",
+        "refund_receiver",
+        "token_decimals",
+        "token_denom"
+      ],
+      "properties": {
+        "deadline_seconds": {
+          "description": "Seconds-after-instantiate at which `Refund` becomes permissionless. `Settle` is permissionless from t=0; this gate only opens the alternative termination path.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "expected_pair": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Uint128"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_token": {
+          "description": "Committed seed amounts (audit H-1 / M-1). When set, `Settle` seeds EXACTLY these amounts at EXACTLY this ratio and sweeps any surplus — pinning the opening price against the donation-reprice attack and rejecting premature/partial settlement. The keeper computes them from the launch's deterministic graduation amounts. `None` ⇒ legacy seed-the-live- balance behaviour (direct-instantiate debug path only). Both must be set together; setting only one is rejected at `CreateSink`/instantiate.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Uint128"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "issuer": {
+          "description": "Issuer that's about to feed Leg B into this sink (bech32 of a [`choice_mts_issuer`](../../choice_mts_issuer) instance). Stored for `Refund`-time provenance: any leftover launch-denom balance goes back here to be burned.",
+          "type": "string"
+        },
+        "pair_decimals": {
+          "description": "Decimals for `pair_denom`. Same note as above.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "pair_denom": {
+          "description": "Pair asset for the eventual Choice pool. The sink's bank balance of this denom comes from EVM Leg C — the forwarder bech32 receives pair-asset from the bank precompile and immediately forwards to this sink's address.",
+          "type": "string"
+        },
+        "pool_kind": {
+          "description": "Which DEX this sink graduates to, and the venue-specific config. `Xyk` reproduces the legacy constant-product path (create pair, provide liquidity, route LP per `lp_destination`); `Clmm` creates a concentrated-liquidity pool at the seed ratio and mints a full-range position NFT to `position_recipient` (typically a `Locker`). Immutable per-sink.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/PoolKind"
+            }
+          ]
+        },
+        "refund_receiver": {
+          "description": "`Refund`'s pair-asset recipient. For SHROOM, this is `LaunchpadCore` (which performs proportional refunds to curve participants on its own EVM accounting). For other consumer dApps, anywhere they want any partial Leg-C deposit to land if settlement fails.",
+          "type": "string"
+        },
+        "token_decimals": {
+          "description": "Decimals for `token_denom`. Pass-through onto the Choice pair via the factory's `query_decimals` flow; only used for observability today since the factory queries decimals from its own `NATIVE_TOKEN_DECIMALS` map (pre-registered out of band by the consumer dApp's issuer).",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "token_denom": {
+          "description": "Tokenfactory launch denom (`factory/<issuer>/<prefix>_<id>`). The sink's bank balance of this denom comes from issuer Leg B (`BankMsg::Send` from the issuer after `DeliverToSeeder`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Uint128": {
+      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,59 @@
+[package]
+name = "choice-mts-issuer"
+version = "1.0.0"
+authors = ["Dan Van Eijck"]
+edition = "2021"
+description = "Generic MultiVM Token Standard issuer + reserve custodian. Per-dApp instantiated; pairs a tokenfactory denom to an auto-deployed MintBurnBankERC20 and delivers the CW-side reserve to a pool seeder at graduation."
+license = "MIT"
+
+exclude = [
+  "contract.wasm",
+  "hash.txt",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+library = []
+
+[dependencies]
+cw2                  = { version = "2.0.0" }
+cosmwasm-schema      = { version = "2.2.2" }
+cosmwasm-std         = { version = "2.2.2", features = [ "abort", "cosmwasm_1_2", "cosmwasm_1_3", "cosmwasm_1_4", "cosmwasm_2_0", "iterator", "stargate" ] }
+cw-storage-plus      = { version = "2.0.0" }
+
+injective-cosmwasm   = { version = "0.3.4-1" }
+
+prost                = { version = "0.13.5", default-features = false, features = ["prost-derive"] }
+
+schemars             = { version = "0.8.22" }
+serde                = { version = "1.0.219", default-features = false, features = [ "derive" ] }
+serde-json-wasm      = { version = "1.0.0" }
+
+thiserror            = { version = "2.0.12" }
+
+# Only used for the `factory::ExecuteMsg::AddNativeTokenDecimals` schema —
+# the issuer never instantiates a choice_factory itself, just chains a
+# JSON-encoded message at it during RegisterLaunch when `choice_factory` is
+# Some. Re-using the shared schema keeps the wire format trivially
+# in-sync with the legacy XYK factory contracts.
+choice                = { path = "../../packages/choice", default-features = false, version = "1.1.2" }
+
+# Used for the `factory::ExecuteMsg::AuthorizeCreation` + `AssetInfo` schema —
+# the issuer chains a JSON-encoded `AuthorizeCreation` at the consumer dApp's
+# CLMM factory during RegisterLaunch when `clmm_pool_auth` is Some (anti-squat
+# gate). Same reuse-the-shared-schema rationale as the `choice` dep above.
+choice-clmm-common    = { workspace = true }
+
+# Used to decode the opaque `create_sink_payload` at RegisterLaunch so the
+# issuer can enforce that a CLMM launch carries a coherent `clmm_pool_auth`
+# reservation (anti-squat) and that the sink seeds exactly the denom the issuer
+# reserves. The `library` feature drops the seeder's `entry_point`s so its
+# exported wasm symbols don't clash with the issuer's own. Importing the real
+# `msg` types (rather than a hand-mirrored copy) makes any future ABI drift a
+# compile error instead of a silent enforcement bypass.
+choice-pool-seeder    = { path = "../choice_pool_seeder", default-features = false, features = ["library"] }
+
+[dev-dependencies]
+injective-test-tube  = { version = "1.16.3-1" }

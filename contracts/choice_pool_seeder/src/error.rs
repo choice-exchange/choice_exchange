@@ -1,0 +1,184 @@
+use cosmwasm_std::{OverflowError, StdError};
+use thiserror::Error;
+
+#[derive(Error, Debug, PartialEq)]
+pub enum ContractError {
+    #[error("{0}")]
+    Std(#[from] StdError),
+
+    #[error("{0}")]
+    Overflow(#[from] OverflowError),
+
+    #[error("Unauthorized")]
+    Unauthorized {},
+
+    #[error("Factory is paused; CreateSink / CreateLocker / Settle are halted")]
+    Paused {},
+
+    #[error("factory {factory} config is unreadable; settlement blocked (fail-closed): {reason}")]
+    FactoryUnreadable { factory: String, reason: String },
+
+    #[error("No pending admin to accept")]
+    NoPendingAdmin {},
+
+    #[error("ForceRefund unavailable: this sink has no recorded factory (direct-instantiate debug path)")]
+    SinkHasNoFactory {},
+
+    #[error("UpdateClmmAddresses must set clmm_factory and clmm_manager together, or neither")]
+    ClmmAddressesHalfSet {},
+
+    #[error("Action `{action}` requires the {required} role; this instance is a {actual}")]
+    WrongRole {
+        action: String,
+        required: String,
+        actual: String,
+    },
+
+    #[error(
+        "SinkInit.choice_factory `{got}` does not match factory's pinned choice_factory `{expected}`"
+    )]
+    SinkChoiceFactoryMismatch { got: String, expected: String },
+
+    #[error(
+        "Clmm sink rejected: factory pins clmm_{which} `{expected}` but sink_init supplied `{got}`"
+    )]
+    SinkClmmAddressMismatch {
+        which: String,
+        got: String,
+        expected: String,
+    },
+
+    #[error(
+        "Clmm graduation is not configured on this factory (clmm_factory / clmm_manager unset)"
+    )]
+    ClmmNotConfigured {},
+
+    #[error("FactoryInit must set clmm_factory and clmm_manager together, or neither")]
+    ClmmHalfConfigured {},
+
+    #[error("fee tier {fee} is not enabled on the CLMM factory")]
+    FeeTierNotSupported { fee: u32 },
+
+    #[error("CLMM pool for this token pair + fee tier already exists at `{pool}` — refusing to seed into a pre-priced pool")]
+    ClmmPoolAlreadyExists { pool: String },
+
+    #[error("Clmm Settle takes no funds; attach nothing (CLMM pool creation is free)")]
+    UnexpectedFundsForClmmSettle {},
+
+    #[error(
+        "Seed ratio produces an out-of-range CLMM init sqrt price {sqrt_price}; valid range is [{min}, {max_exclusive}). Re-scale the seed amounts, pick a different fee tier, or Refund."
+    )]
+    SeedRatioOutOfRange {
+        sqrt_price: String,
+        min: String,
+        max_exclusive: String,
+    },
+
+    #[error("Locker has no admin; treasury leg is immutable")]
+    LockerNoAdmin {},
+
+    #[error("Locker owns no position NFTs to collect fees on")]
+    LockerNoPositions {},
+
+    #[error("creator_fee_share_bps {value} exceeds max {max}")]
+    LockerCreatorFeeShareTooHigh { value: u16, max: u16 },
+
+    #[error("token_denom and pair_denom must differ; got `{denom}` for both")]
+    SameDenom { denom: String },
+
+    #[error("deadline_seconds must be > 0")]
+    ZeroDeadline {},
+
+    #[error(
+        "deadline_seconds {got} is below the minimum {min} (audit S-1): a too-short refund deadline lets a permissionless Refund race a fully-funded Settle"
+    )]
+    DeadlineTooShort { got: u64, min: u64 },
+
+    #[error(
+        "Refund refused (audit S-1b): this sink holds at least the committed seed on both legs, so it can still Settle into a healthy pool. A permissionless post-deadline Refund must not deny graduation; only the factory admin's ForceRefund may override (for genuinely-unsettleable sinks)."
+    )]
+    SinkIsSettleableUseSettle {},
+
+    #[error(
+        "XYK graduation is disabled in this build (audit S-5): the production wasm is compiled without the `xyk` feature. Use a CLMM pool_kind, or build with `--features xyk` for the XYK debug/test path."
+    )]
+    XykDisabled {},
+
+    #[error("expected_token and expected_pair must be set together, or both omitted")]
+    ExpectedAmountsHalfSet {},
+
+    #[error("expected_token / expected_pair must be > 0 when set")]
+    ZeroExpectedAmount {},
+
+    #[error(
+        "Settle: live {which} balance {available} is below the committed seed {expected}; the full graduation deposit has not landed yet"
+    )]
+    SeedBelowCommitted {
+        which: String,
+        available: String,
+        expected: String,
+    },
+
+    #[error("Sink is already terminal (status={status})")]
+    SinkTerminal { status: String },
+
+    #[error(
+        "Settle requires both balances non-zero: token_denom balance={token}, pair_denom balance={pair}"
+    )]
+    InsufficientBalanceForSettle { token: String, pair: String },
+
+    #[error(
+        "Attach the tokenfactory create-pair fee in `info.funds`: need {required} {denom}, supplied {supplied}"
+    )]
+    InsufficientCreateFee {
+        denom: String,
+        required: String,
+        supplied: String,
+    },
+
+    #[error(
+        "info.funds must equal the chain's create-pair fee exactly: {denom} required {required}, supplied {supplied}"
+    )]
+    CreateFeeOverpaid {
+        denom: String,
+        required: String,
+        supplied: String,
+    },
+
+    #[error("info.funds carries unexpected denom `{denom}` (only the chain's create-pair fee may be attached)")]
+    UnexpectedFundsDenom { denom: String },
+
+    #[error("Refund deadline not yet reached: {remaining_seconds}s remaining")]
+    RefundDeadlineNotReached { remaining_seconds: u64 },
+
+    #[error("Refund refused: sink holds no token_denom or pair_denom balance")]
+    NothingToRefund {},
+
+    #[error(
+        "Pair was not registered by choice_factory after CreatePair — expected a Pair entry but got none"
+    )]
+    PairNotFoundPostCreate {},
+
+    #[error("ProvideLiquidity minted zero LP — likely both deposits were dust")]
+    ZeroLpMinted {},
+
+    #[error("Self-callback invoked by an external sender")]
+    CallbackUnauthorized {},
+
+    #[error("unexpected reply id {id}")]
+    UnknownReplyId { id: u64 },
+
+    #[error("CLMM mint reply missing the manager's `token_id` attribute (observability)")]
+    MintReplyMissingTokenId {},
+
+    #[error("Invalid migration: cannot apply variant `{requested}` from current version `{from}`")]
+    InvalidMigration { from: String, requested: String },
+
+    #[error("Cannot migrate: stored contract is `{found}`, expected `{expected}`")]
+    MigrationWrongContract { found: String, expected: String },
+
+    #[error(
+        "a factory-created CLMM sink must commit its seed amounts (expected_token + expected_pair) — seed-the-live-balance is a donation-repriceable debug-only path (audit H-1/M-1)"
+    )]
+    CommittedAmountsRequiredForClmm {},
+}

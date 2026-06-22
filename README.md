@@ -78,8 +78,21 @@ docker run --rm -v "$(pwd)":/code \
 
 The optimized contracts are generated in the artifacts/ directory.
 
-## Deploy to testnet example
+## Deploy
 
-Set your injective cli configuration variables in the deploy script file:
+Network parameters live in [deploy/network/](deploy/network/) (`testnet.env`,
+`mainnet.env`). Each deploy script picks one via the `NETWORK` env var,
+defaulting to `testnet`. See [deploy/guide.md](deploy/guide.md) for the full
+flow.
 
-[deploy_testnet.sh](testnet_deploy/deploy_testnet.sh)
+Quick examples:
+
+```bash
+./deploy/deploy_testnet.sh                                    # legacy: full DEX deploy
+./deploy/upload_farm_code.sh                                  # upload farm + factory wasms
+NETWORK=mainnet ./deploy/upload_farm_code.sh                  # same, mainnet
+FARM_CODE_ID=123 FACTORY_CODE_ID=124 \
+    ./deploy/instantiate_farm_factory.sh                      # instantiate factory
+```
+
+Most of the targets are also exposed via `make` — `make help` lists them.

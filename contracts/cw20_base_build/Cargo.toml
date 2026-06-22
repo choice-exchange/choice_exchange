@@ -1,0 +1,31 @@
+[package]
+name = "cw20-base-build"
+version = "2.0.0"
+authors = ["Dan Van Eijck"]
+edition = "2018"
+description = "Thin wrapper that re-exports cw20-base entry points so the workspace-optimizer produces a cw20_base_build.wasm artifact. Used only by integration tests — not deployed."
+license = "Apache-2.0"
+
+exclude = [
+  "contract.wasm",
+  "hash.txt",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std = { version = "2.2.2", features = [
+    "abort",
+    "cosmwasm_1_2",
+    "cosmwasm_1_3",
+    "cosmwasm_1_4",
+    "cosmwasm_2_0",
+    "iterator",
+    "stargate",
+] }
+cw20-base = { version = "2.0.0", features = ["library"] }
+# Required: partial builds (including the workspace-optimizer's per-contract
+# release build) drop `alloc` on ed25519-zebra via feature unification, which
+# breaks cosmwasm-crypto. Same workaround as cw20_reflection_token.
+ed25519-zebra = { version = "4.1.0" }

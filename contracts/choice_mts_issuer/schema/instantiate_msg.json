@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InstantiateMsg",
+  "type": "object",
+  "required": [
+    "admin",
+    "decimals",
+    "forwarder",
+    "keeper",
+    "refund_deadline_seconds",
+    "subdenom_prefix"
+  ],
+  "properties": {
+    "admin": {
+      "description": "Admin (timelock multisig recommended). Owns the `keeper` and `forwarder` rotations and the migration entry point.",
+      "type": "string"
+    },
+    "decimals": {
+      "description": "Default decimals for every denom this issuer creates. v1 is 18-only.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "forwarder": {
+      "description": "20-byte bech32 hot key receiving pair-asset from EVM at graduation.",
+      "type": "string"
+    },
+    "keeper": {
+      "description": "Allowlisted relay key authorized to crank `DeliverToSeeder` / `RefundFailedLaunch` until the per-launch refund deadline lapses.",
+      "type": "string"
+    },
+    "refund_deadline_seconds": {
+      "description": "Auto-refund window for stuck launches (post-`Registered`, pre- `Delivered`). After this, anyone can call `RefundFailedLaunch`.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "subdenom_prefix": {
+      "description": "Tokenfactory subdenom prefix. Must be non-empty and fit alongside a `u64` decimal suffix inside the 44-char tokenfactory subdenom cap.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

@@ -91,7 +91,7 @@
       "additionalProperties": false
     },
     {
-      "description": "Triggers the auto-compounding of rewards.",
+      "description": "Triggers the auto-compounding of rewards. **Permissionless** — any caller may invoke, but MUST commit to a non-zero `minimum_lp_to_receive` so the vault's downside is bounded if they set lax belief prices or get sandwiched (C-3).\n\n`belief_prices` is the caller's expected `offer_pool / ask_pool` for each swap in the compound flow, in order. Length must equal the number of swaps the contract will perform (`route.len() + 1` when a route is configured, else `1`). Combined with the configured `slippage_tolerance`, these are what prevent a sandwicher from manipulating the AMM price during the compound tx.\n\n`minimum_lp_to_receive` reverts the tx when the liquidity provision mints less than this many LP tokens for the vault. Required and must be non-zero.",
       "type": "object",
       "required": [
         "compound"
@@ -99,6 +99,21 @@
       "properties": {
         "compound": {
           "type": "object",
+          "required": [
+            "belief_prices",
+            "minimum_lp_to_receive"
+          ],
+          "properties": {
+            "belief_prices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Decimal"
+              }
+            },
+            "minimum_lp_to_receive": {
+              "$ref": "#/definitions/Uint128"
+            }
+          },
           "additionalProperties": false
         }
       },
@@ -130,7 +145,21 @@
       "additionalProperties": false
     },
     {
-      "description": "Allows the owner to update the fee configuration.",
+      "description": "Lets any user activate their own pending deposit without waiting on the keeper. Subject to the same dilution guard as `ActivatePendingDeposits` — pending farm rewards must be below the compound threshold before activation proceeds.",
+      "type": "object",
+      "required": [
+        "activate_my_deposit"
+      ],
+      "properties": {
+        "activate_my_deposit": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Allows the owner to update the fee configuration. Compounder rotation is intentionally excluded — use `ProposeCompounder`/`ApplyCompounderRotation` which enforce a timelock.",
       "type": "object",
       "required": [
         "update_config"
@@ -139,12 +168,6 @@
         "update_config": {
           "type": "object",
           "properties": {
-            "compounder": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "fee_percentage": {
               "anyOf": [
                 {
@@ -188,6 +211,49 @@
       "additionalProperties": false
     },
     {
+      "description": "Owner-only. Clears `fee_recipient` so future compounds skip the fee transfer entirely. `UpdateConfig` can only *set* the recipient; this is the only way to fully remove it (zeroing `fee_percentage` is a separate workaround).",
+      "type": "string",
+      "enum": [
+        "clear_fee_recipient"
+      ]
+    },
+    {
+      "description": "Owner proposes a new compounder. The swap cannot take effect until `COMPOUNDER_ROTATION_DELAY_SECONDS` have elapsed. Proposing again resets the timer.",
+      "type": "object",
+      "required": [
+        "propose_compounder"
+      ],
+      "properties": {
+        "propose_compounder": {
+          "type": "object",
+          "required": [
+            "new_compounder"
+          ],
+          "properties": {
+            "new_compounder": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Owner-only. Finalizes a pending compounder rotation once the timelock has expired.",
+      "type": "string",
+      "enum": [
+        "apply_compounder_rotation"
+      ]
+    },
+    {
+      "description": "Owner-only. Clears any pending compounder rotation.",
+      "type": "string",
+      "enum": [
+        "cancel_compounder_proposal"
+      ]
+    },
+    {
       "type": "object",
       "required": [
         "propose_new_owner"
@@ -207,6 +273,78 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "description": "H-4: owner-only. Freezes all entry paths (deposit, compound, activation). Exits remain open. Idempotent — re-pausing a paused vault is a no-op.",
+      "type": "string",
+      "enum": [
+        "pause"
+      ]
+    },
+    {
+      "description": "H-4: owner-only. Lifts the freeze.",
+      "type": "string",
+      "enum": [
+        "unpause"
+      ]
+    },
+    {
+      "description": "Owner-only. Instantly lowers `config.max_slippage_tolerance` to `new_max`. Must be `<= config.max_slippage_tolerance` — raises go through the timelocked `ProposeMaxSlippageRaise` flow. Does not touch any pending raise proposal (cancel explicitly if undesired).",
+      "type": "object",
+      "required": [
+        "tighten_max_slippage"
+      ],
+      "properties": {
+        "tighten_max_slippage": {
+          "type": "object",
+          "required": [
+            "new_max"
+          ],
+          "properties": {
+            "new_max": {
+              "$ref": "#/definitions/Decimal"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Owner-only. Proposes a raise of `config.max_slippage_tolerance` to `new_max`. Must be strictly greater than the current cap and at or below `MAX_SLIPPAGE_TOLERANCE_CEILING`. Applies after `MAX_SLIPPAGE_RAISE_DELAY_SECONDS` via `ApplyMaxSlippageRaise` — the 48h window gives depositors time to exit if they disagree with the new ceiling. Only one raise can be pending at a time.",
+      "type": "object",
+      "required": [
+        "propose_max_slippage_raise"
+      ],
+      "properties": {
+        "propose_max_slippage_raise": {
+          "type": "object",
+          "required": [
+            "new_max"
+          ],
+          "properties": {
+            "new_max": {
+              "$ref": "#/definitions/Decimal"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Owner-only. Finalizes the pending cap raise once the timelock elapses.",
+      "type": "string",
+      "enum": [
+        "apply_max_slippage_raise"
+      ]
+    },
+    {
+      "description": "Owner-only. Clears the pending cap raise proposal.",
+      "type": "string",
+      "enum": [
+        "cancel_max_slippage_proposal"
+      ]
     }
   ],
   "definitions": {
