@@ -1033,14 +1033,18 @@ fn refund_refused_when_committed_sink_is_settleable() {
     );
 }
 
-/// S-1(b): the refund is STILL allowed when a committed leg is short (the full
-/// graduation deposit never landed, so the sink cannot settle) — the refund is
-/// the correct terminal state for a genuinely-failed launch.
+/// S-1(c): the permissionless `Refund` of a committed sink with a SHORT leg is
+/// now REFUSED. The full graduation deposit has not landed, and the permissionless
+/// deadline starts at instantiate (long before `triggerGraduation` funds the
+/// sink), so refunding here would let the sink go terminal before the real legs
+/// arrive — stranding them permanently. A genuinely-stuck funded sink is
+/// recovered by the factory-admin `ForceRefund`; the launch's own buyers are
+/// refunded EVM-side. The sink must stay `Pending`.
 #[test]
-fn refund_allowed_when_committed_sink_has_short_leg() {
+fn refund_refused_when_committed_sink_has_short_leg() {
     let committed_token = 1_000_000_000_000u128;
     let committed_pair = 800_000_000u128;
-    // Pair leg one wei short ⇒ NOT settleable ⇒ refund proceeds.
+    // Pair leg one wei short ⇒ NOT fully funded ⇒ permissionless refund refused.
     let mut deps = rich_deps(&[
         coin(committed_token, TOKEN_DENOM),
         coin(committed_pair - 1, PAIR_DENOM),
@@ -1050,18 +1054,58 @@ fn refund_allowed_when_committed_sink_has_short_leg() {
     let mut env = mock_env();
     env.block.time = env.block.time.plus_seconds(86_401);
     let caller = deps.api.addr_make("anyone");
-    let res = execute(
+    let err = execute(
         deps.as_mut(),
         env,
         message_info(&caller, &[]),
         ExecuteMsg::Refund {},
     )
-    .unwrap();
-    // token → issuer, short pair → refund_receiver.
-    assert_eq!(res.messages.len(), 2);
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SinkRefundUseForceRefund { .. }),
+        "expected SinkRefundUseForceRefund, got {err:?}"
+    );
     assert_eq!(
         SINK_STATE.load(deps.as_ref().storage).unwrap().status,
-        SinkStatus::Refunded
+        SinkStatus::Pending
+    );
+}
+
+/// S-1(c) (critical regression): the headline griefing vector. A committed sink
+/// that has NOT yet been funded by `triggerGraduation` (e.g. the curve is still
+/// trading) must not be refundable past the deadline just because someone
+/// bank-sent a dust donation to satisfy the old `NothingToRefund` guard. Before
+/// the fix, this flipped the sink to terminal `Refunded`; the graduation legs
+/// delivered afterward would then be stranded in a dead sink forever. The refund
+/// must now be refused and the sink left `Pending` so `Settle` can still finish
+/// graduation once the deposit lands.
+#[test]
+fn refund_refused_when_committed_sink_underfunded_post_deadline() {
+    let committed_token = 1_000_000_000_000u128;
+    let committed_pair = 800_000_000u128;
+    // Sink holds NO graduation deposit — only a 1-wei pair-denom dust donation an
+    // attacker bank-sent to get past the legacy `NothingToRefund` guard.
+    let mut deps = rich_deps(&[coin(1u128, PAIR_DENOM)]);
+    instantiate_sink_committed(&mut deps, committed_token, committed_pair);
+
+    let mut env = mock_env();
+    env.block.time = env.block.time.plus_seconds(86_401); // past the deadline
+    let attacker = deps.api.addr_make("griefer");
+    let err = execute(
+        deps.as_mut(),
+        env,
+        message_info(&attacker, &[]),
+        ExecuteMsg::Refund {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SinkRefundUseForceRefund { .. }),
+        "expected SinkRefundUseForceRefund, got {err:?}"
+    );
+    // Sink stays Pending: a later `triggerGraduation` delivery can still Settle.
+    assert_eq!(
+        SINK_STATE.load(deps.as_ref().storage).unwrap().status,
+        SinkStatus::Pending
     );
 }
 
