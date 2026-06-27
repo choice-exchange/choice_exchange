@@ -1163,17 +1163,29 @@ fn exec_refund(
         });
     }
 
-    // S-1(b): close the post-deadline Settle/Refund race. Once the deadline
-    // passes, `Refund` is permissionless — but a committed sink that ACTUALLY
-    // HOLDS both committed legs can still `Settle` into a healthy pool. Letting
-    // anyone refund it then would permanently deny graduation. So: for a
-    // committed sink (both `expected_*` set), refuse the permissionless refund
-    // when the live balances are `>=` BOTH committed amounts (i.e. it is
-    // settleable). A short leg means the full graduation deposit never landed,
-    // so a refund is the correct terminal state and is allowed (as before).
-    // Only the admin `ForceRefund` (which never calls this function) may
-    // override, for genuinely-unsettleable-but-funded sinks (e.g. an
-    // out-of-range seed ratio that trips `SeedRatioOutOfRange`).
+    // S-1(b)/(c): a COMMITTED sink (both `expected_*` set) is NEVER eligible for
+    // the permissionless `Refund`. The permissionless deadline starts at
+    // instantiate (RegisterLaunch), which can be long before `triggerGraduation`
+    // delivers the seed legs, so a committed sink is only ever in one of two
+    // honest states, and neither should refund here:
+    //
+    //   * S-1(b) — fully funded (both legs >= committed): still settleable, so
+    //     `Settle` (permissionless) must finish graduation; refunding would deny it.
+    //   * S-1(c) — NOT fully funded (one or both legs short): the graduation
+    //     deposit has not (fully) landed. Allowing a refund here is the
+    //     critical bug — a post-deadline 1-wei donation (or even a full single
+    //     leg) would flip a not-yet-funded sink to the terminal `Refunded`
+    //     state, and the real legs that `triggerGraduation` atomically delivers
+    //     afterward would be stranded forever (the sink is `admin: None`, with
+    //     no Settle/Refund/migrate path out of a terminal state). For the
+    //     atomic both-leg delivery model the sink is empty-or-full, so an
+    //     under-funded committed sink means "wait for the deposit, then Settle".
+    //
+    // A genuinely-stuck FUNDED sink (e.g. an out-of-range seed ratio that trips
+    // `SeedRatioOutOfRange`, or a sink caught in a paused incident) is recovered
+    // by the factory-admin `ForceRefund`, which bypasses this function entirely.
+    // Only the uncommitted (direct-instantiate debug) path keeps the legacy
+    // permissionless refund below.
     if let (Some(exp_token), Some(exp_pair)) = (cfg.expected_token, cfg.expected_pair) {
         let token_bal = deps
             .querier
@@ -1186,6 +1198,12 @@ fn exec_refund(
         if token_bal >= exp_token && pair_bal >= exp_pair {
             return Err(ContractError::SinkIsSettleableUseSettle {});
         }
+        return Err(ContractError::SinkRefundUseForceRefund {
+            token_available: token_bal.to_string(),
+            token_expected: exp_token.to_string(),
+            pair_available: pair_bal.to_string(),
+            pair_expected: exp_pair.to_string(),
+        });
     }
 
     do_refund(deps, env, &cfg, state, "refund")

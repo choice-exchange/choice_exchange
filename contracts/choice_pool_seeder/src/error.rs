@@ -100,6 +100,16 @@ pub enum ContractError {
     SinkIsSettleableUseSettle {},
 
     #[error(
+        "Refund refused (audit S-1c): committed sink not fully funded ({token_available}/{token_expected} token, {pair_available}/{pair_expected} pair). The permissionless deadline starts at instantiate (RegisterLaunch), long before the graduation deposit lands, so allowing a refund here would let a post-deadline dust/one-leg donation flip a not-yet-funded sink terminal — and the real legs delivered afterward (sink is admin:None, no Settle/Refund/migrate) would be permanently stranded. Wait for the full deposit then Settle, or use the factory-admin ForceRefund for a genuinely-stuck funded sink."
+    )]
+    SinkRefundUseForceRefund {
+        token_available: String,
+        token_expected: String,
+        pair_available: String,
+        pair_expected: String,
+    },
+
+    #[error(
         "XYK graduation is disabled in this build (audit S-5): the production wasm is compiled without the `xyk` feature. Use a CLMM pool_kind, or build with `--features xyk` for the XYK debug/test path."
     )]
     XykDisabled {},
