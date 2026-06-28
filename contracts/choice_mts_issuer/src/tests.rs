@@ -310,6 +310,54 @@ fn instantiate_rejects_decimals_over_18() {
 }
 
 #[test]
+fn instantiate_rejects_attached_funds() {
+    let mut deps = new_deps();
+    let admin = deps.api.addr_make("admin");
+    let msg = InstantiateMsg {
+        admin: admin.to_string(),
+        subdenom_prefix: PREFIX.to_string(),
+        decimals: 18,
+        keeper: deps.api.addr_make("keeper").to_string(),
+        forwarder: deps.api.addr_make("forwarder").to_string(),
+        refund_deadline_seconds: REFUND_DEADLINE,
+    };
+    // Any attached coin is rejected — the CreateDenom fee is paid per-launch at
+    // RegisterLaunch, never here.
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[coin(1, CREATE_FEE_DENOM)]),
+        msg,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ContractError::InstantiateDoesNotAcceptFunds {}
+    ));
+}
+
+#[test]
+fn instantiate_rejects_dead_admin() {
+    let mut deps = new_deps();
+    // The dead-burn constant is `inj`-prefixed; switch the mock api off the
+    // default `cosmwasm` prefix so `addr_validate` accepts it and the guard
+    // (which runs after validation) is the thing under test.
+    deps.api = MockApi::default().with_prefix("inj");
+    let sender = deps.api.addr_make("admin");
+    let msg = InstantiateMsg {
+        // 20-zero-byte tokenfactory dead-burn bech32 — would brick governance.
+        admin: "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49".to_string(),
+        subdenom_prefix: PREFIX.to_string(),
+        decimals: 18,
+        keeper: deps.api.addr_make("keeper").to_string(),
+        forwarder: deps.api.addr_make("forwarder").to_string(),
+        refund_deadline_seconds: REFUND_DEADLINE,
+    };
+    let err = instantiate(deps.as_mut(), mock_env(), message_info(&sender, &[]), msg).unwrap_err();
+    assert!(matches!(err, ContractError::AdminIsDeadAddress {}));
+}
+
+#[test]
 fn register_launch_emits_expected_message_chain_and_persists_record() {
     let mut deps = setup();
     let res = register_default(&mut deps, 42).unwrap();

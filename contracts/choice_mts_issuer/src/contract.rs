@@ -102,10 +102,17 @@ struct ReplyPayload {
 pub fn instantiate(
     deps: DepsMut<InjectiveQueryWrapper>,
     _env: Env,
-    _info: MessageInfo,
+    info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
+    // Instantiate accepts no funds. The CreateDenom fee is paid per-launch at
+    // RegisterLaunch, never here — any attached coin would be silently absorbed
+    // into the contract balance with no recovery path, so reject up front.
+    if !info.funds.is_empty() {
+        return Err(ContractError::InstantiateDoesNotAcceptFunds {});
+    }
 
     validate_subdenom_prefix(&msg.subdenom_prefix)?;
     if msg.decimals > MAX_DECIMALS {
@@ -119,6 +126,14 @@ pub fn instantiate(
     }
 
     let admin = deps.api.addr_validate(&msg.admin)?;
+    // The admin governs the issuer via a two-step handoff (UpdateAdmin/
+    // AcceptAdmin). Setting it to the tokenfactory dead-burn address at deploy
+    // would permanently brick governance (no key can ever AcceptAdmin), so
+    // reject the obvious foot-gun. Rotation to the dead address is still
+    // possible later only through the denom-admin renounce path, not here.
+    if admin.as_str() == DEAD_TOKENFACTORY_ADMIN {
+        return Err(ContractError::AdminIsDeadAddress {});
+    }
     let keeper = deps.api.addr_validate(&msg.keeper)?;
     let forwarder = deps.api.addr_validate(&msg.forwarder)?;
 
