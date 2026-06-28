@@ -302,7 +302,7 @@ fn execute_register_launch(
     // never holds caller-belonging dust. The keeper reads the live chain fee
     // in preflight and retries on governance fee change.
     let create_fee = choice::querier::query_token_factory_denom_create_fee(&deps.querier)?;
-    require_exact_create_fee_funds(&info, &create_fee)?;
+    choice::fees::require_exact_create_fee_funds(&info.funds, &create_fee)?;
 
     // Per-`evm_authority` id namespace: a redeploy that resets its counter to
     // 0 cannot collide with a prior deployment's records.
@@ -369,6 +369,14 @@ fn execute_register_launch(
     let salt = salt_suffix
         .as_deref()
         .ok_or(ContractError::SaltSuffixRequired {})?;
+    // NOTE (keeper-trust boundary): this check enforces only the SHAPE of the
+    // salt — minimum length and ASCII-alphanumeric charset. It cannot verify the
+    // salt is actually high-entropy; a keeper that supplies a predictable value
+    // (e.g. "aaaaaaaa") technically passes but reintroduces the address-squat DoS
+    // (M-2) the entropy exists to prevent. Theft stays blocked regardless (the
+    // squatter only griefs an aborted RegisterLaunch, never captures funds — see
+    // the derivation pins below); the unguessability guarantee is therefore a
+    // KEEPER responsibility: the relay MUST draw `salt_suffix` from a CSPRNG.
     if salt.len() < MIN_SALT_SUFFIX_LEN || !salt.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(ContractError::SaltSuffixInvalid {
             got: salt.to_string(),
@@ -605,6 +613,13 @@ fn execute_register_launch(
     // can be set later via a separate, decimals-free path if needed
     // (cosmetic only — choice_factory uses its own NATIVE_TOKEN_DECIMALS
     // map, registered via step 5 below).
+    //
+    // ACCEPTED TRADEOFF (cosmetic): `MsgCreateDenom` below sets the bank
+    // metadata `name`/`symbol` to the raw subdenom (e.g. `shroom_42_aB3xK9zQ`),
+    // and the v1.20 decimals-immutability trap means it can't be prettied up
+    // post-create. Bank explorers will show that raw form. The human-facing
+    // name/symbol live on the EVM-side MTS pair and in the app, so this is
+    // knowingly left as-is rather than worked around.
 
     // 3. Mint full total_supply to self. cw_held stays here (minus 1 wei
     //    dust if step 5 fires); evm_supply is bank-sent out at step 6.
@@ -989,6 +1004,19 @@ fn execute_refund_failed_launch(
 /// denom once the launch is `Delivered`, by rotating the admin to the
 /// burn-address convention. After this the issuer can no longer `MsgMint` or
 /// admin-`MsgBurn`-from for the denom. Callable by `keeper` or `admin`.
+///
+/// Finding (this session): immediately before rotating the admin away — the
+/// LAST moment a self-burn is possible — burn any residual balance of the launch
+/// denom this contract still holds. On the happy path the issuer holds ZERO of
+/// the denom in `Delivered` state (`cw_held` went to the sink at
+/// `DeliverToSeeder`, `evm_supply` went to the EVM authority at
+/// `RegisterLaunch`). A non-zero residual only arises on a deep failure edge —
+/// e.g. the seeder's `ForceRefund` routes the launch token back to this issuer
+/// (its configured `issuer` recipient) AFTER the record is already `Delivered`,
+/// a state in which `RefundFailedLaunch` (Registered-only) can no longer burn
+/// it. Without this sweep those tokens would strand permanently the moment admin
+/// is renounced. Operators must therefore complete any wind-down (or accept the
+/// residual is burnt) BEFORE calling this — renounce is the point of no return.
 fn execute_renounce_denom_admin(
     deps: DepsMut<InjectiveQueryWrapper>,
     env: Env,
@@ -1022,19 +1050,44 @@ fn execute_renounce_denom_admin(
     record.admin_renounced = true;
     LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
 
-    let msg: CosmosMsg<InjectiveMsgWrapper> = MsgChangeAdmin {
-        sender: env.contract.address.to_string(),
-        denom: record.denom.clone(),
-        new_admin: DEAD_TOKENFACTORY_ADMIN.to_string(),
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
+
+    // Burn any stranded launch-denom balance FIRST (while still tokenfactory
+    // admin), then rotate the admin away. Messages execute in order, so the
+    // self-burn lands before the denom loses its admin. Zero on the happy path
+    // (no message emitted); non-zero only on the post-`Delivered` strand edge
+    // described in the fn doc. Self-burn (no `burn_from_address`) of the
+    // contract's own balance, same path `RefundFailedLaunch` uses.
+    let residual = deps
+        .querier
+        .query_balance(env.contract.address.as_str(), &record.denom)?
+        .amount;
+    if !residual.is_zero() {
+        messages.push(injective_cosmwasm::msg::create_burn_tokens_msg(
+            env.contract.address.clone(),
+            Coin {
+                denom: record.denom.clone(),
+                amount: residual,
+            },
+        ));
     }
-    .into();
+
+    messages.push(
+        MsgChangeAdmin {
+            sender: env.contract.address.to_string(),
+            denom: record.denom.clone(),
+            new_admin: DEAD_TOKENFACTORY_ADMIN.to_string(),
+        }
+        .into(),
+    );
 
     Ok(Response::new()
-        .add_message(msg)
+        .add_messages(messages)
         .add_attribute("action", "renounce_denom_admin")
         .add_attribute("evm_authority", evm_authority)
         .add_attribute("internal_id", internal_id.to_string())
         .add_attribute("denom", record.denom)
+        .add_attribute("stranded_burned", residual)
         .add_attribute("new_admin", DEAD_TOKENFACTORY_ADMIN))
 }
 
@@ -1451,48 +1504,6 @@ fn handle_create_token_pair_reply(
         .add_attribute("action", "reply_create_token_pair")
         .add_attribute("internal_id", internal_id.to_string())
         .add_attribute("erc20_address", erc20))
-}
-
-/// Require `info.funds` to be exactly the chain's tokenfactory create fee —
-/// same denom set, same per-denom amounts. Over-pay and extra denoms are
-/// rejected (rather than refunded) so the contract never accumulates
-/// caller-belonging dust and the message chain stays free of late refund
-/// hops. The keeper reads the live chain fee in preflight and retries on
-/// governance fee change.
-pub(crate) fn require_exact_create_fee_funds(
-    info: &MessageInfo,
-    create_fee: &[Coin],
-) -> Result<(), ContractError> {
-    for fee in create_fee {
-        let supplied = info
-            .funds
-            .iter()
-            .find(|c| c.denom == fee.denom)
-            .map(|c| c.amount)
-            .unwrap_or_default();
-        if supplied < fee.amount {
-            return Err(ContractError::InsufficientCreateFee {
-                denom: fee.denom.clone(),
-                required: fee.amount.to_string(),
-                supplied: supplied.to_string(),
-            });
-        }
-        if supplied > fee.amount {
-            return Err(ContractError::CreateFeeOverpaid {
-                denom: fee.denom.clone(),
-                required: fee.amount.to_string(),
-                supplied: supplied.to_string(),
-            });
-        }
-    }
-    for c in info.funds.iter() {
-        if !create_fee.iter().any(|f| f.denom == c.denom) {
-            return Err(ContractError::UnexpectedFundsDenom {
-                denom: c.denom.clone(),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn decode_reply_payload(payload: &Binary) -> Result<ReplyPayload, ContractError> {

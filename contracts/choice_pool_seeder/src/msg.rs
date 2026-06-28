@@ -113,6 +113,17 @@ pub struct SinkInit {
     /// launch's deterministic graduation amounts. `None` ⇒ legacy seed-the-live-
     /// balance behaviour (direct-instantiate debug path only). Both must be set
     /// together; setting only one is rejected at `CreateSink`/instantiate.
+    ///
+    /// KEEPER INVARIANT: `expected_*` MUST be `<=` the amounts the launch
+    /// actually delivers into the sink at graduation. `Settle` requires the live
+    /// balance to reach the commitment (`resolve_seed`) and reverts
+    /// `SeedBelowCommitted` otherwise — a sink committed ABOVE its eventual
+    /// delivery can NEVER settle and is recoverable only via the factory-admin
+    /// `ForceRefund`. Because both the commitment and the on-chain delivery
+    /// derive from the same deterministic curve, the keeper must compute them to
+    /// EQUAL the graduation amounts (any genuine surplus is swept, so erring
+    /// low is the safe direction). A keeper-side equality test against the
+    /// LaunchpadCore graduation math is the correct place to enforce this.
     #[serde(default)]
     pub expected_token: Option<Uint128>,
     #[serde(default)]

@@ -99,26 +99,13 @@ pub enum ContractError {
         evm_supply: String,
     },
 
-    #[error(
-        "Attach the tokenfactory create fee in `info.funds`: need {required} {denom}, supplied {supplied}"
-    )]
-    InsufficientCreateFee {
-        denom: String,
-        required: String,
-        supplied: String,
-    },
-
-    #[error(
-        "info.funds must equal the chain's create fee exactly: {denom} required {required}, supplied {supplied}"
-    )]
-    CreateFeeOverpaid {
-        denom: String,
-        required: String,
-        supplied: String,
-    },
-
-    #[error("info.funds carries unexpected denom `{denom}` (only the chain's create fee may be attached)")]
-    UnexpectedFundsDenom { denom: String },
+    // Exact-create-fee enforcement is shared with `choice_pool_seeder` via
+    // `choice::fees`; the three former local variants (InsufficientCreateFee /
+    // CreateFeeOverpaid / UnexpectedFundsDenom) now live there so the two
+    // contracts can't drift on the semantics. Wrapped transparently so the
+    // on-chain error messages are unchanged.
+    #[error(transparent)]
+    CreateFee(#[from] choice::fees::CreateFeeError),
 
     #[error("Refund deadline not yet reached: {remaining_seconds}s remaining")]
     RefundDeadlineNotReached { remaining_seconds: u64 },

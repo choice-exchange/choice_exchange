@@ -419,9 +419,15 @@ fn exec_create_sink(
     // NOTE: XYK graduation remains code-capable but is UNREACHABLE on the live
     // SHROOM path — `LaunchpadCore.createLaunch` rejects non-CLMM venues
     // (`XykGraduationDisabled`), so the keeper/issuer never forward an XYK
-    // `CreateSink`. The XYK seed path has NOT received the committed-ratio
-    // hardening below; do not re-enable it without first re-auditing
-    // `settle_xyk` for the donation-reprice and create-fee paths.
+    // `CreateSink`, and `validate_pool_kind` rejects an XYK sink outright unless
+    // the `xyk` feature is compiled in.
+    //
+    // `settle_xyk` HAS since been brought in line with the CLMM path — it calls
+    // the shared exact-create-fee check, subtracts the caller's attached fee
+    // before seeding, honours the committed `expected_*` ratio via `resolve_seed`,
+    // and sweeps surplus. It has NOT, however, had an independent audit pass at
+    // the depth the CLMM path got; treat re-enabling XYK (the `xyk` feature) as
+    // requiring a fresh review of `settle_xyk`, not as a free switch.
     require_pool_kind_matches_factory(&cfg, &sink_init.pool_kind)?;
 
     // H-1 / M-1: a factory-created CLMM sink MUST commit its seed amounts so
@@ -800,7 +806,7 @@ fn settle_xyk(
     // live chain fee in preflight; on a governance fee change it just
     // retries with the new value.
     let create_fee: Vec<Coin> = query_token_factory_denom_create_fee(&deps.querier)?;
-    require_exact_create_fee_funds(&info, &create_fee)?;
+    choice::fees::require_exact_create_fee_funds(&info.funds, &create_fee)?;
 
     let caller_pair_funds = info
         .funds
@@ -1254,6 +1260,14 @@ fn exec_force_refund(
 /// `query_all_balances`) so nothing strands in a terminal sink, unlike the old
 /// token-and-pair-only routing. Returns the messages plus the routed token /
 /// pair amounts for logging.
+///
+/// NOTE on the issuer leg: if this routing fires AFTER the issuer has already
+/// moved the launch to `Delivered` (e.g. a `ForceRefund` following a partial
+/// delivery), `RefundFailedLaunch` can no longer burn the returned token
+/// (it is `Registered`-only). The issuer's `RenounceDenomAdmin` instead
+/// self-burns any residual launch-denom balance just before relinquishing
+/// tokenfactory admin, so the token routed here is still cleaned up rather than
+/// stranded.
 fn route_residual(
     deps: Deps<InjectiveQueryWrapper>,
     env: &Env,
@@ -1977,49 +1991,6 @@ fn query_clmm_pool(
         },
     );
     Ok(res.ok())
-}
-
-/// Require `info.funds` to be exactly the chain's tokenfactory create fee —
-/// same denom set, same per-denom amounts. Over-pay and extra denoms are
-/// rejected (rather than refunded) so the post-fee seed balance is trivially
-/// `bal - info.funds[denom]`: no chance of the caller's fee contribution
-/// leaking into the pool deposit, and no refund-vs-deposit ordering hazard.
-/// The keeper reads the live chain fee in preflight and on a governance fee
-/// change retries with the new value.
-pub(crate) fn require_exact_create_fee_funds(
-    info: &MessageInfo,
-    create_fee: &[Coin],
-) -> Result<(), ContractError> {
-    for fee in create_fee {
-        let supplied = info
-            .funds
-            .iter()
-            .find(|c| c.denom == fee.denom)
-            .map(|c| c.amount)
-            .unwrap_or_default();
-        if supplied < fee.amount {
-            return Err(ContractError::InsufficientCreateFee {
-                denom: fee.denom.clone(),
-                required: fee.amount.to_string(),
-                supplied: supplied.to_string(),
-            });
-        }
-        if supplied > fee.amount {
-            return Err(ContractError::CreateFeeOverpaid {
-                denom: fee.denom.clone(),
-                required: fee.amount.to_string(),
-                supplied: supplied.to_string(),
-            });
-        }
-    }
-    for c in info.funds.iter() {
-        if !create_fee.iter().any(|f| f.denom == c.denom) {
-            return Err(ContractError::UnexpectedFundsDenom {
-                denom: c.denom.clone(),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn self_callback(env: &Env, cb: CallbackMsg) -> StdResult<CosmosMsg<InjectiveMsgWrapper>> {

@@ -38,6 +38,12 @@ pub struct Config {
     /// design's bounded-trust analysis: holds ~1-2 blocks of in-flight
     /// pair-asset. Rotatable by `admin` (a rotation has the same trust shape
     /// as introducing a new keeper).
+    ///
+    /// OFF-CHAIN COORDINATION ONLY: no execute handler in this contract reads
+    /// `forwarder` — it is published on-chain purely so the EVM side / keeper
+    /// know where to route Leg C. Rotating it via `UpdateForwarder` updates the
+    /// stored value (and emits an event) but changes NO on-chain behaviour of
+    /// any in-flight launch.
     pub forwarder: Addr,
     /// Liveness window for `RefundFailedLaunch`: the `keeper` may refund a
     /// stuck launch at any time; after this many seconds past
