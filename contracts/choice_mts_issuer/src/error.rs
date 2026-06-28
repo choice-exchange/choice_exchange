@@ -24,6 +24,14 @@ pub enum ContractError {
     #[error("No pending admin to accept")]
     NoPendingAdmin {},
 
+    #[error("instantiate does not accept funds (the CreateDenom fee is paid per-launch at RegisterLaunch)")]
+    InstantiateDoesNotAcceptFunds {},
+
+    #[error(
+        "admin must not be the tokenfactory dead-burn address (would permanently brick governance)"
+    )]
+    AdminIsDeadAddress {},
+
     #[error("Subdenom prefix `{got}` is empty or exceeds the {max}-char cap")]
     SubdenomPrefixInvalid { got: String, max: usize },
 
