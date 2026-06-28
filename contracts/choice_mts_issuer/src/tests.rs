@@ -576,7 +576,10 @@ fn register_launch_rejects_when_caller_omits_create_fee_funds() {
         clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
-    assert!(matches!(err, ContractError::InsufficientCreateFee { .. }));
+    assert!(matches!(
+        err,
+        ContractError::CreateFee(choice::fees::CreateFeeError::Insufficient { .. })
+    ));
 }
 
 #[test]
@@ -601,7 +604,10 @@ fn register_launch_rejects_overpaid_create_fee() {
         clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
-    assert!(matches!(err, ContractError::CreateFeeOverpaid { .. }));
+    assert!(matches!(
+        err,
+        ContractError::CreateFee(choice::fees::CreateFeeError::Overpaid { .. })
+    ));
 }
 
 #[test]
@@ -629,7 +635,10 @@ fn register_launch_rejects_unexpected_funds_denom() {
         clmm_pool_auth: None,
     };
     let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
-    assert!(matches!(err, ContractError::UnexpectedFundsDenom { .. }));
+    assert!(matches!(
+        err,
+        ContractError::CreateFee(choice::fees::CreateFeeError::UnexpectedDenom { .. })
+    ));
 }
 
 #[test]
@@ -1448,6 +1457,72 @@ fn renounce_denom_admin_after_delivered_emits_change_admin() {
         err,
         ContractError::DenomAdminAlreadyRenounced { .. }
     ));
+}
+
+#[test]
+fn renounce_denom_admin_burns_stranded_residual_before_change_admin() {
+    // Finding (this session): if a post-`Delivered` strand leaves launch-denom
+    // balance in the issuer (e.g. the seeder's ForceRefund routed it back to its
+    // configured `issuer` recipient), RenounceDenomAdmin must self-burn it BEFORE
+    // relinquishing admin — otherwise it strands permanently once the denom loses
+    // its tokenfactory admin.
+    let mut deps = setup();
+    register_default(&mut deps, 33).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let seeder = deps.api.addr_make("seeder_addr").to_string();
+    install_matching_sink(&mut deps, &seeder, 33);
+    let keeper = deps.api.addr_make("keeper");
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::DeliverToSeeder {
+            evm_authority: evm_authority.clone(),
+            internal_id: 33,
+            leftover: Uint128::zero(),
+        },
+    )
+    .unwrap();
+
+    // Simulate the strand: the issuer's OWN bank balance now holds some of the
+    // launch denom, as if the seeder force-refunded it back post-`Delivered`.
+    let stranded = Uint128::new(7_000u128);
+    let issuer_addr = mock_env().contract.address.to_string();
+    deps.querier
+        .with_balance(&[(&issuer_addr, coins(stranded.u128(), default_denom(33)))]);
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::RenounceDenomAdmin {
+            evm_authority,
+            internal_id: 33,
+        },
+    )
+    .unwrap();
+
+    // Two messages: [0] self-burn of the stranded residual (while still admin),
+    // then [1] the change-admin that relinquishes the role.
+    assert_eq!(res.messages.len(), 2);
+    match &res.messages[0].msg {
+        CosmosMsg::Custom(w) => match &w.msg_data {
+            InjectiveMsg::Burn { amount, .. } => {
+                assert_eq!(amount.denom, default_denom(33));
+                assert_eq!(amount.amount, stranded);
+            }
+            other => panic!("expected Burn, got {:?}", other),
+        },
+        other => panic!("expected Custom Injective Burn, got {:?}", other),
+    }
+    #[allow(deprecated)]
+    match &res.messages[1].msg {
+        CosmosMsg::Stargate { type_url, .. } => {
+            assert_eq!(type_url, MsgChangeAdmin::TYPE_URL);
+        }
+        other => panic!("expected Stargate MsgChangeAdmin, got {:?}", other),
+    }
 }
 
 #[test]

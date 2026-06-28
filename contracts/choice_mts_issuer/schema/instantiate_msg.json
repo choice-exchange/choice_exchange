@@ -22,7 +22,7 @@
       "minimum": 0.0
     },
     "forwarder": {
-      "description": "20-byte bech32 hot key receiving pair-asset from EVM at graduation.",
+      "description": "20-byte bech32 hot key receiving pair-asset from EVM at graduation. Off-chain coordination value only — published for the EVM side / keeper; no execute handler reads it (see [`crate::state::Config::forwarder`]).",
       "type": "string"
     },
     "keeper": {

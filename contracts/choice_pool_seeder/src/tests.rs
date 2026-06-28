@@ -726,7 +726,10 @@ fn settle_rejects_overpaid_create_fee() {
         ExecuteMsg::Settle {},
     )
     .unwrap_err();
-    assert!(matches!(err, ContractError::CreateFeeOverpaid { .. }));
+    assert!(matches!(
+        err,
+        ContractError::CreateFee(choice::fees::CreateFeeError::Overpaid { .. })
+    ));
 }
 
 #[cfg(feature = "xyk")]
@@ -750,7 +753,8 @@ fn settle_rejects_unexpected_funds_denom() {
     .unwrap_err();
     assert!(matches!(
         err,
-        ContractError::UnexpectedFundsDenom { ref denom } if denom == PAIR_DENOM
+        ContractError::CreateFee(choice::fees::CreateFeeError::UnexpectedDenom { ref denom })
+            if denom == PAIR_DENOM
     ));
 }
 
@@ -824,7 +828,10 @@ fn settle_rejects_when_caller_omits_create_fee_funds() {
         ExecuteMsg::Settle {},
     )
     .unwrap_err();
-    assert!(matches!(err, ContractError::InsufficientCreateFee { .. }));
+    assert!(matches!(
+        err,
+        ContractError::CreateFee(choice::fees::CreateFeeError::Insufficient { .. })
+    ));
 }
 
 /// Regression for the pair_denom-equals-fee-denom bug fixed in 2026-05-26 and

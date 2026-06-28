@@ -18,6 +18,8 @@ pub struct InstantiateMsg {
     /// `RefundFailedLaunch` until the per-launch refund deadline lapses.
     pub keeper: String,
     /// 20-byte bech32 hot key receiving pair-asset from EVM at graduation.
+    /// Off-chain coordination value only — published for the EVM side / keeper;
+    /// no execute handler reads it (see [`crate::state::Config::forwarder`]).
     pub forwarder: String,
     /// Auto-refund window for stuck launches (post-`Registered`, pre-
     /// `Delivered`). After this, anyone can call `RefundFailedLaunch`.
