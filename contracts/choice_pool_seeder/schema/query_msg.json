@@ -45,7 +45,7 @@
       "additionalProperties": false
     },
     {
-      "description": "Sink-only mutable state: status (`Pending` / `Settled` / `Refunded`) plus, if settled, the resulting pair address and LP minted amount.",
+      "description": "Sink-only mutable state: status (`Pending` / `Settled` / `Refunded`) plus, if settled, the resulting venue artifacts — `pair_addr` / `lp_minted` for XYK, `pool_addr` / `position_token_id` for CLMM.",
       "type": "object",
       "required": [
         "sink_state"

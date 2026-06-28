@@ -7,6 +7,7 @@
   ],
   "properties": {
     "lp_minted": {
+      "description": "XYK-only: LP minted at settle.",
       "anyOf": [
         {
           "$ref": "#/definitions/Uint128"
@@ -17,6 +18,23 @@
       ]
     },
     "pair_addr": {
+      "description": "XYK-only: the pair created at settle. CLMM settles report `pool_addr`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pool_addr": {
+      "description": "OBSERVABILITY: CLMM pool created at settle — `None` for XYK / pre-settle.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "position_token_id": {
+      "description": "OBSERVABILITY: position NFT `token_id` minted to the locker at CLMM settle — `None` for XYK / pre-settle.",
+      "default": null,
       "type": [
         "string",
         "null"
