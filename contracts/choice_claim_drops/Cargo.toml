@@ -1,0 +1,44 @@
+[package]
+name = "choice-claim-drops"
+version = "1.1.0"
+authors = ["Dan Van Eijck"]
+edition = "2021"
+description = "Multi-campaign cumulative merkle claim-drop hub. Anyone creates a campaign for a native denom and publishes a merkle root of lifetime cumulative allocations; recipients claim `allocated − claimed` with a proof. Re-publishing a root with a higher declared total requires attaching exactly the delta, so one contract serves both one-shot airdrops (root frozen after funding) and keeper-driven reward streams (daily root updates)."
+license = "Apache-2.0"
+
+exclude = [
+  "contract.wasm",
+  "hash.txt",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+library = []
+
+[dependencies]
+cw2               = { version = "2.0.0" }
+cosmwasm-std      = { version = "2.2.2", features = [
+    "abort",
+    "cosmwasm_1_2",
+    "cosmwasm_1_3",
+    "cosmwasm_1_4",
+    "cosmwasm_2_0",
+    "iterator",
+    "stargate"
+] }
+cw-storage-plus   = { version = "2.0.0" }
+cosmwasm-schema   = { version = "2.2.2" }
+sha2              = { version = "0.10.9", default-features = false }
+thiserror         = { version = "2.0.12" }
+
+# Workspace dependency-feature unification: cosmwasm-crypto's ed25519 `batch`
+# path requires the `alloc` feature on ed25519-zebra. Other crates in this
+# workspace pull it in via injective-cosmwasm; this contract has no Injective-
+# specific surface, so depend on it directly with the right feature so a
+# standalone `cargo build -p choice-claim-drops` works.
+ed25519-zebra     = { version = "4.1.0", default-features = false, features = ["alloc"] }
+
+schemars          = "0.8.22"
+serde             = { version = "1.0.219", default-features = false, features = ["derive"] }

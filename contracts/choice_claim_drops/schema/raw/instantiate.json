@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InstantiateMsg",
+  "type": "object",
+  "required": [
+    "fee_bps"
+  ],
+  "properties": {
+    "fee_bps": {
+      "description": "Platform fee in bps charged on top of funding deltas. Capped at 1000 (10%).",
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "fee_collector": {
+      "description": "Defaults to the owner.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "owner": {
+      "description": "Defaults to the instantiator.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}
