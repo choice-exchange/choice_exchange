@@ -396,6 +396,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "choice-claim-drops"
+version = "1.1.0"
+dependencies = [
+ "cosmwasm-schema 2.2.2",
+ "cosmwasm-std 2.2.2",
+ "cw-storage-plus 2.0.0",
+ "cw2 2.0.0",
+ "ed25519-zebra 4.1.0",
+ "schemars 0.8.22",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "choice-clmm-common"
 version = "1.1.2"
 dependencies = [
