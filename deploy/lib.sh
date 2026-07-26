@@ -74,6 +74,13 @@ wait_for_tx() {
 }
 
 # Store a wasm. Echoes the resulting code id to stdout on success.
+#
+# Set STORE_EXTRA_ARGS to append flags to `tx wasm store` — chiefly the code's
+# instantiate permission, which otherwise falls through to the chain's
+# `instantiate_default_permission` param. A contract meant to be instantiated by
+# third parties (see choice_claim_drops' own-instance model) must pass
+# `--instantiate-everybody=true` explicitly rather than inherit a chain default
+# that governance can change. Word-split on purpose so callers can pass several.
 store_contract() {
     local wasm_path="$1"
     if [ ! -f "$wasm_path" ]; then
@@ -81,10 +88,12 @@ store_contract() {
         return 1
     fi
     local tx_output txhash query_output code_id
+    # shellcheck disable=SC2086
     tx_output=$(printf '%s\n' "$STORE_PASSWORD" | injectived tx wasm store "$wasm_path" \
         --from="$STORE_FROM" \
         --chain-id="$CHAIN_ID" \
         --yes --fees="$FEES" --gas="$GAS" \
+        ${STORE_EXTRA_ARGS:-} \
         --node="$NODE" 2>&1)
     txhash=$(echo "$tx_output" | grep -o 'txhash: [A-F0-9]*' | awk '{print $2}')
     if [ -z "$txhash" ]; then
