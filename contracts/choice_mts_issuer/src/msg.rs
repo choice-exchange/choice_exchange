@@ -112,6 +112,31 @@ pub enum ExecuteMsg {
         /// `ttl_seconds = 0` (no expiry) for graduations. `None` skips the
         /// reservation (e.g. legacy XYK graduations).
         clmm_pool_auth: Option<ClmmPoolAuth>,
+        /// Human-facing token name written into the launch denom's bank
+        /// metadata at `MsgCreateDenom` (and therefore inherited by the
+        /// auto-deployed `MintBurnBankERC20` pair, which reads its `name()`
+        /// from bank metadata at `MsgCreateTokenPair`).
+        ///
+        /// `None` (or an all-whitespace string) falls back to the raw subdenom
+        /// — the pre-1.1 behaviour, which branded every token
+        /// `shroom_42_aB3xK9zQ` / `SHROOM_42_AB3XK9ZQ` on every explorer.
+        ///
+        /// THIS IS A ONE-SHOT FIELD. The chain finalises `decimals` at create
+        /// time, and the issuer renounces the denom's tokenfactory admin to the
+        /// dead address at `RenounceDenomAdmin`; after that no
+        /// `MsgSetDenomMetadata` can ever land (the admin is non-empty, so the
+        /// governance path is closed too). Whatever is passed here is the
+        /// token's on-chain name forever — the contract therefore validates
+        /// strictly and refuses the launch rather than branding it with
+        /// something malformed. See [`crate::contract::MAX_TOKEN_NAME_LEN`].
+        #[serde(default)]
+        token_name: Option<String>,
+        /// Human-facing ticker for the same bank metadata. Same fallback and
+        /// same one-shot permanence as `token_name`; capped tighter (see
+        /// [`crate::contract::MAX_TOKEN_SYMBOL_LEN`]) because a 64-char ticker
+        /// is never legitimate and wrecks every table that renders it.
+        #[serde(default)]
+        token_symbol: Option<String>,
     },
 
     /// Keeper-relayed after the EVM authority emits `BootstrapReady(internal_id,

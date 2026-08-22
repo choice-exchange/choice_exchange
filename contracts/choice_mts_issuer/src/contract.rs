@@ -50,6 +50,21 @@ pub const MAX_SUBDENOM_LEN: usize = 44;
 /// 44-char subdenom cap (`MAX_SUBDENOM_LEN`), checked after concatenation.
 pub const MIN_SALT_SUFFIX_LEN: usize = 8;
 
+/// Caps on the creator-supplied bank-metadata branding (`token_name` /
+/// `token_symbol` on [`crate::msg::ExecuteMsg::RegisterLaunch`]).
+///
+/// The chain's own limits are 64 bytes for BOTH (`MaxNameLength` /
+/// `MaxSymbolLength` in `injective-chain/modules/tokenfactory/types/denoms.go`)
+/// and it rejects the whole `MsgCreateDenom` above them — which would revert an
+/// otherwise-good launch deep in the dispatch chain with a chain-side error the
+/// keeper can't act on. We validate here so the failure is typed and local.
+///
+/// The name cap matches the chain exactly; the symbol cap is deliberately
+/// tighter — a 64-char ticker is never legitimate, and it is the field every
+/// table, chart axis and wallet row renders in a fixed-width slot.
+pub const MAX_TOKEN_NAME_LEN: usize = 64;
+pub const MAX_TOKEN_SYMBOL_LEN: usize = 32;
+
 /// Cap registration's decimals at the EVM ERC20 norm. MTS pairing inherits
 /// this on the EVM side, so anything > 18 risks the auto-deployed
 /// `MintBurnBankERC20` failing on construction. Matches the chain-side cap.
@@ -189,6 +204,93 @@ fn validate_subdenom_prefix(prefix: &str) -> Result<(), ContractError> {
     Ok(())
 }
 
+/// Resolve the bank-metadata `name` / `symbol` the launch denom is created
+/// with, from the keeper-relayed creator branding.
+///
+/// Returns the pre-1.1 values (`subdenom` / `SUBDENOM`) when the caller supplies
+/// nothing, so an older keeper — or a `RegisterLaunch` already in the mempool
+/// when this code migrates in — keeps working unchanged rather than failing.
+///
+/// Rejects rather than sanitises. `MsgCreateDenom` is the ONLY write: the chain
+/// finalises `decimals` at create time and `RenounceDenomAdmin` hands the
+/// tokenfactory admin to the dead address, after which
+/// `SetDenomMetadata` is refused for both the admin path (sender must equal the
+/// dead address) and the governance path (which requires an EMPTY admin). A bad
+/// value is therefore permanent, and a launch the keeper can retry after a fix
+/// is strictly better than a token branded wrong forever.
+fn resolve_denom_branding(
+    subdenom: &str,
+    token_name: Option<String>,
+    token_symbol: Option<String>,
+) -> Result<(String, String), ContractError> {
+    let name = validate_branding(token_name, "name", MAX_TOKEN_NAME_LEN)?
+        .unwrap_or_else(|| subdenom.to_string());
+    let symbol = validate_branding(token_symbol, "symbol", MAX_TOKEN_SYMBOL_LEN)?
+        .unwrap_or_else(|| subdenom.to_uppercase());
+    Ok((name, symbol))
+}
+
+/// `None` / blank ⇒ `Ok(None)` (caller substitutes the subdenom fallback).
+/// Anything present must be short enough for the chain's cap and free of
+/// characters that don't render as themselves.
+fn validate_branding(
+    raw: Option<String>,
+    field: &str,
+    max_len: usize,
+) -> Result<Option<String>, ContractError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        // An explicitly-empty string means "no branding", identical to `None`.
+        // The chain would accept it (only the length is checked) and every
+        // explorer would then render a nameless token.
+        return Ok(None);
+    }
+    // Byte length, not chars: the chain's `MaxNameLength` / `MaxSymbolLength`
+    // are `len(m.Name)` over the UTF-8 bytes, so a 30-emoji name is over cap
+    // even though it is 30 chars.
+    if value.len() > max_len {
+        return Err(ContractError::TokenBrandingInvalid {
+            field: field.to_string(),
+            got: value.to_string(),
+            reason: format!("{} bytes exceeds the {}-byte cap", value.len(), max_len),
+        });
+    }
+    if let Some(bad) = value.chars().find(|c| !is_renderable_branding_char(*c)) {
+        return Err(ContractError::TokenBrandingInvalid {
+            field: field.to_string(),
+            got: value.to_string(),
+            reason: format!(
+                "contains the non-rendering character U+{:04X} (control, zero-width or bidi override)",
+                bad as u32
+            ),
+        });
+    }
+    Ok(Some(value.to_string()))
+}
+
+/// Reject characters that do not render as themselves. Two classes:
+///   * C0/C1 controls — newlines and NULs inside a token name corrupt every
+///     log line, CSV export and terminal that prints it.
+///   * Zero-width and bidi-override formatting — the classic homograph vector:
+///     `U+202E` makes `MOORHS` render as `SHROOM`, and `U+200B` lets two
+///     visually identical tickers coexist. Unicode NAMES stay allowed (the FE
+///     deliberately UTF-8-encodes so emoji/non-latin survive); only characters
+///     whose whole purpose is to disagree with their glyph are refused.
+fn is_renderable_branding_char(c: char) -> bool {
+    if c.is_control() {
+        return false;
+    }
+    !matches!(c,
+        '\u{200B}'..='\u{200F}'   // zero-width space/joiners, LRM/RLM
+        | '\u{202A}'..='\u{202E}' // bidi embedding + overrides
+        | '\u{2066}'..='\u{2069}' // bidi isolates
+        | '\u{FEFF}'              // zero-width no-break space (BOM)
+    )
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
     deps: DepsMut<InjectiveQueryWrapper>,
@@ -209,6 +311,8 @@ pub fn execute(
             choice_factory,
             salt_suffix,
             clmm_pool_auth,
+            token_name,
+            token_symbol,
         } => execute_register_launch(
             deps,
             env,
@@ -224,6 +328,8 @@ pub fn execute(
             choice_factory,
             salt_suffix,
             clmm_pool_auth,
+            token_name,
+            token_symbol,
         ),
         ExecuteMsg::DeliverToSeeder {
             evm_authority,
@@ -274,6 +380,8 @@ fn execute_register_launch(
     choice_factory: Option<String>,
     salt_suffix: Option<String>,
     clmm_pool_auth: Option<ClmmPoolAuth>,
+    token_name: Option<String>,
+    token_symbol: Option<String>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
@@ -391,6 +499,13 @@ fn execute_register_launch(
         });
     }
     let denom = format!("factory/{}/{}", env.contract.address, subdenom);
+
+    // Bank-metadata branding for the denom created below. Resolved (and
+    // refused, if malformed) HERE rather than at the dispatch site: this is the
+    // last cheap point to fail — everything past it decodes payloads and
+    // derives addresses — and a chain-side rejection of `MsgCreateDenom` would
+    // otherwise unwind the entire launch with an untyped error.
+    let (denom_name, denom_symbol) = resolve_denom_branding(&subdenom, token_name, token_symbol)?;
 
     // The pair asset must differ from the freshly-minted launch denom. A
     // self-paired pool is degenerate and would fail (or mis-seed) at the
@@ -597,29 +712,40 @@ fn execute_register_launch(
     submsgs.push(SubMsg::new(CosmosMsg::from(MsgCreateDenom {
         sender: env.contract.address.to_string(),
         subdenom: subdenom.clone(),
-        name: subdenom.clone(),
-        symbol: subdenom.to_uppercase(),
+        name: denom_name.clone(),
+        symbol: denom_symbol.clone(),
         decimals: config.decimals,
         allow_admin_burn: true,
     })));
 
-    // 2. (removed) SetTokenMetadata.
+    // 2. (deliberately absent) SetDenomMetadata.
     //
-    // injectived v1.20+ `MsgCreateDenom` finalises decimals at create-time,
-    // and a follow-up `MsgSetDenomMetadata` with the same decimals errors
-    // out with "cannot update denom metadata decimals". Empirically
-    // observed on testnet 2026-05-26 (tx 52D5873E…). The decimals are
-    // already on-chain from step 1; name/symbol on the chain-side metadata
-    // can be set later via a separate, decimals-free path if needed
-    // (cosmetic only — choice_factory uses its own NATIVE_TOKEN_DECIMALS
-    // map, registered via step 5 below).
+    // Step 1 is the ONLY metadata write, by design — the branding rides on
+    // `MsgCreateDenom` itself rather than a follow-up. Two reasons it must stay
+    // that way:
     //
-    // ACCEPTED TRADEOFF (cosmetic): `MsgCreateDenom` below sets the bank
-    // metadata `name`/`symbol` to the raw subdenom (e.g. `shroom_42_aB3xK9zQ`),
-    // and the v1.20 decimals-immutability trap means it can't be prettied up
-    // post-create. Bank explorers will show that raw form. The human-facing
-    // name/symbol live on the EVM-side MTS pair and in the app, so this is
-    // knowingly left as-is rather than worked around.
+    //   * `MsgCreateDenom` finalises `decimals` (v1.20+), and the chain's
+    //     `SetDenomMetadata` handler rejects any submission whose decimals
+    //     disagree with what is already stored. A same-decimals write IS
+    //     accepted by the current handler, but a testnet probe on 2026-05-26
+    //     (tx 52D5873E…) hit the rejection, so the path is not one to depend on
+    //     inside a launch that would unwind with it.
+    //   * `RenounceDenomAdmin` (C-M2) hands the tokenfactory admin to the dead
+    //     address, and the chain gates `SetDenomMetadata` on `sender == admin`
+    //     OR (`admin == ""` AND sender is governance). A dead-but-non-empty
+    //     admin closes BOTH, so after renounce the metadata is frozen for
+    //     everyone, permanently.
+    //
+    // Pre-1.1 this step's absence meant the token was branded with its raw
+    // subdenom (`shroom_42_aB3xK9zQ` / `SHROOM_42_AB3XK9ZQ`) on every explorer
+    // AND on the auto-deployed ERC20 pair, which reads `name()`/`symbol()` from
+    // this same bank metadata at step 4. `token_name`/`token_symbol` fix that at
+    // the only moment the chain will still accept them.
+    //
+    // Still NOT set (no write path exists post-create): `display`, `description`
+    // and `uri`. They have been empty for every launch to date; the app and the
+    // EVM-side `metadataURI` carry that content. `choice_factory` reads decimals
+    // from its own NATIVE_TOKEN_DECIMALS map (step 5), never from here.
 
     // 3. Mint full total_supply to self. cw_held stays here (minus 1 wei
     //    dust if step 5 fires); evm_supply is bank-sent out at step 6.
@@ -724,6 +850,12 @@ fn execute_register_launch(
         .add_attribute("action", "register_launch")
         .add_attribute("internal_id", internal_id.to_string())
         .add_attribute("denom", denom)
+        // The branding actually written to bank metadata — emitted so the
+        // watchdog can assert it against the EVM `metadataURI` without a
+        // bank query, and so an indexer can tell a real name apart from the
+        // subdenom fallback.
+        .add_attribute("denom_name", denom_name)
+        .add_attribute("denom_symbol", denom_symbol)
         .add_attribute("evm_authority", evm_authority)
         .add_attribute("total_supply", total_supply)
         .add_attribute("evm_supply", evm_supply)
