@@ -28,7 +28,7 @@ use injective_cosmwasm::{InjectiveMsg, InjectiveRoute};
 
 use crate::contract::{
     execute, instantiate, migrate, query, reply, MAX_DECIMALS, MAX_SUBDENOM_PREFIX_LEN,
-    MIN_REFUND_DEADLINE_SECONDS,
+    MAX_TOKEN_NAME_LEN, MAX_TOKEN_SYMBOL_LEN, MIN_REFUND_DEADLINE_SECONDS,
 };
 use crate::error::ContractError;
 use crate::msg::{
@@ -116,11 +116,39 @@ fn register_with_choice_factory(
     internal_id: u64,
     choice_factory: Option<String>,
 ) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
+    register_with_opts(deps, internal_id, choice_factory, None, None)
+}
+
+/// Register with creator-supplied bank-metadata branding (the 1.1 fields).
+fn register_with_branding(
+    deps: &mut Deps,
+    internal_id: u64,
+    token_name: Option<&str>,
+    token_symbol: Option<&str>,
+) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
+    register_with_opts(
+        deps,
+        internal_id,
+        None,
+        token_name.map(str::to_string),
+        token_symbol.map(str::to_string),
+    )
+}
+
+fn register_with_opts(
+    deps: &mut Deps,
+    internal_id: u64,
+    choice_factory: Option<String>,
+    token_name: Option<String>,
+    token_symbol: Option<String>,
+) -> Result<cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>, ContractError> {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     // salt_suffix is mandatory now; the sink payload's token_denom must embed it.
     let payload = xyk_sink_payload(deps, internal_id);
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name,
+        token_symbol,
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         // 1B tokens * 1e18 = 1e27
@@ -431,6 +459,14 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
                 "Path B Leg A requires admin burn-from"
             );
             assert_eq!(decoded.decimals, 18);
+            // No branding supplied ⇒ pre-1.1 fallback, so an older keeper (or a
+            // RegisterLaunch already in flight across the migration) is
+            // byte-identical to what it was before.
+            assert_eq!(decoded.name, format!("{}_{}_{}", PREFIX, 42, TEST_SALT));
+            assert_eq!(
+                decoded.symbol,
+                format!("{}_{}_{}", PREFIX, 42, TEST_SALT).to_uppercase()
+            );
         }
         other => panic!("expected Stargate CreateDenom, got {:?}", other),
     }
@@ -501,6 +537,177 @@ fn register_launch_emits_expected_message_chain_and_persists_record() {
     assert_eq!(stored.erc20_address, None, "filled in by reply handler");
 }
 
+/// Decode the `MsgCreateDenom` out of a `RegisterLaunch` response. The
+/// branding tests all assert on the same message, and it is always the first
+/// `ReplyOn::Never` submessage (step 1 of the dispatch chain).
+fn decoded_create_denom(
+    res: &cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>,
+) -> MsgCreateDenom {
+    #[allow(deprecated)]
+    let msg = res
+        .messages
+        .iter()
+        .filter(|sm| sm.reply_on == ReplyOn::Never)
+        .find_map(|sm| match &sm.msg {
+            CosmosMsg::Stargate { type_url, value } if type_url == MsgCreateDenom::TYPE_URL => {
+                Some(MsgCreateDenom::decode(value.as_slice()).unwrap())
+            }
+            _ => None,
+        });
+    msg.expect("RegisterLaunch must dispatch a MsgCreateDenom")
+}
+
+#[test]
+fn register_launch_brands_denom_with_creator_name_and_symbol() {
+    let mut deps = setup();
+    let res = register_with_branding(&mut deps, 42, Some("Shroomi Coin"), Some("SHRM")).unwrap();
+
+    // The whole point of the 1.1 migration: the creator's branding is what the
+    // chain stores, not `shroom_42_<salt>`. The auto-deployed MintBurnBankERC20
+    // reads `name()`/`symbol()` from this same bank metadata at
+    // MsgCreateTokenPair, so this fixes the ERC20 pair in the same stroke.
+    let decoded = decoded_create_denom(&res);
+    assert_eq!(decoded.name, "Shroomi Coin");
+    assert_eq!(decoded.symbol, "SHRM");
+    // Subdenom is untouched — the denom string is Layer A entropy, not branding.
+    assert_eq!(decoded.subdenom, format!("{}_{}_{}", PREFIX, 42, TEST_SALT));
+
+    let attrs: Vec<_> = res
+        .attributes
+        .iter()
+        .filter(|a| a.key == "denom_name" || a.key == "denom_symbol")
+        .map(|a| (a.key.as_str(), a.value.as_str()))
+        .collect();
+    assert_eq!(
+        attrs,
+        vec![("denom_name", "Shroomi Coin"), ("denom_symbol", "SHRM")]
+    );
+}
+
+#[test]
+fn register_launch_accepts_unicode_branding() {
+    let mut deps = setup();
+    // The FE UTF-8-encodes metadata precisely so emoji/non-latin names survive;
+    // refusing them here would silently downgrade those launches to the raw
+    // subdenom. Only non-RENDERING characters are refused, not non-latin ones.
+    let res = register_with_branding(&mut deps, 42, Some("🍄 Шруми"), Some("ШРМ")).unwrap();
+    let decoded = decoded_create_denom(&res);
+    assert_eq!(decoded.name, "🍄 Шруми");
+    assert_eq!(decoded.symbol, "ШРМ");
+}
+
+#[test]
+fn register_launch_trims_branding_and_falls_back_when_blank() {
+    let mut deps = setup();
+    let res = register_with_branding(&mut deps, 42, Some("  Shroomi  "), Some("   ")).unwrap();
+    let decoded = decoded_create_denom(&res);
+    assert_eq!(decoded.name, "Shroomi", "surrounding whitespace is trimmed");
+    // An all-whitespace symbol is treated as "absent", not stored as blank —
+    // the chain would accept `"   "` and every explorer would render nothing.
+    assert_eq!(
+        decoded.symbol,
+        format!("{}_{}_{}", PREFIX, 42, TEST_SALT).to_uppercase()
+    );
+}
+
+#[test]
+fn register_launch_rejects_overlong_token_name() {
+    let mut deps = setup();
+    let long = "a".repeat(MAX_TOKEN_NAME_LEN + 1);
+    let err = register_with_branding(&mut deps, 42, Some(&long), None).unwrap_err();
+    match err {
+        ContractError::TokenBrandingInvalid { field, .. } => assert_eq!(field, "name"),
+        other => panic!("expected TokenBrandingInvalid, got {:?}", other),
+    }
+}
+
+#[test]
+fn register_launch_rejects_overlong_token_symbol() {
+    let mut deps = setup();
+    // Under the chain's own 64-byte cap but over ours: the tighter symbol
+    // bound is this contract's, and it must actually bite.
+    let long = "S".repeat(MAX_TOKEN_SYMBOL_LEN + 1);
+    assert!(long.len() < 64);
+    let err = register_with_branding(&mut deps, 42, None, Some(&long)).unwrap_err();
+    match err {
+        ContractError::TokenBrandingInvalid { field, .. } => assert_eq!(field, "symbol"),
+        other => panic!("expected TokenBrandingInvalid, got {:?}", other),
+    }
+}
+
+#[test]
+fn register_launch_counts_branding_in_bytes_not_chars() {
+    let mut deps = setup();
+    // 17 four-byte emoji = 68 bytes = over the 64-byte name cap, but only 17
+    // chars. The chain measures `len(m.Name)` in bytes, so a char-based check
+    // here would pass the launch straight into a chain-side rejection.
+    let emoji = "🍄".repeat(17);
+    assert!(emoji.chars().count() < MAX_TOKEN_NAME_LEN && emoji.len() > MAX_TOKEN_NAME_LEN);
+    let err = register_with_branding(&mut deps, 42, Some(&emoji), None).unwrap_err();
+    assert!(matches!(err, ContractError::TokenBrandingInvalid { .. }));
+}
+
+#[test]
+fn register_launch_rejects_non_rendering_branding() {
+    // U+202E RIGHT-TO-LEFT OVERRIDE renders the following text reversed — the
+    // classic homograph trick for making one token look like another. Bank
+    // metadata is immutable after RenounceDenomAdmin, so this has to be caught
+    // before the denom exists, not audited afterwards.
+    for (name, symbol) in [
+        (Some("SHROOM\u{202E}NIOC"), None),
+        (Some("Shroomi\nInc"), None),
+        (None, Some("SH\u{200B}RM")),
+    ] {
+        let mut deps = setup();
+        let err = register_with_branding(&mut deps, 42, name, symbol).unwrap_err();
+        match err {
+            ContractError::TokenBrandingInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("non-rendering"),
+                    "expected a non-rendering-char rejection, got: {reason}"
+                );
+            }
+            other => panic!("expected TokenBrandingInvalid, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn register_launch_msg_deserialises_without_branding_fields() {
+    // MIGRATION-WINDOW GUARD. Between the MsgMigrateContract and the keeper
+    // redeploy, the live keeper still sends the 1.0 payload — and any
+    // RegisterLaunch already in the mempool at migrate time carries it too. If
+    // these fields were not `#[serde(default)]`, every one of those launches
+    // would fail to deserialise and brick until the keeper caught up.
+    let wire = br#"{
+        "register_launch": {
+            "internal_id": 7,
+            "evm_authority": "inj1evmauthority",
+            "total_supply": "1000",
+            "evm_supply": "800",
+            "pair_denom": "inj",
+            "seeder_factory": "inj1seederfactory",
+            "seeder_addr": "inj1seederaddr",
+            "create_sink_payload": "e30=",
+            "choice_factory": null,
+            "salt_suffix": "abcdefgh",
+            "clmm_pool_auth": null
+        }
+    }"#;
+    let parsed: ExecuteMsg = from_json(wire).expect("1.0 payload must still parse");
+    match parsed {
+        ExecuteMsg::RegisterLaunch {
+            token_name,
+            token_symbol,
+            ..
+        } => {
+            assert_eq!(token_name, None);
+            assert_eq!(token_symbol, None);
+        }
+        other => panic!("expected RegisterLaunch, got {:?}", other),
+    }
+}
+
 #[test]
 fn register_launch_rejects_duplicate_internal_id() {
     let mut deps = setup();
@@ -518,6 +725,8 @@ fn register_launch_rejects_zero_total_supply() {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 1,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::zero(),
@@ -540,6 +749,8 @@ fn register_launch_rejects_evm_supply_over_total() {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 1,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(100),
@@ -563,6 +774,8 @@ fn register_launch_rejects_when_caller_omits_create_fee_funds() {
     // No `info.funds` attached → caller didn't pay the chain's create fee.
     let info = message_info(&caller, &[]);
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 1,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000),
@@ -591,6 +804,8 @@ fn register_launch_rejects_overpaid_create_fee() {
     // the contract's bank balance.
     let info = message_info(&caller, &[coin(CREATE_FEE + 13, CREATE_FEE_DENOM)]);
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 70,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
@@ -622,6 +837,8 @@ fn register_launch_rejects_unexpected_funds_denom() {
         ],
     );
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 71,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
@@ -689,6 +906,8 @@ fn register_launch_rejects_choice_factory_when_cw_held_is_zero() {
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 60,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         // total == evm → cw_held = 0 → no dust available
@@ -1306,6 +1525,8 @@ fn register_launch_rejects_non_keeper() {
     let stranger = deps.api.addr_make("stranger");
     let info = message_info(&stranger, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 1,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000),
@@ -1347,6 +1568,8 @@ fn two_authorities_share_internal_id_without_record_collision() {
             auth,
         );
         let msg = ExecuteMsg::RegisterLaunch {
+            token_name: None,
+            token_symbol: None,
             internal_id: 0,
             evm_authority: auth.clone(),
             total_supply: Uint128::new(1_000_000),
@@ -1670,6 +1893,8 @@ fn register_full(
         deps.api.addr_make("evm_authority").as_ref(),
     );
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
@@ -1888,6 +2113,8 @@ fn register_raw(
     let caller = deps.api.addr_make("keeper");
     let info = message_info(&caller, &fee_funds());
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
@@ -2250,6 +2477,8 @@ fn register_with_seeder(
     let info = message_info(&caller, &fee_funds());
     let payload = salted_xyk_payload(deps, internal_id, salt_suffix);
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
@@ -2354,6 +2583,8 @@ fn register_launch_rejects_refund_receiver_mismatch() {
         deps.api.addr_make("attacker").as_ref(),
     );
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id: 5,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),
@@ -2439,6 +2670,8 @@ fn register_clmm_verify(
     let info = message_info(&caller, &fee_funds());
     let payload = salted_clmm_payload(deps, internal_id, salt_suffix, position_recipient);
     let msg = ExecuteMsg::RegisterLaunch {
+        token_name: None,
+        token_symbol: None,
         internal_id,
         evm_authority: deps.api.addr_make("evm_authority").to_string(),
         total_supply: Uint128::new(1_000_000_000u128) * Uint128::new(10u128.pow(18)),

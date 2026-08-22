@@ -58,6 +58,15 @@ pub enum ContractError {
         max: usize,
     },
 
+    #[error(
+        "token_{field} `{got}` is invalid: {reason}. The denom's bank metadata is written once at MsgCreateDenom and is immutable after RenounceDenomAdmin, so a malformed value would brand the token permanently — refusing the launch instead. Fix the value and re-register."
+    )]
+    TokenBrandingInvalid {
+        field: String,
+        got: String,
+        reason: String,
+    },
+
     #[error("Decimals {got} out of range (must be 0..=18)")]
     DecimalsOutOfRange { got: u32 },
 
