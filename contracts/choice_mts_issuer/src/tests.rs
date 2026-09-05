@@ -190,6 +190,33 @@ fn default_denom(internal_id: u64) -> String {
     denom_with_salt(internal_id, TEST_SALT)
 }
 
+/// The paired ERC20 the chain auto-deploys at `MsgCreateTokenPair`. In
+/// production the reply handler patches this in; `register_default` stops short
+/// of the reply, so tests that exercise the admin handover set it by hand.
+const TEST_ERC20_HEX: &str = "0x1234567890AbcdEF1234567890aBcdef12345678";
+
+/// Patch `erc20_address` onto a launch record and return the bech32 the
+/// tokenfactory will compare `MsgBurn.Sender` against — the same 20 bytes,
+/// `addr_humanize`d, which is exactly what `bank.go` does with
+/// `sdk.AccAddress(calledAddress.Bytes())`.
+fn set_erc20(deps: &mut Deps, internal_id: u64) -> String {
+    let authority = deps.api.addr_make("evm_authority");
+    let mut rec = LAUNCHES
+        .load(deps.as_ref().storage, (&authority, internal_id))
+        .unwrap();
+    rec.erc20_address = Some(TEST_ERC20_HEX.to_string());
+    LAUNCHES
+        .save(deps.as_mut().storage, (&authority, internal_id), &rec)
+        .unwrap();
+    let bytes = (0..20)
+        .map(|i| u8::from_str_radix(&TEST_ERC20_HEX[2 + i * 2..4 + i * 2], 16).unwrap())
+        .collect::<Vec<u8>>();
+    deps.api
+        .addr_humanize(&CanonicalAddr::from(bytes.as_slice()))
+        .unwrap()
+        .to_string()
+}
+
 /// Stub the seeder sink's `SinkConfig` so `DeliverToSeeder` (P2-B) sees a sink
 /// genuinely configured for launch `internal_id` (matching token/pair denom).
 /// Also marks the address as a hosting contract for the old ghost-check.
@@ -1618,6 +1645,7 @@ fn renounce_denom_admin_after_delivered_emits_change_admin() {
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let seeder = deps.api.addr_make("seeder_addr").to_string();
     install_matching_sink(&mut deps, &seeder, 5);
+    let erc20_bech32 = set_erc20(&mut deps, 5);
     let keeper = deps.api.addr_make("keeper");
 
     execute(
@@ -1649,7 +1677,13 @@ fn renounce_denom_admin_after_delivered_emits_change_admin() {
             assert_eq!(type_url, MsgChangeAdmin::TYPE_URL);
             let decoded = MsgChangeAdmin::decode(value.as_slice()).unwrap();
             assert_eq!(decoded.denom, default_denom(5));
-            assert_eq!(
+            // The admin goes to the launch's OWN ERC20, never to the dead
+            // address: `verifyBurnFromPermissions` compares `MsgBurn.Sender`
+            // (which the precompile sets to the calling contract) against this
+            // field, so the dead address would foreclose every holder burn with
+            // no way back.
+            assert_eq!(decoded.new_admin, erc20_bech32);
+            assert_ne!(
                 decoded.new_admin,
                 "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49"
             );
@@ -1694,6 +1728,7 @@ fn renounce_denom_admin_burns_stranded_residual_before_change_admin() {
     let evm_authority = deps.api.addr_make("evm_authority").to_string();
     let seeder = deps.api.addr_make("seeder_addr").to_string();
     install_matching_sink(&mut deps, &seeder, 33);
+    set_erc20(&mut deps, 33);
     let keeper = deps.api.addr_make("keeper");
 
     execute(
@@ -1789,6 +1824,249 @@ fn renounce_denom_admin_rejects_unauthorized() {
 // --------------------------------------------------------------------------
 // C-M3: DeliverToSeeder refuses a ghost seeder address
 // --------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------
+// HandOverDenomAdminToErc20 — the step that makes a launch token burnable.
+//
+// `bank.go:mintBurn` turns a holder's `burn` on a `factory/...` denom into
+// `MsgBurn{ Sender: <the ERC20 contract>, BurnFromAddress: <the holder> }`, and
+// `verifyBurnFromPermissions` then requires `admin == that contract`. Leaving
+// the admin as the issuer (or rotating it to the dead address) is what makes
+// every holder burn revert `unauthorized account`.
+// --------------------------------------------------------------------------
+
+#[test]
+fn hand_over_denom_admin_sets_the_admin_to_the_paired_erc20() {
+    let mut deps = setup();
+    register_default(&mut deps, 7).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let erc20_bech32 = set_erc20(&mut deps, 7);
+    let keeper = deps.api.addr_make("keeper");
+
+    // Deliberately NOT Delivered. The launches that need remediation are spread
+    // across every status, and the only thing that matters is that this contract
+    // is still the admin.
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority: evm_authority.clone(),
+            internal_id: 7,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(res.messages.len(), 1);
+    #[allow(deprecated)]
+    match &res.messages[0].msg {
+        CosmosMsg::Stargate { type_url, value } => {
+            assert_eq!(type_url, MsgChangeAdmin::TYPE_URL);
+            let decoded = MsgChangeAdmin::decode(value.as_slice()).unwrap();
+            assert_eq!(decoded.denom, default_denom(7));
+            assert_eq!(decoded.new_admin, erc20_bech32);
+        }
+        other => panic!("expected Stargate MsgChangeAdmin, got {:?}", other),
+    }
+
+    let rec = LAUNCHES
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("evm_authority"), 7),
+        )
+        .unwrap();
+    assert!(rec.admin_renounced, "the issuer is no longer the admin");
+}
+
+#[test]
+fn hand_over_denom_admin_burns_stranded_residual_first() {
+    // Same reasoning as RenounceDenomAdmin: this is the last moment a self-burn
+    // is possible, so a residual left here would strand permanently.
+    let mut deps = setup();
+    register_default(&mut deps, 8).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    set_erc20(&mut deps, 8);
+    let keeper = deps.api.addr_make("keeper");
+
+    let stranded = Uint128::new(4_242u128);
+    let issuer_addr = mock_env().contract.address.to_string();
+    deps.querier
+        .with_balance(&[(&issuer_addr, coins(stranded.u128(), default_denom(8)))]);
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority,
+            internal_id: 8,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(res.messages.len(), 2);
+    match &res.messages[0].msg {
+        CosmosMsg::Custom(w) => match &w.msg_data {
+            InjectiveMsg::Burn { amount, .. } => {
+                assert_eq!(amount.denom, default_denom(8));
+                assert_eq!(amount.amount, stranded);
+            }
+            other => panic!("expected Burn, got {:?}", other),
+        },
+        other => panic!("expected Custom Injective Burn, got {:?}", other),
+    }
+    #[allow(deprecated)]
+    match &res.messages[1].msg {
+        CosmosMsg::Stargate { type_url, .. } => assert_eq!(type_url, MsgChangeAdmin::TYPE_URL),
+        other => panic!("expected Stargate MsgChangeAdmin, got {:?}", other),
+    }
+}
+
+#[test]
+fn hand_over_denom_admin_without_an_erc20_leaves_the_record_untouched() {
+    // The failure that matters. If the flag were set before the address was
+    // resolved, a record with no pair would be marked as handed over while no
+    // rotation happened — and `admin_renounced` is checked on the way in, so the
+    // launch could never be retried. It would look remediated and be dead.
+    let mut deps = setup();
+    register_default(&mut deps, 9).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    let keeper = deps.api.addr_make("keeper");
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority,
+            internal_id: 9,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::Erc20AddressUnknown { id: 9 }),
+        "got {:?}",
+        err
+    );
+
+    let rec = LAUNCHES
+        .load(
+            deps.as_ref().storage,
+            (&deps.api.addr_make("evm_authority"), 9),
+        )
+        .unwrap();
+    assert!(
+        !rec.admin_renounced,
+        "a failed handover must leave the admin movable, or the launch is unrecoverable"
+    );
+}
+
+#[test]
+fn hand_over_denom_admin_rejects_a_second_call() {
+    let mut deps = setup();
+    register_default(&mut deps, 10).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    set_erc20(&mut deps, 10);
+    let keeper = deps.api.addr_make("keeper");
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority: evm_authority.clone(),
+            internal_id: 10,
+        },
+    )
+    .unwrap();
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority,
+            internal_id: 10,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::DenomAdminAlreadyRenounced { id: 10 }),
+        "got {:?}",
+        err
+    );
+}
+
+#[test]
+fn hand_over_denom_admin_requires_keeper_or_admin() {
+    let mut deps = setup();
+    register_default(&mut deps, 11).unwrap();
+    let evm_authority = deps.api.addr_make("evm_authority").to_string();
+    set_erc20(&mut deps, 11);
+
+    let stranger = deps.api.addr_make("stranger");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&stranger, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority: evm_authority.clone(),
+            internal_id: 11,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::Unauthorized {}),
+        "got {:?}",
+        err
+    );
+
+    // The admin is the other authorised caller — the keeper may be lost.
+    let admin = deps.api.addr_make("admin");
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority,
+            internal_id: 11,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn hand_over_denom_admin_rejects_a_malformed_erc20_address() {
+    // MsgChangeAdmin is irreversible by anyone but the new admin, so a wrong
+    // address bricks the denom exactly the way the dead address does.
+    let mut deps = setup();
+    register_default(&mut deps, 12).unwrap();
+    let authority = deps.api.addr_make("evm_authority");
+    let mut rec = LAUNCHES
+        .load(deps.as_ref().storage, (&authority, 12))
+        .unwrap();
+    rec.erc20_address = Some("0xdeadbeef".to_string());
+    LAUNCHES
+        .save(deps.as_mut().storage, (&authority, 12), &rec)
+        .unwrap();
+
+    let keeper = deps.api.addr_make("keeper");
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&keeper, &[]),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority: authority.to_string(),
+            internal_id: 12,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::InvalidErc20Address { .. }),
+        "got {:?}",
+        err
+    );
+}
 
 #[test]
 fn deliver_to_seeder_rejects_ghost_seeder_addr() {

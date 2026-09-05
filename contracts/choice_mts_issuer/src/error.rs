@@ -214,4 +214,14 @@ pub enum ContractError {
 
     #[error("Issuer is paused; keeper-initiated RefundFailedLaunch is halted (the admin may still refund past the deadline)")]
     KeeperRefundPaused {},
+
+    #[error(
+        "launch {id} has no paired ERC20 recorded, so there is no address to hand the denom admin to. `erc20_address` is captured in the MsgCreateTokenPair reply and is always populated once the launch reached Registered"
+    )]
+    Erc20AddressUnknown { id: u64 },
+
+    #[error(
+        "recorded erc20_address `{got}` is not a 20-byte 0x-prefixed hex address ({reason}) — refusing to derive a bech32 admin from it, because MsgChangeAdmin to a wrong address is irreversible"
+    )]
+    InvalidErc20Address { got: String, reason: String },
 }

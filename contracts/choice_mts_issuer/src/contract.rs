@@ -98,10 +98,19 @@ const MAX_QUERY_LIMIT: u32 = 100;
 /// matching `LaunchRecord`.
 const REPLY_CREATE_TOKEN_PAIR: u64 = 1;
 
-/// 20-zero-byte bech32 burn address. `MsgChangeAdmin` to this address is the
-/// canonical tokenfactory-admin "renounce" on Injective (an empty `new_admin`
-/// is chain-rejected). See `feedback_inj_tokenfactory_admin_revoke_burn_bech32`
-/// and finding C-M2.
+/// 20-zero-byte bech32 burn address. Conventionally the tokenfactory-admin
+/// "renounce" target on Injective (an empty `new_admin` is chain-rejected).
+///
+/// ⛔ **No longer used as a renounce target here, and it must not become one
+/// again.** The burn path compares `MsgBurn.Sender` — which the bank precompile
+/// sets to the calling ERC20 — against the denom admin, so parking the admin
+/// here makes every holder burn revert `unauthorized account` with no way back:
+/// `MsgChangeAdmin` requires the current admin's signature. Nine mainnet launch
+/// denoms are stranded exactly that way. The admin now goes to the launch's own
+/// ERC20 instead; see `HandOverDenomAdminToErc20`.
+///
+/// It survives as a REJECTION value: an issuer configured with this as its
+/// `admin` would be unadministrable, so instantiate refuses it below.
 const DEAD_TOKENFACTORY_ADMIN: &str = "inj1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqe2hm49";
 
 /// Payload carried into the `MsgCreateTokenPair` reply so the handler can
@@ -144,8 +153,8 @@ pub fn instantiate(
     // The admin governs the issuer via a two-step handoff (UpdateAdmin/
     // AcceptAdmin). Setting it to the tokenfactory dead-burn address at deploy
     // would permanently brick governance (no key can ever AcceptAdmin), so
-    // reject the obvious foot-gun. Rotation to the dead address is still
-    // possible later only through the denom-admin renounce path, not here.
+    // reject the obvious foot-gun. Since 1.2.0 nothing in this contract rotates
+    // anything to the dead address at all — see the constant's own doc.
     if admin.as_str() == DEAD_TOKENFACTORY_ADMIN {
         return Err(ContractError::AdminIsDeadAddress {});
     }
@@ -345,6 +354,10 @@ pub fn execute(
             evm_authority,
             internal_id,
         } => execute_renounce_denom_admin(deps, env, info, evm_authority, internal_id),
+        ExecuteMsg::HandOverDenomAdminToErc20 {
+            evm_authority,
+            internal_id,
+        } => execute_hand_over_denom_admin_to_erc20(deps, env, info, evm_authority, internal_id),
         ExecuteMsg::UpdateAdmin { new_admin } => execute_update_admin(deps, info, new_admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         ExecuteMsg::UpdateKeeper { new_keeper } => execute_update_keeper(deps, info, new_keeper),
@@ -1204,11 +1217,27 @@ fn execute_renounce_denom_admin(
         ));
     }
 
+    // The admin goes to the launch's OWN paired ERC20, not to the dead address.
+    //
+    // Both choices relinquish this contract's mint/admin-burn powers, which is
+    // all C-M2 ever asked for. The difference is what the CHAIN can still do
+    // afterwards: the burn path needs `admin == the ERC20 contract`
+    // (`verifyBurnFromPermissions`), so rotating to the dead address does not
+    // merely fail to help — it permanently forecloses every holder burn, with no
+    // way back, because `MsgChangeAdmin` requires the current admin to sign.
+    // Nine mainnet launch denoms are already in that state.
+    //
+    // Handing it to the ERC20 keeps the mint gate just as closed: the only
+    // account that can drive `MsgMint` is then the contract itself, reachable
+    // only through its `Ownable`-gated `mint`, whose owner is this contract's
+    // 20-byte EVM mirror — an address with no private key and no wasm→EVM path
+    // to act through. See `HandOverDenomAdminToErc20`.
+    let new_admin = erc20_admin_bech32(deps.as_ref(), &record)?;
     messages.push(
         MsgChangeAdmin {
             sender: env.contract.address.to_string(),
             denom: record.denom.clone(),
-            new_admin: DEAD_TOKENFACTORY_ADMIN.to_string(),
+            new_admin: new_admin.to_string(),
         }
         .into(),
     );
@@ -1220,7 +1249,128 @@ fn execute_renounce_denom_admin(
         .add_attribute("internal_id", internal_id.to_string())
         .add_attribute("denom", record.denom)
         .add_attribute("stranded_burned", residual)
-        .add_attribute("new_admin", DEAD_TOKENFACTORY_ADMIN))
+        .add_attribute("new_admin", new_admin))
+}
+
+/// Resolve a launch record's paired ERC20 into the bech32 address the
+/// tokenfactory will compare `MsgBurn.Sender` against.
+///
+/// The EVM address and the Cosmos address are the same 20 bytes in two
+/// encodings — `bank.go` builds the burn message with
+/// `sdk.AccAddress(calledAddress.Bytes()).String()` — so this is
+/// `addr_humanize` over the recorded hex, and nothing cleverer.
+///
+/// Validated rather than trusted: `MsgChangeAdmin` cannot be undone by anyone
+/// but the new admin, so a malformed address here would brick the denom exactly
+/// the way the dead address does.
+fn erc20_admin_bech32(
+    deps: Deps<InjectiveQueryWrapper>,
+    record: &LaunchRecord,
+) -> Result<Addr, ContractError> {
+    let raw = record
+        .erc20_address
+        .as_deref()
+        .ok_or(ContractError::Erc20AddressUnknown {
+            id: record.internal_id,
+        })?;
+    let hex = raw.strip_prefix("0x").unwrap_or(raw);
+    if hex.len() != 40 {
+        return Err(ContractError::InvalidErc20Address {
+            got: raw.to_string(),
+            reason: format!("expected 40 hex digits, got {}", hex.len()),
+        });
+    }
+    let mut bytes = [0u8; 20];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| {
+            ContractError::InvalidErc20Address {
+                got: raw.to_string(),
+                reason: "non-hex digit".to_string(),
+            }
+        })?;
+    }
+    deps.api
+        .addr_humanize(&CanonicalAddr::from(bytes.as_slice()))
+        .map_err(ContractError::Std)
+}
+
+/// Hand the denom's tokenfactory admin to its own paired ERC20 — the step that
+/// makes a launch token burnable by its holders. See
+/// [`crate::msg::ExecuteMsg::HandOverDenomAdminToErc20`] for the mechanism.
+///
+/// This is the REMEDIATION entry point, so unlike `RenounceDenomAdmin` it is
+/// deliberately not gated on `Delivered`: the launches that need it are spread
+/// across every status, and the only thing that actually matters is that this
+/// contract is still the admin (`!admin_renounced`). Once it is not, nothing
+/// can help — `MsgChangeAdmin` requires the current admin's signature.
+///
+/// Sets the same `admin_renounced` flag, because the terminal property is
+/// identical: after this the issuer can neither `MsgMint` nor admin-`MsgBurn`.
+fn execute_hand_over_denom_admin_to_erc20(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
+    info: MessageInfo,
+    evm_authority: String,
+    internal_id: u64,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.keeper && info.sender != config.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    let evm_authority = deps.api.addr_validate(&evm_authority)?;
+    let mut record = LAUNCHES
+        .may_load(deps.storage, (&evm_authority, internal_id))?
+        .ok_or(ContractError::LaunchNotFound { id: internal_id })?;
+
+    if record.admin_renounced {
+        return Err(ContractError::DenomAdminAlreadyRenounced { id: internal_id });
+    }
+
+    // Resolve BEFORE mutating: a record with no (or a malformed) erc20_address
+    // must leave the launch exactly as it was, still holding a movable admin,
+    // rather than burning the flag on a rotation that never happened.
+    let new_admin = erc20_admin_bech32(deps.as_ref(), &record)?;
+
+    record.admin_renounced = true;
+    LAUNCHES.save(deps.storage, (&evm_authority, internal_id), &record)?;
+
+    let mut messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = Vec::new();
+
+    // Same sweep as `RenounceDenomAdmin`, for the same reason: this is the last
+    // moment a self-burn is possible, and a residual left here after the admin
+    // moves is stranded permanently. Zero on every ordinary launch.
+    let residual = deps
+        .querier
+        .query_balance(env.contract.address.as_str(), &record.denom)?
+        .amount;
+    if !residual.is_zero() {
+        messages.push(injective_cosmwasm::msg::create_burn_tokens_msg(
+            env.contract.address.clone(),
+            Coin {
+                denom: record.denom.clone(),
+                amount: residual,
+            },
+        ));
+    }
+
+    messages.push(
+        MsgChangeAdmin {
+            sender: env.contract.address.to_string(),
+            denom: record.denom.clone(),
+            new_admin: new_admin.to_string(),
+        }
+        .into(),
+    );
+
+    Ok(Response::new()
+        .add_messages(messages)
+        .add_attribute("action", "hand_over_denom_admin_to_erc20")
+        .add_attribute("evm_authority", evm_authority)
+        .add_attribute("internal_id", internal_id.to_string())
+        .add_attribute("denom", record.denom)
+        .add_attribute("stranded_burned", residual)
+        .add_attribute("new_admin", new_admin))
 }
 
 /// Step 1 of the two-step admin rotation: park `new_admin` as pending. The

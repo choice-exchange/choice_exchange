@@ -18,7 +18,7 @@
   ],
   "properties": {
     "admin_renounced": {
-      "description": "`true` once `RenounceDenomAdmin` has relinquished this contract's tokenfactory admin over the denom (finding C-M2).",
+      "description": "`true` once `RenounceDenomAdmin` or `HandOverDenomAdminToErc20` has relinquished this contract's tokenfactory admin over the denom (finding C-M2). Both set it: the terminal property — this contract can no longer mint or admin-burn — is the same either way.",
       "type": "boolean"
     },
     "choice_factory": {

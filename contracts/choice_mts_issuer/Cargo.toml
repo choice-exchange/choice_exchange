@@ -1,6 +1,6 @@
 [package]
 name = "choice-mts-issuer"
-version = "1.1.0"
+version = "1.2.0"
 authors = ["Dan Van Eijck"]
 edition = "2021"
 description = "Generic MultiVM Token Standard issuer + reserve custodian. Per-dApp instantiated; pairs a tokenfactory denom to an auto-deployed MintBurnBankERC20 and delivers the CW-side reserve to a pool seeder at graduation."
