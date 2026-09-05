@@ -149,11 +149,19 @@ pub struct LaunchRecord {
     /// is registering decimals separately. Stored for audit / dashboards;
     /// not used to gate any downstream action.
     pub choice_factory: Option<Addr>,
-    /// `true` once `RenounceDenomAdmin` has rotated this denom's tokenfactory
-    /// admin to the burn-address convention, relinquishing the issuer's
-    /// `MsgMint` / admin-`MsgBurn`-from powers over the denom. Audit + a guard
-    /// against a double-renounce (the second `MsgChangeAdmin` would revert
-    /// anyway, but we reject early with a clear error). See finding C-M2.
+    /// `true` once this denom's tokenfactory admin has been rotated AWAY from
+    /// this contract — by `RenounceDenomAdmin` or `HandOverDenomAdminToErc20`,
+    /// which since 1.2.0 both target the launch's paired ERC20 — relinquishing
+    /// the issuer's `MsgMint` / admin-`MsgBurn`-from powers over the denom.
+    /// Audit + a guard against a double-rotation (the second `MsgChangeAdmin`
+    /// would revert anyway, but we reject early with a clear error). See finding
+    /// C-M2.
+    ///
+    /// 🔴 It is also the "can this still be remediated?" flag: once the admin
+    /// has moved, only the NEW admin can move it again, so a launch that was
+    /// rotated to the dead address by a pre-1.2.0 build is permanently
+    /// unburnable. That is why the handover resolves the ERC20 address BEFORE
+    /// setting this.
     pub admin_renounced: bool,
     /// Audit M-3: snapshot of [`Config::verify_seeder_derivation`] at the moment
     /// this launch was registered — i.e. whether the sink-address (and CLMM

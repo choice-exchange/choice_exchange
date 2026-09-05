@@ -181,17 +181,69 @@ pub enum ExecuteMsg {
     },
 
     /// Keeper-or-admin, post-`Delivered`: relinquish this contract's
-    /// tokenfactory admin over the launch denom by rotating the admin to the
-    /// 20-zero-byte burn-address convention via `MsgChangeAdmin` (finding
+    /// tokenfactory admin over the launch denom via `MsgChangeAdmin` (finding
     /// C-M2). After this the issuer can no longer `MsgMint` new supply or
     /// admin-`MsgBurn`-from holders for the denom.
     ///
-    /// NOTE: this renounces the *tokenfactory* admin only. The auto-deployed
+    /// 🔴 **As of 1.2.0 the admin goes to the launch's own paired ERC20, not to
+    /// the 20-zero-byte burn address.** Both relinquish this contract's powers,
+    /// which is all C-M2 asked for, but the dead address ALSO forecloses every
+    /// holder burn forever — `verifyBurnFromPermissions` requires
+    /// `admin == the ERC20 contract`, and `MsgChangeAdmin` needs the current
+    /// admin to sign, so there is no way back. Nine mainnet launch denoms are
+    /// already stranded that way. See
+    /// [`ExecuteMsg::HandOverDenomAdminToErc20`], which this now mirrors.
+    ///
+    /// NOTE: this relinquishes the *tokenfactory* admin only. The auto-deployed
     /// `MintBurnBankERC20` owner is the issuer's lower-20-byte EVM address; a
     /// CosmWasm contract cannot sign the EVM tx to renounce that ERC20
-    /// ownership, so that step must be performed separately by the issuer's
-    /// controller on the EVM side (deployment runbook item).
+    /// ownership. That is harmless here — the owner is an address with no
+    /// private key, and there is no wasm→EVM call path on Injective for this
+    /// contract to reach `mint` through — but a keeper EOA issuing its own
+    /// tokens MUST renounce, because then the owner is a real signer.
     RenounceDenomAdmin {
+        evm_authority: String,
+        internal_id: u64,
+    },
+
+    /// Keeper-or-admin: hand this denom's tokenfactory admin to its OWN paired
+    /// `MintBurnBankERC20`, which is what makes the token burnable by its
+    /// holders.
+    ///
+    /// ## Why this exists
+    ///
+    /// `evm/precompiles/bank/bank.go:mintBurn` turns a holder's `burn(uint256)`
+    /// on a `factory/…`-backed ERC20 into
+    /// `MsgBurn{ Sender: <the ERC20 contract>, BurnFromAddress: <the holder> }`.
+    /// `Sender != BurnFrom`, so it is not a self-burn, so
+    /// `tokenfactory/keeper/burn_permissions.go:verifyBurnFromPermissions`
+    /// demands BOTH `AdminBurnAllowed == true` AND
+    /// **`admin == the ERC20 contract`**. `RegisterLaunch` sets
+    /// `allow_admin_burn = true` but leaves the admin as THIS CONTRACT, so
+    /// every launch token issued to date reverts `unauthorized account` on a
+    /// holder burn — and, by the same asymmetry, on `mint`.
+    ///
+    /// This message sends the missing `MsgChangeAdmin(denom,
+    /// bech32(erc20_address))`. Measured on testnet 2026-09-06: with it, a
+    /// holder burn reduces real bank supply; without it, nothing can.
+    ///
+    /// ## What it costs
+    ///
+    /// After the rotation this contract is no longer the denom admin, so it can
+    /// no longer `MsgMint` or admin-`MsgBurn` — the same terminal property
+    /// [`ExecuteMsg::RenounceDenomAdmin`] was written to guarantee, which is why
+    /// both set `admin_renounced`. The mint gate moves to the ERC20's `Ownable`
+    /// owner, which is this contract's own 20-byte EVM mirror: an address with
+    /// no private key, and unreachable from CosmWasm because Injective has no
+    /// wasm→EVM call path (the precompile set is bank / bindings / exchange /
+    /// oracle / staking). So mint stays dead, and burn opens.
+    ///
+    /// ⛔ **Only available while this contract is still the admin.** Once the
+    /// admin is the dead address, `MsgChangeAdmin` needs a signature nobody
+    /// holds and the denom is permanently unburnable. Any residual balance is
+    /// burnt first, exactly as `RenounceDenomAdmin` does, because that is also
+    /// the last moment a self-burn is possible.
+    HandOverDenomAdminToErc20 {
         evm_authority: String,
         internal_id: u64,
     },
@@ -313,8 +365,10 @@ pub struct LaunchResponse {
     /// `AddNativeTokenDecimals` call to a `choice_factory`. `None` if the
     /// consumer dApp opted out and is registering decimals separately.
     pub choice_factory: Option<String>,
-    /// `true` once `RenounceDenomAdmin` has relinquished this contract's
-    /// tokenfactory admin over the denom (finding C-M2).
+    /// `true` once `RenounceDenomAdmin` or `HandOverDenomAdminToErc20` has
+    /// relinquished this contract's tokenfactory admin over the denom (finding
+    /// C-M2). Both set it: the terminal property — this contract can no longer
+    /// mint or admin-burn — is the same either way.
     pub admin_renounced: bool,
 }
 
